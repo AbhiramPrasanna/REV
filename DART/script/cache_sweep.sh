@@ -58,7 +58,7 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 OUT="$DART_DIR/cache_sweep_${STAMP}.csv"
 LOGDIR="$DART_DIR/sweep_logs_${STAMP}"
 mkdir -p "$LOGDIR"
-echo "dist,op,cache_total_mb,th_mb_per_thread,threads,key_count,op_count,throughput_mops,latency_us" > "$OUT"
+echo "dist,op,cache_total_mb,th_bytes_per_thread,threads,key_count,op_count,throughput_mops,latency_us" > "$OUT"
 
 # ------------------------------ helpers ------------------------------------
 strip_ansi() { sed -r 's/\x1B\[[0-9;?]*[A-Za-z]//g'; }
@@ -77,8 +77,9 @@ run_one() {
     local tag="${dist}_${op}_${cache}MB"
     local mlog="$LOGDIR/monitor_${tag}.log"
 
-    # --th_mb is per-thread; the sweep value is TOTAL -> divide (min 1 MiB)
-    local th_mb=$(( cache / THREADS )); [ "$th_mb" -lt 1 ] && th_mb=1
+    # The cache is per-thread; the sweep value is TOTAL. Use --th_b (exact bytes)
+    # rather than --th_mb so small totals don't truncate to 0/1 MiB across threads.
+    local th_b=$(( cache * 1048576 / THREADS ))
 
     local uniform theta read scan
     if [ "$dist" = "uniform" ]; then uniform=1; else uniform=0; fi
@@ -86,7 +87,7 @@ run_one() {
     if [ "$op" = "lookup" ]; then read=100; scan=0; else read=0; scan=100; fi
 
     echo "================================================================"
-    echo ">>> $tag  (th_mb=${th_mb}/thread x ${THREADS} = ~${cache}MB total)"
+    echo ">>> $tag  (th_b=${th_b}/thread x ${THREADS} = ~${cache}MB total)"
     echo "================================================================"
 
     teardown                       # clear stragglers from a prior failed run
@@ -97,7 +98,7 @@ run_one() {
         --monitor_addr="$MONITOR_BIND" \
         --memory_num=$MEMORY_NUM --compute_num=$COMPUTE_NUM \
         --load_thread_num=$THREADS --run_thread_num=$THREADS --coro_num=$CORO \
-        --mem_mb=$MEM_MB --th_mb=$th_mb \
+        --mem_mb=$MEM_MB --th_b=$th_b \
         --test_func=$TEST_FUNC --bucket=$BUCKET \
         --run_max_request=$OP_COUNT --payload_byte=$VALUE_LEN \
         --mb_read_pct=$read --mb_scan_pct=$scan \
@@ -128,7 +129,7 @@ run_one() {
     local thp lat
     thp=$(strip_ansi < "$mlog" | grep -oE 'Total throughput = [0-9.eE+-]+' | tail -1 | grep -oE '[0-9.eE+-]+$')
     lat=$(strip_ansi < "$mlog" | grep -oE 'Average latency = [0-9.eE+-]+'  | tail -1 | grep -oE '[0-9.eE+-]+$')
-    echo "$dist,$op,$cache,$th_mb,$THREADS,$KEY_COUNT,$OP_COUNT,${thp:-NA},${lat:-NA}" >> "$OUT"
+    echo "$dist,$op,$cache,$th_b,$THREADS,$KEY_COUNT,$OP_COUNT,${thp:-NA},${lat:-NA}" >> "$OUT"
     echo "    -> throughput=${thp:-NA} MOps  latency=${lat:-NA} us   (log: $mlog)"
 
     teardown                       # ensure a clean slate for the next config
