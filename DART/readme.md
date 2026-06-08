@@ -36,6 +36,10 @@ cmake --build build
 
 ## Run
 
+> **For the complete, step-by-step execution + cache-sweep guide (NIC/port/GID
+> configuration, troubleshooting, reading results), see [RUNNING.md](RUNNING.md).**
+> The summary below is the quick version.
+
 > **DART has no memcached.** Coordination is done by the `monitor` process over
 > TCP. The whole cluster config is just two things:
 > 1. `--monitor_addr` — host:port every binary uses to reach the monitor.
