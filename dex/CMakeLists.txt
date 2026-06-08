@@ -20,7 +20,11 @@ endif()
 set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -std=c++17")
 
 # Link Options
-set(LINKS_FLAGS "-lcityhash -lboost_system -lboost_coroutine -lpthread -libverbs -lmemcached -ltbb -lnuma")
+# NOTE: Boost.System is header-only since Boost 1.69, and recent distros (with
+# new GCC/Boost) no longer ship a separate libboost_system.so -> '-lboost_system'
+# fails with "cannot find -lboost_system". Its symbols are header-only, so it is
+# simply dropped here. (If your older toolchain still needs it, add it back.)
+set(LINKS_FLAGS "-lcityhash -lboost_coroutine -lpthread -libverbs -lmemcached -ltbb -lnuma")
 
 # option (SANITIZE "Turn on sanitization" ON)
 # if (SANITIZE)
