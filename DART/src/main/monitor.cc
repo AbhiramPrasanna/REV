@@ -28,6 +28,19 @@ DEFINE_string(workload_prefix, "./workload/split/", "path of workload dir");
 DEFINE_string(workload_load, "please_specify", "name of load-workload file");
 DEFINE_string(workload_run, "please_specify", "name of run-workload file");
 
+// ---- microbench (test_func=1): in-memory working set, no workload files ----
+// op_count reuses --run_max_request; value_len reuses --payload_byte;
+// the compute-side cache size reuses --th_mb (see cache_sweep.sh).
+DEFINE_uint64(mb_read_pct,    100, "microbench: %% point lookups");
+DEFINE_uint64(mb_insert_pct,    0, "microbench: %% inserts (fresh keys)");
+DEFINE_uint64(mb_update_pct,    0, "microbench: %% updates");
+DEFINE_uint64(mb_scan_pct,      0, "microbench: %% range scans");
+DEFINE_uint64(mb_remove_pct,    0, "microbench: %% deletes");
+DEFINE_uint64(mb_uniform,       1, "microbench: 1=uniform, 0=zipfian");
+DEFINE_uint64(mb_theta_x100,   99, "microbench: zipf theta * 100 (ignored if uniform)");
+DEFINE_uint64(mb_key_count, 30000000, "microbench: distinct keys = working set");
+DEFINE_uint64(mb_scan_len,    100, "microbench: keys returned per range scan");
+
 DEFINE_uint64(mem_mb, 1024, "MiB of memory buff size");
 DEFINE_uint64(th_mb, 0, "MiB of maximum memory per thread");
 DEFINE_uint64(th_kb, 0, "KiB of maximum memory per thread");
@@ -132,6 +145,17 @@ int main(int argc, char** argv) {
             result = sock.sock_send_u32(FLAGS_epoch) & result;
             result = sock.sock_send_u32(FLAGS_percent) & result;
             result = sock.sock_send_u32(FLAGS_bucket) & result;
+
+            // microbench params (compute reads these in the same order)
+            result = sock.sock_send_u32(FLAGS_mb_read_pct) & result;
+            result = sock.sock_send_u32(FLAGS_mb_insert_pct) & result;
+            result = sock.sock_send_u32(FLAGS_mb_update_pct) & result;
+            result = sock.sock_send_u32(FLAGS_mb_scan_pct) & result;
+            result = sock.sock_send_u32(FLAGS_mb_remove_pct) & result;
+            result = sock.sock_send_u32(FLAGS_mb_uniform) & result;
+            result = sock.sock_send_u32(FLAGS_mb_theta_x100) & result;
+            result = sock.sock_send_u32(FLAGS_mb_key_count) & result;
+            result = sock.sock_send_u32(FLAGS_mb_scan_len) & result;
 
             uint32_t size_1 = FLAGS_workload_prefix.size(), size_2 = FLAGS_workload_load.size(), size_3 = FLAGS_workload_run.size();
             result = sock.sock_send_u32(size_1) & result;
@@ -312,7 +336,8 @@ int main(int argc, char** argv) {
     }
 
     // if run, first load & prepare (600 700 800 900)
-    if (FLAGS_test_func == 0) {
+    // test_func 0 = YCSB run, 1 = in-memory microbench; both use the load phase.
+    if (FLAGS_test_func == 0 || FLAGS_test_func == 1) {
         for (int c = 0; c < FLAGS_memory_num + FLAGS_compute_num; ++c) {
             if (all_list[c].type != COMPUTE_TYPE) continue;
             auto& sock = monitor_server.get_socket_connetion(c);

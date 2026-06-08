@@ -8,6 +8,12 @@ void Benchmark::prepare_workload_file(FileLoader& file_loader, uint64_t part, ui
     this->end_record = file_loader.get_part_iter_end(part, all_parts);
 }
 
+void Benchmark::prepare_workload(FileLoader::records::iterator begin,
+                                 FileLoader::records::iterator end) {
+    this->start_record = this->now_record = begin;
+    this->end_record = end;
+}
+
 void Benchmark::start_benchmark() {
 
     for (this->now_record = this->start_record; this->now_record != this->end_record; ++this->now_record) {

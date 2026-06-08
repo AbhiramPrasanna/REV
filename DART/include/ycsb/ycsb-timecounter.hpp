@@ -47,6 +47,11 @@ class Benchmark {
     virtual void register_remove(voidfunc<span>);
 
     void prepare_workload_file(FileLoader& file_loader, uint64_t part = 1, uint64_t all_parts = 1);
+    // Feed a record slice directly (e.g. from the in-memory microbench generator),
+    // bypassing FileLoader. begin/end are iterators into a records vector whose
+    // backing storage (keys/values) must outlive this benchmark run.
+    void prepare_workload(FileLoader::records::iterator begin,
+                          FileLoader::records::iterator end);
     void start_benchmark();
     uint64_t get_event_count() const noexcept;
     uint64_t get_event_count_scan_use_multi() const noexcept;

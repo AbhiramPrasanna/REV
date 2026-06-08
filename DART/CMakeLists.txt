@@ -10,6 +10,7 @@ find_package(Boost REQUIRED COMPONENTS context coroutine)
 
 include_directories(./include)
 include_directories(./src-impl)
+include_directories(./test)  # dart_microbench/workload_gen.h (test_func=1)
 
 set(gflags_dir ${CMAKE_SOURCE_DIR}/gflags)
 add_subdirectory(${gflags_dir})

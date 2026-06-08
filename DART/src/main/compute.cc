@@ -3,6 +3,7 @@
 #include <string>
 #include <thread>
 #include <random>
+#include <algorithm>
 
 #include "boost/coroutine2/all.hpp"
 
@@ -14,6 +15,8 @@
 #include "rdma/rdma.hpp"
 #include "ycsb/ycsb.hpp"
 #include "prheart/prheart.hpp"
+
+#include "dart_microbench/workload_gen.h"  // in-memory working-set generator (test_func=1)
 
 // some factors here
 // #define LEVEL_COUNT
@@ -306,6 +309,145 @@ void test_ycsb_run(
 
 }
 
+
+// ===================== in-memory microbench (test_func=1) =====================
+// Built once on the main thread; shared (read-only) across worker threads. Spans
+// inside the records point into the generator's buffer, so it must outlive the run.
+dart_bench::WorkloadGenerator* g_gen = nullptr;
+
+// Same body as test_ycsb_load, but the per-thread workload is a slice of an
+// in-memory records vector instead of a parsed YCSB file.
+static void microbench_core(
+    uint32_t memory_machine_num,
+    uint32_t compute_machine_num,
+    uint32_t total_thread_num,
+    uint32_t used_thread_num,
+    uint32_t coro_num,
+    uint32_t compute_index,
+    uint32_t thread_index,
+    uint32_t payload_byte,
+    uint32_t bucket_num,
+    RDMA::RDMAConnection* memory_connections,
+    counter::TimeCounter& time_counter,
+    std::vector<RACE::Client*> race_cli,
+    std::vector<RACE::rdma_client*> rdma_cli,
+    YCSB::FileLoader::records& recs
+) {
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    CPU_SET(thread_index * FLAGS_numa_node_total_num + FLAGS_numa_node_group, &mask);
+    sched_setaffinity(0, sizeof(mask), &mask);
+
+    DM::DisaggregatedMemoryController dmc(
+        memory_connections,
+        memory_machine_num, compute_machine_num, total_thread_num,
+        compute_index, thread_index
+    );
+
+    if (!dmc.check_local_memory()) {
+        log_error << "local memory check error" << std::endl;
+        return;
+    }
+
+    prheart::PrheartTree prheart_tree(
+        &dmc,
+        dmc.get_root_start_fptr(),
+        dmc.get_alloc_start_fptr(), dmc.get_alloc_end_fptr(),
+        dmc.get_local_start_ptr(),
+        dmc.get_local_start_ptr() + dmc.get_local_size(),
+        bucket_num, NULL,
+        race_cli,
+        rdma_cli,
+        memory_machine_num
+    );
+
+    rtt = access_size = 0;
+
+    if (alloced_before[thread_index]) {
+        prheart_tree.alloc_now_fptr = alloc_now_pos[thread_index];
+    }
+
+    auto search_it = [&](span key, str& result) -> void { prheart_tree.search(key); };
+    auto insert_it = [&](span key, span value) -> void { prheart_tree.insert(key, value); };
+    auto update_it = [&](span key, span value) -> void { prheart_tree.update(key, value); };
+    auto scan_it = [&](span start_key, span end_key, vec<str>& result_vec) -> void {
+        prheart_tree.scan(start_key, end_key, result_vec);
+    };
+    auto remove_it = [&](span key) -> void { prheart_tree.remove(key); };
+
+    YCSB::Benchmark ycsb;
+    ycsb.register_read(search_it);
+    ycsb.register_insert(insert_it);
+    ycsb.register_update(update_it);
+    ycsb.register_scan(scan_it);
+    ycsb.register_remove(remove_it);
+
+    // contiguous per-thread slice (matches FileLoader::get_part_*)
+    uint64_t total = recs.size();
+    uint64_t per   = (total + used_thread_num - 1) / used_thread_num;
+    uint64_t s = std::min<uint64_t>(per * thread_index, total);
+    uint64_t e = std::min<uint64_t>(per * (thread_index + 1), total);
+    ycsb.prepare_workload(recs.begin() + s, recs.begin() + e);
+
+    if (rdma_cli.size() == memory_machine_num) {
+        for (int i = 0; i < memory_machine_num; ++i) {
+            if (rdma_cli[i])
+                rdma_cli[i]->run(race_cli[i]->start(used_thread_num));
+        }
+    }
+
+    time_counter.reset_time_counter();
+    time_counter.start();
+
+    ycsb.start_benchmark();
+
+    alloc_now_pos[thread_index] = prheart_tree.alloc_now_fptr;
+    alloced_before[thread_index] = true;
+
+    time_counter.stop();
+    time_counter.add_event_count(ycsb.get_event_count());
+    time_counter.set_rtt_count(rtt);
+    time_counter.set_band_count(access_size);
+
+    if (rdma_cli.size() == memory_machine_num) {
+        for (int i = 0; i < memory_machine_num; ++i) {
+            if (rdma_cli[i])
+                rdma_cli[i]->run(race_cli[i]->stop());
+        }
+    }
+}
+
+// fnType wrappers (file_loader args are ignored; the working set comes from g_gen).
+void test_microbench_load(
+    uint32_t memory_machine_num, uint32_t compute_machine_num,
+    uint32_t total_thread_num, uint32_t used_thread_num, uint32_t coro_num,
+    uint32_t compute_index, uint32_t thread_index,
+    uint32_t payload_byte, uint32_t epoch_num, uint32_t percent_num, uint32_t bucket_num,
+    RDMA::RDMAConnection* memory_connections, counter::TimeCounter& time_counter,
+    YCSB::FileLoader& file_loader_load, YCSB::FileLoader& file_loader_run,
+    std::vector<RACE::Client*> race_cli, std::vector<RACE::rdma_client*> rdma_cli
+) {
+    microbench_core(memory_machine_num, compute_machine_num, total_thread_num,
+                    used_thread_num, coro_num, compute_index, thread_index,
+                    payload_byte, bucket_num, memory_connections, time_counter,
+                    race_cli, rdma_cli, g_gen->load_records());
+}
+
+void test_microbench_run(
+    uint32_t memory_machine_num, uint32_t compute_machine_num,
+    uint32_t total_thread_num, uint32_t used_thread_num, uint32_t coro_num,
+    uint32_t compute_index, uint32_t thread_index,
+    uint32_t payload_byte, uint32_t epoch_num, uint32_t percent_num, uint32_t bucket_num,
+    RDMA::RDMAConnection* memory_connections, counter::TimeCounter& time_counter,
+    YCSB::FileLoader& file_loader_load, YCSB::FileLoader& file_loader_run,
+    std::vector<RACE::Client*> race_cli, std::vector<RACE::rdma_client*> rdma_cli
+) {
+    microbench_core(memory_machine_num, compute_machine_num, total_thread_num,
+                    used_thread_num, coro_num, compute_index, thread_index,
+                    payload_byte, bucket_num, memory_connections, time_counter,
+                    race_cli, rdma_cli, g_gen->run_records());
+}
+
 void create_skip_table(
     uint32_t memory_machine_num,
     uint32_t compute_machine_num,
@@ -437,6 +579,8 @@ int main(int argc, char** argv) {
     // get permanent compute machine index
     uint32_t memory_machine_num, compute_machine_num, load_thread_num, run_thread_num, thread_num_per_compute, coro_num, run_max_request, thread_size_byte, com_ind;
     uint32_t test_func_num, payload_byte, epoch_num, percent_num, bucket_num;
+    uint32_t mb_read_pct, mb_insert_pct, mb_update_pct, mb_scan_pct, mb_remove_pct,
+             mb_uniform, mb_theta_x100, mb_key_count, mb_scan_len;
     str workload_load_string, workload_run_string;
     result = sock_conn.sock_send_u32(1);
     result = sock_conn.sock_read_u32(memory_machine_num);
@@ -451,7 +595,18 @@ int main(int argc, char** argv) {
     result = sock_conn.sock_read_u32(epoch_num);
     result = sock_conn.sock_read_u32(percent_num);
     result = sock_conn.sock_read_u32(bucket_num);
+    // microbench params (same order the monitor sends them)
+    result = sock_conn.sock_read_u32(mb_read_pct);
+    result = sock_conn.sock_read_u32(mb_insert_pct);
+    result = sock_conn.sock_read_u32(mb_update_pct);
+    result = sock_conn.sock_read_u32(mb_scan_pct);
+    result = sock_conn.sock_read_u32(mb_remove_pct);
+    result = sock_conn.sock_read_u32(mb_uniform);
+    result = sock_conn.sock_read_u32(mb_theta_x100);
+    result = sock_conn.sock_read_u32(mb_key_count);
+    result = sock_conn.sock_read_u32(mb_scan_len);
     thread_num_per_compute = std::max(load_thread_num, run_thread_num);
+    bool is_microbench = (test_func_num == 1);
 
     uint32_t size_1, size_2, size_3;
     result = sock_conn.sock_read_u32(size_1) & result;
@@ -480,6 +635,7 @@ int main(int argc, char** argv) {
     vec<viw> file_path_result;
     YCSB::split(workload_load_string, file_path_result, '/');
     is_email = (file_path_result.back()[0] == 'm');
+    if (is_microbench) is_email = false;  // microbench keys are u64, no workload file
     log_info << "is_email = " << is_email << std::endl;
 
     // create connection for skip table
@@ -527,20 +683,44 @@ int main(int argc, char** argv) {
 #endif
     
     // choose the test function
+    //   index 0 = YCSB (workload files), 1 = in-memory microbench (generator)
     fnType* test_func_list[] = {
-    test_ycsb_run
+    test_ycsb_run,
+    test_microbench_run
     };
     fnType* test_func = test_func_list[test_func_num];
 
-    // file loader
+    // file loader (YCSB path only)
     YCSB::FileLoader file_loader_load, file_loader_run;
-    if (
-        test_func == test_ycsb_run
-    ) {
+    if (test_func == test_ycsb_run) {
         file_loader_load.load_from_file(workload_load_string);
         file_loader_run.load_from_file(workload_run_string, run_max_request);
         log_info << "workload_load_string: " << workload_load_string << ", record_len = " << file_loader_load.get_record_len() << std::endl;
         log_info << "workload_run_string: " << workload_run_string << ", record_len = " << file_loader_run.get_record_len() << std::endl;
+    }
+
+    // microbench path: build the in-memory working set once (shared across threads)
+    if (is_microbench) {
+        dart_bench::WorkloadSpec spec;
+        spec.key_count  = mb_key_count;
+        spec.op_count   = run_max_request;
+        spec.read_pct   = mb_read_pct;
+        spec.insert_pct = mb_insert_pct;
+        spec.update_pct = mb_update_pct;
+        spec.scan_pct   = mb_scan_pct;
+        spec.remove_pct = mb_remove_pct;
+        spec.uniform    = (mb_uniform != 0);
+        spec.theta      = mb_theta_x100 / 100.0;
+        spec.value_len  = payload_byte;
+        spec.scan_len   = mb_scan_len;
+        log_info << "microbench: key_count=" << spec.key_count
+                 << " op_count=" << spec.op_count
+                 << " read%=" << spec.read_pct << " scan%=" << spec.scan_pct
+                 << (spec.uniform ? " uniform" : " zipf") << " theta=" << spec.theta
+                 << " value_len=" << spec.value_len << std::endl;
+        g_gen = new dart_bench::WorkloadGenerator(spec);
+        log_info << "microbench: load_records=" << g_gen->load_len()
+                 << " run_records=" << g_gen->run_len() << std::endl;
     }
 
     // timer (inside the test_func and outside it)
@@ -664,14 +844,16 @@ int main(int argc, char** argv) {
     }
     log_purple << "Compute node No." << com_ind + 1 << " start." << std::endl;
 
-    // if test run
-    if (test_func == test_ycsb_run) {
+    // if test run (YCSB or microbench: both load -> build skip table -> run)
+    if (test_func == test_ycsb_run || is_microbench) {
+        // pick the load worker matching the run worker
+        fnType* load_func = is_microbench ? test_microbench_load : test_ycsb_load;
         // load first
         log_warn << "load start" << std::endl;
         std::vector<std::thread> threads;
         for (uint32_t thread_ind = 0; thread_ind < load_thread_num; ++thread_ind) {
             threads.emplace_back(
-                test_ycsb_load,
+                load_func,
                 memory_machine_num,
                 compute_machine_num,
                 thread_num_per_compute,
@@ -773,7 +955,7 @@ int main(int argc, char** argv) {
     std::vector<std::thread> threads;
     for (uint32_t thread_ind = 0; thread_ind < run_thread_num; ++thread_ind) {
         threads.emplace_back(
-            test_ycsb_run,
+            test_func,  // test_ycsb_run (0) or test_microbench_run (1)
             memory_machine_num,
             compute_machine_num,
             thread_num_per_compute,
@@ -804,7 +986,7 @@ int main(int argc, char** argv) {
 
 
     // collect and show results
-    if (test_func == test_ycsb_run) {
+    if (test_func == test_ycsb_run || is_microbench) {
         uint64_t all_count = 0;
         for (uint32_t i = 0; i < run_thread_num; ++i) {
             tc.add_event_count(tc_list[i].get_event_count());
@@ -816,7 +998,7 @@ int main(int argc, char** argv) {
     }
 
 
-    if (test_func == test_ycsb_run) {
+    if (test_func == test_ycsb_run || is_microbench) {
         log_info << "ALL: throughput = " << tc.get_throughput_MOps() << " MOps" << std::endl;
         log_info << "ALL: latency = " << tc.get_latency_us() << " us" << std::endl;
         sock_conn.sock_send_double(tc.get_throughput_MOps());

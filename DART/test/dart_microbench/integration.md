@@ -1,5 +1,13 @@
 # Wiring the in-memory generator into DART
 
+> **STATUS: implemented.** This is wired into the live binary as `--test_func=1`
+> (a hybrid of Options A + B below): `Benchmark::prepare_workload(begin,end)` was
+> added (Option A), and `compute.cc` gained `test_microbench_load/run` selected
+> by `--test_func` with workload knobs forwarded as `--mb_*` monitor flags
+> (Option B). The monitor's load/prepare handshake now fires for `test_func` 0 or
+> 1. See `readme.md` and `script/cache_sweep.sh`. The notes below document the
+> design for reference.
+
 The generator emits the **same record type** the YCSB engine already consumes
 (`YCSB::FileLoader::records`), so the change is small and surgical. There are two
 ways in; pick one.

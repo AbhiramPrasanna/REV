@@ -149,11 +149,52 @@ Total throughput = <X> MOps
 Average latency  = <Y> us
 ```
 
-> **Want the YCSB-free in-memory working set instead of `c_load`/`c_run`?**
-> See [test/skills.md](test/skills.md) and [test/dart_microbench/](test/dart_microbench/):
-> apply the small `compute.cc` edit from `integration.md`, and the same commands
-> above run the generated working set (size/skew/mix become run-time knobs
-> instead of files).
+## In-memory microbench (`--test_func=1`) — no workload files
+
+The YCSB-free working-set generator is **wired in** (see
+[test/skills.md](test/skills.md) and [test/dart_microbench/](test/dart_microbench/)).
+With `--test_func=1` the compute node builds the working set in memory at
+startup, so op-mix, distribution, and working-set size become **run-time flags**
+on the monitor instead of pre-generated files:
+
+| flag | meaning |
+|------|---------|
+| `--test_func=1` | select the in-memory microbench (0 = YCSB files) |
+| `--mb_read_pct` / `--mb_insert_pct` / `--mb_update_pct` / `--mb_scan_pct` / `--mb_remove_pct` | op mix (must sum to 100) |
+| `--mb_uniform` | `1` = uniform keys, `0` = zipfian |
+| `--mb_theta_x100` | zipf theta × 100 (e.g. `99` ⇒ 0.99); ignored if uniform |
+| `--mb_key_count` | distinct keys = working set size |
+| `--mb_scan_len` | keys returned per range scan |
+| `--run_max_request` | measured op count (reused as op_count) |
+| `--payload_byte` | value length for insert/update |
+| `--th_mb` | per-thread compute cache (the "directory cache") |
+
+Example — 30M 100% point lookups, zipfian-0.99, 256 MB total cache over 56
+threads (`--th_mb = 256/56 ≈ 4`):
+
+```shell
+bin/monitor --monitor_addr=0.0.0.0:9898 --memory_num=1 --compute_num=1 \
+  --load_thread_num=56 --run_thread_num=56 --coro_num=1 \
+  --mem_mb=8192 --th_mb=4 --test_func=1 --bucket=256 \
+  --run_max_request=30000000 --payload_byte=16 \
+  --mb_read_pct=100 --mb_scan_pct=0 --mb_uniform=0 --mb_theta_x100=99 \
+  --mb_key_count=30000000 --mb_scan_len=100
+# then bin/memory and bin/compute as in steps 2 and 3 above.
+```
+
+### Cache sweep
+
+[`script/cache_sweep.sh`](script/cache_sweep.sh) automates the full sweep:
+cache ∈ {32,64,128,256,512,1024} MiB (total, so `--th_mb = size/threads`) ×
+{uniform, zipf-0.99} × {100% lookup, 100% scan}, 30M ops each — 24 runs. It
+relaunches the one-shot monitor/memory/compute per configuration (DART's
+equivalent of "restart between tests"), launching `compute` on `10.30.1.9` over
+SSH, and writes a CSV plus per-run logs.
+
+```shell
+# edit the host/NIC config at the top first, then run on 10.30.1.6:
+./script/cache_sweep.sh
+```
 
 ## Note
 
