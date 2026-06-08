@@ -80,16 +80,15 @@ cp ../script/run*.sh .                     # run.sh + run_other.sh launchers
 
 ### Step 2 — make sure memcached can start (one-time check on node 0)
 
-`restartMemc.sh` reaches the memcached host over SSH **on port 404** to (re)launch
+`restartMemc.sh` reaches the memcached host over SSH **on port 22** to (re)launch
 memcached and zero the `serverNum`/`clientNum` counters:
 
 ```bash
-ssh -p 404 10.30.1.9 "memcached -u root -l 10.30.1.9 -p 11211 -c 10000 -d -P /tmp/memcached.pid"
+ssh -p 22 10.30.1.9 "memcached -u root -l 10.30.1.9 -p 11211 -c 10000 -d -P /tmp/memcached.pid"
 ```
 
-If your `sshd` listens on the default port 22 (not 404), either edit the `-p 404`
-in `script/restartMemc.sh` to `-p 22`, or skip the script and start memcached
-manually on `10.30.1.9` once:
+This requires passwordless SSH to `10.30.1.9` (port 22). If that isn't set up,
+skip the script and start memcached manually on `10.30.1.9` once:
 
 ```bash
 # on 10.30.1.9, start memcached bound to its own IP:
@@ -203,7 +202,7 @@ report (see `microbenchmarks.md` for full detail):
 |---------|-----|
 | `can't open memcached.conf` | run `newbench` from `build/` (it reads `../memcached.conf`) |
 | Hangs at `Build the DSMKeeper` / a barrier | memcached unreachable, wrong IP/port, or node 1 never started — both must register |
-| `ssh -p 404` refused in `restartMemc.sh` | change the port to your `sshd`'s, or start memcached manually (Step 2) |
+| `ssh` refused in `restartMemc.sh` | set up passwordless SSH to the memcached host (port 22), or start memcached manually (Step 2) |
 | `ib device wasn't found` | NIC not named `mlx5_0`; adjust the device match in `src/rdma/Resource.cpp` |
 | `mmap failed` | rerun `./script/hugepage.sh` (need enough hugepages) |
 | Stale state across runs | `run.sh` re-runs `restartMemc.sh`; ensure it succeeds before node 1 starts |
