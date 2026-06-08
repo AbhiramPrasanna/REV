@@ -6,6 +6,17 @@ project(DEX)
 
 add_definitions(-UNDEBUG)
 
+# By default DEX uses its adaptive cache-vs-pushdown policy (LATENCY_COLLECT),
+# which OVERRIDES the manual rpc_rate knob. For a controlled offloading study
+# (rpc_rate=0 => no pushdown, rpc_rate=1 => pushdown), configure with
+#   cmake -DMANUAL_PUSHDOWN=ON ..
+# which disables the adaptive policy so rpc_rate takes effect.
+option(MANUAL_PUSHDOWN "Disable adaptive pushdown so rpc_rate controls offloading" OFF)
+if(MANUAL_PUSHDOWN)
+  add_definitions(-DMANUAL_PUSHDOWN)
+  message(STATUS "MANUAL_PUSHDOWN enabled: rpc_rate controls offloading (adaptive policy off)")
+endif()
+
 if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0 -mssse3 -march=native")
 elseif(${CMAKE_BUILD_TYPE} STREQUAL "RelWithDebInfo")

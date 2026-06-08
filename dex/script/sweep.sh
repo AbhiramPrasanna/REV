@@ -1,50 +1,56 @@
 #!/bin/bash
 # ===========================================================================
-# sweep.sh  --  DEX cache-size sweep  (run on NODE 0 / memcached host: 10.30.1.9)
+# sweep.sh  --  DEX OFFLOADING study  (run on NODE 0 / memcached host: 10.30.1.9)
 #
-# Sweeps the compute-node buffer cache across:
-#     32, 64, 128, 256, 512, 1024 MB
-# for every combination of:
+# Compares DEX WITHOUT offloading vs WITH offloading across:
 #     workload     : 100% point-lookup,  100% range-scan
 #     distribution : uniform,            zipfian (theta = 0.99)
-#     offloading   : ON  (rpc_rate=1, RPC pushdown to memory node)
-#                    OFF (rpc_rate=0, pure one-sided RDMA + caching)
+#     offloading   : OFF (rpc_rate=0, pure caching)
+#                    ON  (rpc_rate=1, RPC pushdown of inner-subtree misses)
+#     cache size   : 16, 32, 48, 64, 128, 256 MB
 # => 2 x 2 x 2 x 6 = 48 configurations, 30 M operations each.
 #
-# memcached is restarted BEFORE every configuration so each run is a fresh
-# distributed registration (node ids / barriers reset).
+# *** REQUIRES a MANUAL_PUSHDOWN build ***
+#   cmake -DCMAKE_BUILD_TYPE=Release -DMANUAL_PUSHDOWN=ON .. && make -j
+# Without it, DEX's adaptive policy IGNORES rpc_rate and offload on/off are
+# identical (see leanstore_cache.h LATENCY_COLLECT).
 #
-# Topology: NODENUM=2 with THREADS<=KMAX so CNodeCount=1 -> node 0 is the single
-# compute node (the one whose cache we sweep) and node 1 is the remote memory
-# pool.  The ~1 GB bulk-loaded tree spans the 32 MB..1024 MB sweep nicely
-# (32 MB = almost no caching, 1024 MB = nearly the whole tree resident).
+# IMPORTANT, by DEX's design:
+#  - RANGE scans have NO pushdown path -> offload on/off are identical for range
+#    (kept here as a control; the difference, if any, lives in point-lookups).
+#  - Pushdown only engages on INNER-subtree misses, which require the cache to be
+#    smaller than the ~60 MB inner-node footprint. Hence small caches below;
+#    at >=128 MB inner fits and offloading converges to no-op.
+#
+# memcached is restarted before every configuration (fresh registration).
+# Topology: NODENUM=2, THREADS<=KMAX -> CNodeCount=1 (node 0 compute, node 1 mem).
 #
 # HOW TO RUN:
-#   1. start this script on node 0 (10.30.1.9):   ./sweep.sh
+#   1. start this on node 0 (10.30.1.9):   ./sweep.sh
 #   2. then start ./sweep_other.sh on node 1 (10.30.1.6)
-#   Each per-config run blocks until both nodes finish (final barrier), so the
-#   two scripts stay in lockstep.
 # ===========================================================================
 set -u
 
 # ---- fixed parameters (edit here) -----------------------------------------
 NODENUM=2          # total machines
-THREADS=36         # worker threads on the compute node
+THREADS=16         # worker threads (small caches + many threads can crash DEX)
 KMAX=36            # threads/node  -> CNodeCount = ceil(THREADS/KMAX) = 1
 MEMTHREADS=4       # directory (memory-side) threads
-BULK=50            # bulk-load keys, millions  (~1 GB tree)
+BULK=50            # bulk-load keys, millions  (~1.7 GB leaf, ~60 MB inner)
 WARMUP=10          # warmup ops, millions      (populate the cache)
-OP=30              # measured ops, millions    (<-- 30 M as requested)
+OP=30              # measured ops, millions
 CORRECT=0          # no post-run validation
 TIMEBASE=1         # cap phases by wall-clock
 EARLY=1            # first finisher stops the rest
 INDEX=0            # 0 = DEX
-ADMIT=0.1          # admission ratio
+ADMIT=0.1          # admission ratio (DEX default for leaves)
 TUNE=0             # no auto-tune
 ZIPF_THETA=0.99    # skew for the zipfian runs
 
 # ---- sweep dimensions ------------------------------------------------------
-CACHES=(32 64 128 256 512 1024)
+# Small caches (< ~60 MB inner footprint) are where pushdown engages; 128/256
+# are the convergence point where inner fits and offloading becomes a no-op.
+CACHES=(16 32 48 64 128 256)
 
 RESULTS=./results
 mkdir -p "$RESULTS"

@@ -42,7 +42,15 @@ uint64_t three_state = 0;
 
 enum class RPC_type { LOOKUP, UPDATE, INSERT, DELETE };
 
+// LATENCY_COLLECT enables DEX's adaptive cache-vs-pushdown policy
+// (decision.caching_or_push), which OVERRIDES the manual rpc_rate knob -- when
+// it is on, rpc_rate is ignored and pushdown is auto-tuned. Build with
+// cmake -DMANUAL_PUSHDOWN=ON to disable it so rpc_rate=0 means "no offloading"
+// and rpc_rate=1 means "offloading". Default (no flag) preserves the adaptive
+// behavior described in the paper.
+#ifndef MANUAL_PUSHDOWN
 #define LATENCY_COLLECT 1
+#endif
 
 class CacheManager {
 public:

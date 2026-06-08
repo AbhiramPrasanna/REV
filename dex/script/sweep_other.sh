@@ -17,7 +17,7 @@ set -u
 
 # ---- must match sweep.sh ---------------------------------------------------
 NODENUM=2
-THREADS=36
+THREADS=16
 KMAX=36
 MEMTHREADS=4
 BULK=50
@@ -31,7 +31,7 @@ ADMIT=0.1
 TUNE=0
 ZIPF_THETA=0.99
 
-CACHES=(32 64 128 256 512 1024)
+CACHES=(16 32 48 64 128 256)
 
 # Seconds to wait at the start of each config for node 0 to restart memcached.
 # Must exceed node 0's (run-end -> restartMemc complete) latency.
