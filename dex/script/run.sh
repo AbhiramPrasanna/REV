@@ -1,50 +1,39 @@
 #!/bin/bash
+# ===========================================================================
+# run.sh  --  single DEX benchmark run, NODE 0 (memcached host: 10.30.1.9)
+#
+# Restarts memcached, then launches one newbench configuration.  Edit the
+# variables below, run this on node 0, then run ./run_other.sh on node 1.
+# For the full cache sweep use ./sweep.sh instead.
+# ===========================================================================
+set -u
 
-#ops
-read=(100 50 95 0 0)
-insert=(0 0 0 100 5)
-update=(0 50 5 0 0)
-delete=(0 0 0 0 0)
-range=(0 0 0 0 95)
+# ---- workload (ratios must sum to 100) ------------------------------------
+READ=100; INSERT=0; UPDATE=0; DELETE=0; RANGE=0
 
-#fixed-op
-readonly=(100 0 0 0 0)
-updateonly=(0 0 100 0 0)
+# ---- topology & sizes ------------------------------------------------------
+NODENUM=2          # total machines
+THREADS=36         # worker threads across all compute nodes
+KMAX=36            # threads/node -> CNodeCount = ceil(THREADS/KMAX)
+MEMTHREADS=4       # directory (memory-side) threads
+CACHE_MB=256       # compute-node buffer cache
+UNIFORM=0          # 0 = zipfian, 1 = uniform
+ZIPF=0.99          # skew (used when UNIFORM=0)
+BULK=50            # bulk-load keys, millions
+WARMUP=10          # warmup ops, millions
+OP=50              # measured ops, millions
 
-#exp
-threads=(0 2 18 36 72 108 144)
-#threads=(0 2 16 32 64 96 128)
-mem_threads=(0 4)
-cache=(0 64 128 256 512 1024)
-uniform=(0 1)
-zipf=(0.99)
-bulk=50
-warmup=10
-runnum=50
-nodenum=2
+# ---- knobs -----------------------------------------------------------------
+CORRECT=0          # 1 = validate tree after run
+TIMEBASE=1         # cap phases by wall-clock
+EARLY=1            # first finisher stops the rest
+INDEX=0            # 0 = DEX, 1 = Sherman, 2 = SMART
+RPC=1              # offloading: 1 = on (pushdown), 0 = off
+ADMIT=0.1          # admission ratio
+TUNE=0             # auto-tune off
 
-#other
-correct=0
-timebase=1
-early=1
-#index=(0 1 2)
-rpc=1
-admit=0.1
-tune=0
-
-
-for uni in 0
-do 
-    for op in 0
-    do 
-        for idx in 0
-        do  
-            for t in 1
-            do
-                ./restartMemc.sh
-                sudo ./newbench $nodenum ${read[$op]} ${insert[$op]} ${update[$op]} ${delete[$op]} ${range[$op]} ${threads[$t]} ${mem_threads[1]} ${cache[3]} $uni ${zipf[0]} $bulk $warmup $runnum $correct $timebase $early $idx $rpc $admit $tune 36
-                sleep 2
-            done
-        done
-    done
-done
+./restartMemc.sh
+sleep 2
+sudo ./newbench "$NODENUM" "$READ" "$INSERT" "$UPDATE" "$DELETE" "$RANGE" \
+     "$THREADS" "$MEMTHREADS" "$CACHE_MB" "$UNIFORM" "$ZIPF" "$BULK" "$WARMUP" \
+     "$OP" "$CORRECT" "$TIMEBASE" "$EARLY" "$INDEX" "$RPC" "$ADMIT" "$TUNE" "$KMAX"

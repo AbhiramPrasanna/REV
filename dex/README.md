@@ -25,6 +25,7 @@ cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j
 cp ../script/restartMemc.sh .
 cp ../script/run*.sh .
+cp ../script/sweep*.sh .
 ```
 
 ## Running benchmark
@@ -152,12 +153,36 @@ sudo ./newbench  2 100 0 0 0 0  2 4 256  0 0.99  50 10 50  0 1 1  0 1 0.1 0  36
 # op mix = kReadRatio kInsertRatio kUpdateRatio kDeleteRatio kRangeRatio  (must sum to 100)
 ```
 
-So the default line means: 2 machines, **100% lookups**, 2 worker threads, 4
+So the default line means: 2 machines, **100% lookups**, 36 worker threads, 4
 memory-side threads, 256 MB cache, Zipf 0.99 skew, bulk-load 50 M keys, 10 M
 warmup ops, 50 M measured ops, DEX index, full RPC pushdown, 0.1 admission,
-36 threads/compute-node. To change the workload, edit the arrays at the top of
-`run.sh`/`run_other.sh` (the `op` index selects a column of the
-read/insert/update/delete/range presets) — **keep both scripts identical**.
+36 threads/compute-node. To change the workload, edit the clearly-named
+variables at the top of `run.sh`/`run_other.sh` (`READ/INSERT/UPDATE/DELETE/
+RANGE`, `CACHE_MB`, `RPC` for offloading, etc.) — **keep both scripts identical**.
+
+### Cache-size sweep (`sweep.sh` / `sweep_other.sh`)
+
+To sweep the compute-node cache across **32, 64, 128, 256, 512, 1024 MB** for
+every combination of workload (100% lookup, 100% range), distribution (uniform,
+zipfian 0.99) and offloading (RPC pushdown on/off) at **30 M ops each** — 48
+configurations — use the sweep scripts. memcached is restarted before every
+configuration so each run is a fresh distributed registration.
+
+```bash
+# node 0 (10.30.1.9) — start first:
+./sweep.sh
+# node 1 (10.30.1.6) — start right after:
+./sweep_other.sh
+```
+
+`sweep.sh` restarts memcached and runs `newbench` for each config; `sweep_other.sh`
+mirrors the same 48 configs (identical args, no memcached restart) and waits
+`WAIT_FOR_MEMC` seconds per config for node 0's fresh memcached. Per-config logs
+land in `build/results/dex_<workload>_<dist>_offload-<on|off>_cache<NN>mb.log`,
+each ending with the latency-bucket / remote-op / path-aware-miss report. Edit
+the parameter block at the top of `sweep.sh` (and mirror it in `sweep_other.sh`)
+to change op count, thread count, bulk size, etc. If node 1 ever fails to
+register, increase `WAIT_FOR_MEMC` in `sweep_other.sh`.
 
 ### Reading the results
 
