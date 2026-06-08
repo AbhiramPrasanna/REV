@@ -49,6 +49,20 @@ CACHES=(32 64 128 256 512 1024)
 RESULTS=./results
 mkdir -p "$RESULTS"
 
+# --- preflight: catch a broken environment before burning hours on 48 runs --
+if [ ! -x ./newbench ]; then
+  echo "ERROR: ./newbench not found here. Build first and run from build/." >&2
+  exit 1
+fi
+if ldd ./newbench 2>/dev/null | grep -q "not found"; then
+  echo "ERROR: newbench has unresolved shared libraries:" >&2
+  ldd ./newbench | grep "not found" >&2
+  echo "Register the missing library directory and rerun, e.g. for cityhash:" >&2
+  echo "  echo /usr/local/lib | sudo tee /etc/ld.so.conf.d/local.conf && sudo ldconfig" >&2
+  exit 1
+fi
+FIRST_RUN=1
+
 # run_one <tag> <read> <range> <uniform> <zipf> <rpc> <cache_mb>
 run_one() {
   local tag=$1 r=$2 rg=$3 uni=$4 zipf=$5 rpc=$6 cache=$7
@@ -58,13 +72,26 @@ run_one() {
   echo "===================================================================="
 
   # Fresh memcached for this configuration (resets serverNum/clientNum).
-  ./restartMemc.sh
+  if ! ./restartMemc.sh; then
+    echo "ABORT: memcached restart failed for $tag (see message above)." >&2
+    exit 1
+  fi
   sleep 2
 
   # read insert update delete range = r 0 0 0 rg   (must sum to 100)
   sudo ./newbench "$NODENUM" "$r" 0 0 0 "$rg" "$THREADS" "$MEMTHREADS" "$cache" \
        "$uni" "$zipf" "$BULK" "$WARMUP" "$OP" "$CORRECT" "$TIMEBASE" "$EARLY" \
        "$INDEX" "$rpc" "$ADMIT" "$TUNE" "$KMAX" 2>&1 | tee "$logf"
+  local rc=${PIPESTATUS[0]}
+
+  if [ "$rc" -ne 0 ]; then
+    echo "WARNING: newbench exited with code $rc for $tag" >&2
+    if [ "$FIRST_RUN" = 1 ]; then
+      echo "ABORT: first run failed -> environment not ready; fix it before sweeping." >&2
+      exit 1
+    fi
+  fi
+  FIRST_RUN=0
 
   echo "<<< [$(date '+%H:%M:%S')] DONE: $tag  (log: $logf)"
   sleep 3

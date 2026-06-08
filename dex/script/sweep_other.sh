@@ -40,6 +40,18 @@ WAIT_FOR_MEMC=12
 RESULTS=./results
 mkdir -p "$RESULTS"
 
+# --- preflight: same shared-library check as node 0 -------------------------
+if [ ! -x ./newbench ]; then
+  echo "ERROR: ./newbench not found here. Build first and run from build/." >&2
+  exit 1
+fi
+if ldd ./newbench 2>/dev/null | grep -q "not found"; then
+  echo "ERROR: newbench has unresolved shared libraries:" >&2
+  ldd ./newbench | grep "not found" >&2
+  echo "  echo /usr/local/lib | sudo tee /etc/ld.so.conf.d/local.conf && sudo ldconfig" >&2
+  exit 1
+fi
+
 # run_one <tag> <read> <range> <uniform> <zipf> <rpc> <cache_mb>
 run_one() {
   local tag=$1 r=$2 rg=$3 uni=$4 zipf=$5 rpc=$6 cache=$7
