@@ -82,6 +82,11 @@ int sock_server_init(int port) {
     for (iterator = resolved_addr; iterator; iterator = iterator->ai_next) {
         sockfd = socket(iterator->ai_family, iterator->ai_socktype, iterator->ai_protocol);
         if (sockfd >= 0) {
+            // Allow immediate rebind after a restart (the sweep relaunches the
+            // monitor every config; otherwise the port lingers in TIME_WAIT and
+            // bind fails with "Address already in use").
+            int reuse = 1;
+            setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
             iresult = bind(sockfd, iterator->ai_addr, iterator->ai_addrlen);
             if (iresult < 0) {
                 log_error << "failed connect" << std::endl;
