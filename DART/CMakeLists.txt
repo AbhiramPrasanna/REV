@@ -8,11 +8,9 @@ add_definitions(-std=c++20)
 
 # GCC 13+/16 no longer transitively include these; force them so legacy TUs that
 # use sleep()/usleep() (unistd), uintNN_t (cstdint), memcpy()/strlen() (cstring),
-# printf() (cstdio) compile without per-file #include patches.
-add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-include$<SEMICOLON>cstdint>)
-add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-include$<SEMICOLON>cstring>)
-add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-include$<SEMICOLON>cstdio>)
-add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-include$<SEMICOLON>unistd.h>)
+# printf() (cstdio) compile without per-file #include patches. Applied PER-TARGET
+# below (NOT globally) so gflags' own build is left untouched.
+set(DART_FORCE_INCLUDES -include cstdint -include cstring -include cstdio -include unistd.h)
 
 find_package(Boost REQUIRED COMPONENTS context coroutine)
 
@@ -39,6 +37,7 @@ foreach(main_exec monitor compute memory)
 
     add_executable(${main_exec} ${CMAKE_SOURCE_DIR}/src/main/${main_exec}.cc ${src_file})
     target_link_libraries(${main_exec} gflags ibverbs Boost::context Boost::coroutine)
+    target_compile_options(${main_exec} PRIVATE ${DART_FORCE_INCLUDES})
 
     # 幽默，这好像是我之前还没上 RDMA 的时候在 windows 上用的
     if (WIN32 OR MSVC OR MSYS)
