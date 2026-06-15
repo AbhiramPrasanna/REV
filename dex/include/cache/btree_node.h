@@ -17,7 +17,31 @@ namespace cachepush {
 enum class PageType : uint8_t { BTreeInner = 1, BTreeLeaf = 2 };
 static const uint64_t swizzle_tag = 1ULL << 63;
 static const uint64_t swizzle_hide = (1ULL << 63) - 1;
-static const uint64_t pageSize = 1024; // 1KB
+// === Inner/leaf geometry decoupling ========================================
+// The B-tree fanout of inner vs leaf nodes is decoupled so we can build a TALL
+// tree (small inner fanout) with reasonably large leaves (expensive to fetch),
+// which is the regime where offloading beats caching for BOTH lookups and
+// range scans. See skills.md section 7.
+//
+//   innerPageSize -> controls INNER fanout only  (drives tree HEIGHT)
+//   leafPageSize  -> controls LEAF fanout/size   (drives per-leaf fetch cost)
+//
+// IMPORTANT: this is a *geometry* decoupling. The physical node size, the RDMA
+// transfer size, and the compute-node cache SLOT are all uniform = pageSize
+// (= leafPageSize, the max). A cached INNER node therefore still occupies a
+// full leaf-sized slot -- with a single cache pool the cache footprint is set
+// by the slot size, not by innerPageSize. (Shrinking the inner's *physical*
+// bytes would need per-type allocation in the split path AND two cache pools;
+// it saves DSM only, not cache, so it is intentionally NOT done here.)
+//
+// Current: inner fanout 5 (160B geometry) -> height ~10 at 50M keys;
+//          leaf  fanout 25 (512B)         -> 100-key scan spans ~4 leaves.
+// Keep multiples of 16. leafPageSize must stay <= the RDMA buffer slot
+// (max(kLeafPageSize,kInternalPageSize) in Common.h, currently 1024); raise
+// those if you grow leafPageSize past 1024.
+static const uint64_t innerPageSize = 160; // INNER fanout (height) knob
+static const uint64_t leafPageSize = 512;  // LEAF size knob (fetch cost)
+static const uint64_t pageSize = leafPageSize; // physical / cache-slot / IO size
 static const uint64_t megaLevel =
     4; // 4 level as a Bigger Node to do coarse-grained distribution
 // Level 0, 1, ..., MegaLevel -1 are grouped as a sub-tree
@@ -174,8 +198,10 @@ struct BTreeLeafBase : public NodeBase {
 template <class Key, class Payload> struct BTreeLeaf : public BTreeLeafBase {
   // This is the element type of the leaf node
   using KeyValueType = std::pair<Key, Payload>;
+  // Leaf fanout from leafPageSize (the leaf size knob).
   static const uint64_t maxEntries =
-      (pageSize - (sizeof(Key) * 2 + sizeof(uint64_t) * 2) - sizeof(NodeBase)) /
+      (leafPageSize - (sizeof(Key) * 2 + sizeof(uint64_t) * 2) -
+       sizeof(NodeBase)) /
       (sizeof(KeyValueType));
 
   // This is the array that we perform search on
@@ -360,8 +386,11 @@ struct BTreeInnerBase : public NodeBase {
 };
 
 template <class Key> struct BTreeInner : public BTreeInnerBase {
+  // Inner fanout from innerPageSize (the height knob), decoupled from the leaf.
+  // The node is still physically pageSize (= leafPageSize) on the wire / in the
+  // cache slot; only the fanout (and thus tree height) shrinks.
   static const uint64_t maxEntries =
-      (pageSize - sizeof(uint64_t) - sizeof(NodeBase)) /
+      (innerPageSize - sizeof(uint64_t) - sizeof(NodeBase)) /
       (sizeof(Key) + sizeof(GlobalAddress));
   GlobalAddress children[maxEntries];
   Key keys[maxEntries];

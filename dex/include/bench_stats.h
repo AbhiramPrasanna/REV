@@ -96,6 +96,12 @@ struct alignas(64) ThreadStats {
   uint64_t op_remote[OP_COUNT];  // per-op-type ops that went remote
   uint64_t op_sum_ns[OP_COUNT];  // per-op-type latency sum (for mean)
 
+  // Offloaded-task tracking (work pushed down to the memory node).
+  uint64_t off_lookup;    // lookups served by RPC pushdown
+  uint64_t off_scan;      // scan RPC round-trips
+  uint64_t off_scan_kv;   // KV pairs returned by scan pushdown
+  uint64_t off_scan_leaf; // leaves scanned remotely
+
   char pad[64];
 
   void clear() { std::memset(this, 0, sizeof(*this)); }
@@ -308,6 +314,38 @@ struct Reporter {
            total_ops ? static_cast<double>(total_remote) / total_ops : 0.0);
     printf("  remote ops / remote op   = %.4f\n",
            orr ? static_cast<double>(total_remote) / orr : 0.0);
+
+    // ---- Offloaded task tracking (pushed down to memory node) -------------
+    // DEX can execute a lookup or a range scan *on the memory node* instead of
+    // pulling the leaf page over RDMA. We track those offloaded tasks here,
+    // both aggregated ("complete operations") and per worker thread.
+    uint64_t t_off_lu = 0, t_off_sc = 0, t_off_kv = 0, t_off_lf = 0;
+    for (int t = 0; t < nthreads; ++t) {
+      t_off_lu += st[t].off_lookup;
+      t_off_sc += st[t].off_scan;
+      t_off_kv += st[t].off_scan_kv;
+      t_off_lf += st[t].off_scan_leaf;
+    }
+    printf("\n----- OFFLOADED TASKS [node %d] -----\n", node_id);
+    printf("  lookup pushdowns         = %lu\n", (unsigned long)t_off_lu);
+    printf("  scan    pushdowns (RPC)  = %lu\n", (unsigned long)t_off_sc);
+    printf("    kv pairs returned      = %lu\n", (unsigned long)t_off_kv);
+    printf("    leaves scanned remotely= %lu\n", (unsigned long)t_off_lf);
+    printf("    kv / scan pushdown     = %.2f\n",
+           t_off_sc ? static_cast<double>(t_off_kv) / t_off_sc : 0.0);
+    printf("    leaves / scan pushdown = %.2f\n",
+           t_off_sc ? static_cast<double>(t_off_lf) / t_off_sc : 0.0);
+    if (t_off_lu || t_off_sc) {
+      printf("  per-thread breakdown (tid: lookups | scans | kv | leaves):\n");
+      for (int t = 0; t < nthreads; ++t) {
+        if (st[t].off_lookup == 0 && st[t].off_scan == 0)
+          continue;
+        printf("    t%-3d  %10lu | %10lu | %10lu | %10lu\n", t,
+               (unsigned long)st[t].off_lookup, (unsigned long)st[t].off_scan,
+               (unsigned long)st[t].off_scan_kv,
+               (unsigned long)st[t].off_scan_leaf);
+      }
+    }
 
     // ---- Path-aware cache miss breakdown (inner vs leaf) ------------------
     // Because DEX caches inner nodes along the path, inner misses should be a

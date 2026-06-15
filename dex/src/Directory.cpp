@@ -26,6 +26,12 @@ Directory::Directory(DirectoryConnection *dCon, RemoteConnection *remoteInfo,
     chunckAlloc = new GlobalAllocator(dsm_start, per_directory_dsm_size);
   }
 
+  // Reserve one chunk up front for range-scan pushdown results. The local
+  // pointer is resolved lazily (remoteInfo[].dsmBase is only valid after the
+  // QPs are connected, which happens after construction).
+  scanScratch = chunckAlloc->alloc_chunck();
+  scanScratchBase = nullptr;
+
   dirTh = new std::thread(&Directory::dirThread, this);
 }
 
@@ -109,6 +115,40 @@ void Directory::process_message(const RawMessage *m) {
     send = (RawMessage *)dCon->message->getSendPool();
     send->level = ret;
     send->addr = addr;
+    break;
+  }
+
+  case RpcType::SCAN: {
+    // m->addr = entry leaf, m->k = start key, m->v = requested count.
+    auto addr = m->addr;
+    uint64_t dsm_base = remoteInfo[addr.nodeID].dsmBase;
+
+    // Resolve the scratch local pointer on first use, and pick this requester's
+    // private slot (indexed by app thread id).
+    if (scanScratchBase == nullptr) {
+      scanScratchBase = reinterpret_cast<char *>(dsm_base + scanScratch.offset);
+    }
+    int slot = m->app_id % MAX_APP_THREAD;
+    auto *out = reinterpret_cast<std::pair<Key, Value> *>(
+        scanScratchBase + static_cast<uint64_t>(slot) * kScanSlotBytes);
+
+    int want = static_cast<int>(m->v);
+    if (want > kScanSlotCap)
+      want = kScanSlotCap;
+
+    Key max_key = 0;
+    int leaves = 0;
+    int cnt = cachepush::range_scan(addr, dsm_base, m->k, want, out, max_key,
+                                    leaves);
+
+    send = (RawMessage *)dCon->message->getSendPool();
+    send->level = cnt;     // count packed (or -1 stale)
+    send->k = max_key;     // resume boundary
+    send->v = leaves;      // leaves visited (for offload tracking)
+    // Slot address the compute node reads the packed KV pairs back from.
+    send->addr = GlobalAddress{addr.nodeID, scanScratch.offset +
+                                                static_cast<uint64_t>(slot) *
+                                                    kScanSlotBytes};
     break;
   }
 

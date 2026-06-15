@@ -1869,11 +1869,12 @@ public:
       if (cur_node == nullptr) {
         int remote_flag = 0;
         if (inner->level == 1) {
-          // Admission control is needed
+          // Leaf-parent miss: manual RPC pushdown (rpc_rate, MANUAL_PUSHDOWN
+          // build) else the original admission control (read-vs-cache).
           bool lookup_success = false;
-          remote_flag = cache.cold_to_hot_with_admission(
+          remote_flag = cache.cold_to_hot_with_rpc_for_lookup(
               inner->children[idx], reinterpret_cast<void **>(&cur_node), inner,
-              idx, refresh, k, result, lookup_success, RPC_type::LOOKUP);
+              idx, refresh, k, result, lookup_success);
           if (remote_flag == 1) {
             inner->IOUnlock();
             return lookup_success;
@@ -2007,12 +2008,18 @@ public:
           bool lookup_success = false;
           int scan_num = num - cur_num;
           Key max_key;
-          remote_flag = cache.cold_to_hot_with_admission_for_scan(
+          // True scan offload: push to the memory node (multi-leaf scan + one
+          // RDMA read of the packed batch); falls back to a local leaf read
+          // when pushdown is not chosen.
+          remote_flag = cache.cold_to_hot_with_rpc_for_scan(
               inner->children[idx], reinterpret_cast<void **>(&cur_node), inner,
               idx, refresh, k, kv_buffer, scan_num, max_key);
           if (remote_flag == 1) {
             inner->IOUnlock();
-            // Compute the rest
+            // Compute the rest. NOTE: kv_buffer is intentionally NOT advanced
+            // across leaves -- the caller reuses one fixed buffer per op and
+            // passes it by reference, so advancing it would corrupt the next
+            // op. Only the returned count is consumed (matches the local path).
             cur_num += scan_num;
             if (max_key == std::numeric_limits<Key>::max() ||
                 (max_key == (right_bound_ - 1)) || cur_num == num) {

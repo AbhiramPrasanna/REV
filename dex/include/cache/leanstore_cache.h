@@ -85,7 +85,9 @@ public:
 
   CacheManager(uint64_t cache_capacity, double cooling_ratio, double rpc_rate,
                double admission_rate, GlobalAddress *root_ptr = nullptr) {
-    rpc_rate_ = std::max<double>(0, std::min<double>(rpc_rate, 0.99));
+    // Full [0,1] range so the manual knob can express "no offloading" (0) up to
+    // "offload every eligible op" (1). (Was capped at 0.99.)
+    rpc_rate_ = std::max<double>(0, std::min<double>(rpc_rate, 1.0));
     std::cout << "Pushdown (RPC) Rate: " << rpc_rate_ << std::endl;
     admission_rate_ = admission_rate;
     std::cout << "Admission Rate: " << admission_rate_ << std::endl;
@@ -635,6 +637,126 @@ public:
     }
 
     return cold_to_hot(global_node, ret_page, parent, child_idx, refresh);
+  }
+
+  // Manual coin flip for the rpc_rate_ knob: true with probability rpc_rate_.
+  // Used by the MANUAL_PUSHDOWN offload paths so the operator controls exactly
+  // what fraction of eligible ops is offloaded.
+  inline bool manual_push_sample() {
+    static thread_local std::mt19937 *generator = nullptr;
+    if (!generator)
+      generator = new std::mt19937(clock() + pthread_self());
+    static thread_local std::uniform_int_distribution<uint64_t> distribution(
+        0, 9999);
+    return distribution(*generator) < static_cast<uint64_t>(10000 * rpc_rate_);
+  }
+
+  // Range-scan pushdown (true offloading): the memory node walks the sibling
+  // leaf chain and packs the result, then we pull the whole batch with ONE RDMA
+  // read.
+  //
+  // Control: ONLY under -DMANUAL_PUSHDOWN, and only when the rpc_rate_ coin
+  // says push (so rpc_rate is the exact fraction of scan leaf-misses offloaded).
+  // In every other case -- the default adaptive build, or when the knob says
+  // "don't push", or when the memory node can't serve this leaf -- we fall back
+  // to cold_to_hot_with_admission_for_scan, i.e. the original behavior. This
+  // keeps the default build byte-for-byte the upstream policy.
+  //
+  // Return contract matches the scan path:
+  //  -1 retry, 0 node was cached (cold_to_hot), 1 scan served (scan_num/max_key
+  //  set; kv_buffer filled at its current position).
+  int cold_to_hot_with_rpc_for_scan(GlobalAddress global_node, void **ret_page,
+                                    NodeBase *parent, unsigned child_idx,
+                                    bool &refresh, Key k,
+                                    std::pair<Key, Value> *&kv_buffer,
+                                    int &scan_num, Key &max_key) {
+#ifdef MANUAL_PUSHDOWN
+    if (state == 1 && manual_push_sample()) {
+      GlobalAddress slot;
+      uint64_t mk = 0;
+      int leaves = 0;
+      int cnt = global_dsm_->rpc_scan(global_node, k, scan_num, slot, mk,
+                                      leaves);
+
+      if (cnt < 0) {
+        // Entry leaf no longer covers k -> drop IO flag and retry from root.
+        bool ok = page_table_->remove_with_lock(
+            global_node, reinterpret_cast<void *>(IO_FLAG));
+        assert(ok == true);
+        return -1;
+      }
+
+      if (cnt == 0 && leaves == 0) {
+        // Memory node could not serve this leaf (e.g. it lives on another
+        // memory node). IO flag is still held; fall back to the local path.
+        return cold_to_hot_with_admission_for_scan(global_node, ret_page, parent,
+                                                   child_idx, refresh, k,
+                                                   kv_buffer, scan_num, max_key);
+      }
+
+      if (cnt > 0) {
+        // Pull the packed KV batch back with a single RDMA read.
+        char *buf =
+            raw_remote_read(slot, static_cast<size_t>(cnt) *
+                                      sizeof(std::pair<Key, Value>));
+        memcpy(kv_buffer, buf,
+               static_cast<size_t>(cnt) * sizeof(std::pair<Key, Value>));
+      }
+      scan_num = cnt;
+      max_key = mk;
+
+      bool ok = page_table_->remove_with_lock(
+          global_node, reinterpret_cast<void *>(IO_FLAG));
+      assert(ok == true);
+      return 1;
+    }
+#endif
+
+    // No pushdown (default build, or knob said don't): local read-or-cache path.
+    return cold_to_hot_with_admission_for_scan(global_node, ret_page, parent,
+                                               child_idx, refresh, k, kv_buffer,
+                                               scan_num, max_key);
+  }
+
+  // Point-lookup pushdown at the leaf's parent (the dominant lookup miss).
+  //
+  // Control mirrors the scan path: ONLY under -DMANUAL_PUSHDOWN and only when
+  // the rpc_rate_ coin says push do we run the lookup on the memory node
+  // (rpc_lookup ships back just the 8-byte value). Otherwise we fall back to
+  // cold_to_hot_with_admission (the original read-vs-cache admission policy),
+  // so the default build is unchanged. Together with the existing level 2..mega
+  // pushdown, this makes rpc_rate the single manual lookup-offload knob.
+  //
+  // Return contract matches the lookup level-1 branch:
+  //  -1 retry, 0 node was cached, 1 lookup served (success set).
+  int cold_to_hot_with_rpc_for_lookup(GlobalAddress global_node, void **ret_page,
+                                      NodeBase *parent, unsigned child_idx,
+                                      bool &refresh, Key k, Value &result,
+                                      bool &success) {
+#ifdef MANUAL_PUSHDOWN
+    if (state == 1 && manual_push_sample()) {
+      int ret = global_dsm_->rpc_lookup(global_node, k, result);
+      if (ret == 1) {
+        success = true;
+      } else if (ret == 2) {
+        success = false;
+      } else {
+        // ret <= 0: stale leaf / wrong node -> drop IO flag and retry.
+        bool ok = page_table_->remove_with_lock(
+            global_node, reinterpret_cast<void *>(IO_FLAG));
+        assert(ok == true);
+        return -1;
+      }
+      bool ok = page_table_->remove_with_lock(
+          global_node, reinterpret_cast<void *>(IO_FLAG));
+      assert(ok == true);
+      return 1;
+    }
+#endif
+
+    return cold_to_hot_with_admission(global_node, ret_page, parent, child_idx,
+                                      refresh, k, result, success,
+                                      RPC_type::LOOKUP);
   }
 
   // -1 means failure and retry

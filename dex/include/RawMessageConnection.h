@@ -15,6 +15,7 @@ enum RpcType : uint8_t {
   INSERT,
   UPDATE,
   DELETE,
+  SCAN, // range-scan pushdown: memory node scans across sibling leaves
   SMO
 };
 

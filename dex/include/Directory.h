@@ -30,6 +30,15 @@ private:
 
   GlobalAllocator *chunckAlloc;
 
+  // Scratch region (one 32 MB chunk) for range-scan pushdown results. Each
+  // requesting app thread gets its own slot, so a thread's result is never
+  // overwritten before it reads it back (a thread has <=1 outstanding RPC).
+  GlobalAddress scanScratch;   // global address of the scratch chunk
+  char *scanScratchBase;       // lazily-resolved local pointer (dsmBase+offset)
+  static constexpr uint64_t kScanSlotBytes = 4096; // 256 KV pairs / thread
+  static constexpr int kScanSlotCap =
+      kScanSlotBytes / sizeof(std::pair<Key, Value>);
+
   void dirThread();
 
   // No sepecific implementation, "process_message" below has the

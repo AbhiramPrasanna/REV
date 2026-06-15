@@ -262,6 +262,32 @@ public:
     return total;
   }
 
+  // ---- Offloaded (pushed-down) task tracking ------------------------------
+  uint64_t get_push_lookup_num() {
+    uint64_t total = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++i)
+      total += num_push_lookup[i][0];
+    return total;
+  }
+  uint64_t get_push_scan_num() {
+    uint64_t total = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++i)
+      total += num_push_scan[i][0];
+    return total;
+  }
+  uint64_t get_push_scan_kv_num() {
+    uint64_t total = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++i)
+      total += num_push_scan_kv[i][0];
+    return total;
+  }
+  uint64_t get_push_scan_leaf_num() {
+    uint64_t total = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++i)
+      total += num_push_scan_leaf[i][0];
+    return total;
+  }
+
   void clear_rdma_statistic() {
     memset(reinterpret_cast<void *>(num_rdma_read), 0,
            sizeof(uint64_t) * MAX_APP_THREAD * 8);
@@ -279,6 +305,14 @@ public:
            sizeof(uint64_t) * MAX_APP_THREAD * 8);
     memset(reinterpret_cast<void *>(size_rdma_write), 0,
            sizeof(uint64_t) * MAX_APP_THREAD * 8);
+    memset(reinterpret_cast<void *>(num_push_lookup), 0,
+           sizeof(uint64_t) * MAX_APP_THREAD * 8);
+    memset(reinterpret_cast<void *>(num_push_scan), 0,
+           sizeof(uint64_t) * MAX_APP_THREAD * 8);
+    memset(reinterpret_cast<void *>(num_push_scan_kv), 0,
+           sizeof(uint64_t) * MAX_APP_THREAD * 8);
+    memset(reinterpret_cast<void *>(num_push_scan_leaf), 0,
+           sizeof(uint64_t) * MAX_APP_THREAD * 8);
   }
 
   // RDMA statistic
@@ -290,6 +324,11 @@ public:
   uint64_t num_rdma_rpc[MAX_APP_THREAD][8];
   uint64_t size_rdma_read[MAX_APP_THREAD][8];
   uint64_t size_rdma_write[MAX_APP_THREAD][8];
+  // Offloaded-task counters (per app thread, [0] used).
+  uint64_t num_push_lookup[MAX_APP_THREAD][8];    // lookups pushed to memory
+  uint64_t num_push_scan[MAX_APP_THREAD][8];      // scan RPC round-trips
+  uint64_t num_push_scan_kv[MAX_APP_THREAD][8];   // KV pairs returned by scans
+  uint64_t num_push_scan_leaf[MAX_APP_THREAD][8]; // leaves scanned remotely
 #endif
 
 private:
@@ -354,6 +393,11 @@ public:
   int rpc_insert(GlobalAddress start_node, uint64_t k, uint64_t v,
                  GlobalAddress &leaf);
   int rpc_remove(GlobalAddress start_node, uint64_t k, GlobalAddress &leaf);
+  // Range-scan pushdown. Returns #KV pairs the memory node packed (or -1 stale),
+  // fills `result_addr` (memory-side scratch slot to read the KVs back from),
+  // `max_key` (resume boundary) and `leaves` (leaves visited remotely).
+  int rpc_scan(GlobalAddress start_node, uint64_t k, int num,
+               GlobalAddress &result_addr, uint64_t &max_key, int &leaves);
 
   void free(GlobalAddress addr);
   void smart_free(const GlobalAddress &addr, int size);
@@ -502,6 +546,9 @@ inline int DSM::rpc_lookup(GlobalAddress start_node, uint64_t k,
   if (mm->level >= 1) {
     result = mm->addr.val;
   }
+#ifdef COUNT_RDMA
+  num_push_lookup[getMyThreadID()][0]++;
+#endif
   return mm->level;
 }
 
@@ -557,6 +604,36 @@ inline int DSM::rpc_insert(GlobalAddress start_node, uint64_t k, uint64_t value,
   auto mm = rpc_wait();
   leaf_addr = mm->addr;
   return mm->level;
+}
+
+inline int DSM::rpc_scan(GlobalAddress start_node, uint64_t k, int num,
+                         GlobalAddress &result_addr, uint64_t &max_key,
+                         int &leaves) {
+  RawMessage m;
+  m.type = RpcType::SCAN;
+  m.k = k;
+  m.v = static_cast<uint64_t>(num); // requested count
+  m.addr = start_node;
+
+  thread_local uint16_t dir_id = pthread_self() % memThreadCount;
+  this->rpc_call_dir(m, start_node.nodeID, dir_id);
+  dir_id = (dir_id + 1) % memThreadCount;
+
+  auto mm = rpc_wait();
+  result_addr = mm->addr;
+  max_key = mm->k;
+  leaves = static_cast<int>(mm->v);
+  int cnt = mm->level;
+
+#ifdef COUNT_RDMA
+  if (cnt > 0) {
+    auto tid = getMyThreadID();
+    num_push_scan[tid][0]++;
+    num_push_scan_kv[tid][0] += static_cast<uint64_t>(cnt);
+    num_push_scan_leaf[tid][0] += static_cast<uint64_t>(leaves);
+  }
+#endif
+  return cnt;
 }
 
 inline void DSM::free(GlobalAddress addr) { local_allocator.free(addr); }

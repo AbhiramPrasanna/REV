@@ -274,6 +274,11 @@ void thread_run(int id) {
     uint64_t w0 = dsm->num_rdma_write[rdma_tid][0];
     uint64_t c0 = dsm->num_rdma_cas[rdma_tid][0];
     uint64_t p0 = dsm->num_rdma_rpc[rdma_tid][0];
+    // Offloaded-task snapshot (delta attributed to this op below).
+    uint64_t plu0 = dsm->num_push_lookup[rdma_tid][0];
+    uint64_t psc0 = dsm->num_push_scan[rdma_tid][0];
+    uint64_t pkv0 = dsm->num_push_scan_kv[rdma_tid][0];
+    uint64_t plf0 = dsm->num_push_scan_leaf[rdma_tid][0];
 #endif
     auto op_start = std::chrono::high_resolution_clock::now();
 #endif
@@ -349,6 +354,10 @@ void thread_run(int id) {
       my_stats.remote_write += dw;
       my_stats.remote_cas += dc;
       my_stats.remote_rpc += dp;
+      my_stats.off_lookup += dsm->num_push_lookup[rdma_tid][0] - plu0;
+      my_stats.off_scan += dsm->num_push_scan[rdma_tid][0] - psc0;
+      my_stats.off_scan_kv += dsm->num_push_scan_kv[rdma_tid][0] - pkv0;
+      my_stats.off_scan_leaf += dsm->num_push_scan_leaf[rdma_tid][0] - plf0;
 #else
       // Without COUNT_RDMA we cannot attribute remote work; record as LOCAL.
       my_stats.record(lat_op, bench::CLS_LOCAL, ns);

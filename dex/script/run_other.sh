@@ -7,16 +7,22 @@
 # ===========================================================================
 set -u
 
+# ===========================================================================
+# OFFLOAD-FAVORABLE preset -- MUST be byte-identical to run.sh's block.
+# Build with -DMANUAL_PUSHDOWN=ON; A/B with RPC=1 vs RPC=0.
+# ===========================================================================
+
 # ---- workload (ratios must sum to 100) ------------------------------------
-READ=100; INSERT=0; UPDATE=0; DELETE=0; RANGE=0
+# For a lookup run instead: READ=100; RANGE=0  (mirror in run.sh).
+READ=0; INSERT=0; UPDATE=0; DELETE=0; RANGE=100
 
 # ---- topology & sizes ------------------------------------------------------
 NODENUM=2
 THREADS=36
 KMAX=36
-MEMTHREADS=4
-CACHE_MB=256
-UNIFORM=0
+MEMTHREADS=8       # raise to absorb RPCs (match run.sh)
+CACHE_MB=512       # hold ~256MB inner set; rest caches churning leaves (match run.sh)
+UNIFORM=1          # uniform favors offloading (match run.sh)
 ZIPF=0.99
 BULK=50
 WARMUP=10
@@ -27,7 +33,7 @@ CORRECT=0
 TIMEBASE=1
 EARLY=1
 INDEX=0
-RPC=1
+RPC=1              # offloading fraction [0,1]; A/B: 1 vs 0
 ADMIT=0.1
 TUNE=0
 
