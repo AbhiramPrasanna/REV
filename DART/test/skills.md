@@ -265,6 +265,60 @@ binaries, the way `script/` does for the file workloads.)
 
 ---
 
+## 6A. Baseline directory-cache sweep (two-host, two-script)
+
+The pre-wired sweep for **baseline DART** (no offloading — that concept is
+DEX-only) lives in two companion scripts, one per host. Topology:
+
+| host        | role                | script |
+|-------------|---------------------|--------|
+| `10.30.1.8` | monitor + compute   | [`script/cache_sweep_baseline.sh`](../script/cache_sweep_baseline.sh) |
+| `10.30.1.6` | memory (node 0)     | [`script/cache_sweep_baseline_other.sh`](../script/cache_sweep_baseline_other.sh) |
+
+The matrix is **directory cache ∈ {64,128,256,512} MiB** (total compute-side
+cache; `--th_b = size·1MiB / threads`) × **dist ∈ {uniform, zipf-0.99}** ×
+**op ∈ {100% lookup, 100% scan}** = **16 runs**, 30M measured ops each, over a
+**50M-key working set** (`KEY_COUNT=50000000`, matched to DEX's `BULK=50`).
+
+**Why two scripts, no SSH:** the monitor (on `.8`) owns *all* workload/sizing
+flags and pushes them to both nodes at connect time, so the memory side carries
+no config — it just relaunches the one-shot `bin/memory` 16 times. The monitor's
+connect barrier blocks until *both* nodes dial in, so start order is irrelevant;
+between configs the `.8` script restarts the monitor and the `.6` loop retries
+`bin/memory` (detecting a real run via `ready.` in its log) until it reconnects.
+
+### Steps
+
+1. **Build on both hosts** at the same absolute path: `./build.sh` → `bin/{monitor,memory,compute}`.
+2. **Hugepages on both:** `sudo sysctl -w vm.nr_hugepages=16384`.
+3. **Set the NIC index** per host (from `ibv_devices`): `CMP_NIC` in the `.8`
+   script, `MEM_NIC` in the `.6` script (both default `0`). Non-`1` IB port or
+   RoCE GID needs the source edits in [RUNNING.md](../RUNNING.md) §5.
+4. **Confirm** `ips[]` in [`src/main/compute.cc`](../src/main/compute.cc) lists
+   the memory IP as `ips[0]` (already `10.30.1.6` — no rebuild for this topology).
+5. **Keep the three sweep arrays identical** in both scripts
+   (`CACHE_TOTAL_MB`/`DISTS`/`OPS`) so the iteration counts stay in lockstep.
+6. **Launch** (either order works — whichever waits, waits):
+   ```bash
+   # on 10.30.1.6
+   ./script/cache_sweep_baseline_other.sh
+   # on 10.30.1.8
+   ./script/cache_sweep_baseline.sh
+   ```
+
+### Output
+
+Lands on **`10.30.1.8`** next to the repo root:
+- `cache_sweep_baseline_<stamp>.csv` — one row per config
+  (`dist,op,cache_total_mb,th_bytes_per_thread,threads,key_count,op_count,throughput_mops,latency_us`).
+- `sweep_logs_baseline_<stamp>/` — per-run `monitor_*.log` / `compute_*.log`.
+
+The `.6` side keeps its own `sweep_logs_baseline_memory_<stamp>/` with per-attempt
+memory logs. Expected shape: throughput rises with cache size, more steeply under
+zipfian (hot keys fit a small cache) than uniform.
+
+---
+
 ## 7. Reading a run
 
 - **Headline**: monitor prints `Total throughput = X MOps` and
@@ -292,6 +346,8 @@ binaries, the way `script/` does for the file workloads.)
 | `test/dart_microbench/bench_stats.h` | 500 ns buckets + LOCAL/REMOTE via `rtt` |
 | `test/dart_microbench/integration.md`| exact `compute.cc` / engine edits |
 | `test/dart_microbench/README.md`     | quickstart |
+| `script/cache_sweep_baseline.sh`     | baseline cache sweep — COMPUTE side (10.30.1.8) |
+| `script/cache_sweep_baseline_other.sh`| baseline cache sweep — MEMORY side (10.30.1.6) |
 
 Source touch-points (only if you apply integration):
 `include/ycsb/ycsb-timecounter.hpp`, `src/ycsb/ycsb-timecounter.cc`,
