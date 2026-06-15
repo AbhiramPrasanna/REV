@@ -780,7 +780,7 @@ public:
 
     if (state == 1 && flag) {
       // if (state == 1 && flag && rpc_rate_ != 0) {
-      GlobalAddress leaf_addr;
+      GlobalAddress leaf_addr = GlobalAddress::Null();
       int ret = 0;
       switch (rpc_type) {
       case RPC_type::LOOKUP:
@@ -805,13 +805,16 @@ public:
 
       int ret_flag = 1;
       if (ret <= 0) {
-        assert(rpc_type == RPC_type::INSERT);
+        // stale leaf / cross-node subtree / SMO needed -> retry from root.
+        // (LOOKUP/UPDATE/DELETE can all return <=0 here, not just INSERT.)
         ret_flag = -1;
       } else if (ret == 1) {
         success = true;
-        // Also check the leaf_addr in cache of compute node and invalidate it
-        // Invalidation: just remove it from page table
-        page_table_->check_and_remove(leaf_addr);
+        // Invalidate the cached copy of the *modified* leaf. Only write ops
+        // (UPDATE/INSERT/DELETE) set leaf_addr; LOOKUP leaves it Null and must
+        // NOT touch the page table (it changed nothing).
+        if (rpc_type != RPC_type::LOOKUP)
+          page_table_->check_and_remove(leaf_addr);
       } else if (ret == 2) {
         success = false;
         if (rpc_type == RPC_type::INSERT) {
@@ -851,7 +854,7 @@ public:
     uint64_t sample_idx = 10000 * rpc_rate_;
     if (idx < sample_idx) {
       int ret = 0;
-      GlobalAddress leaf_addr;
+      GlobalAddress leaf_addr = GlobalAddress::Null();
       switch (rpc_type) {
       case RPC_type::LOOKUP:
         ret = global_dsm_->rpc_lookup(global_node, k, result);
@@ -875,13 +878,16 @@ public:
 
       int ret_flag = 1;
       if (ret <= 0) {
-        assert(rpc_type == RPC_type::INSERT);
+        // stale leaf / cross-node subtree / SMO needed -> retry from root.
+        // (LOOKUP/UPDATE/DELETE can all return <=0 here, not just INSERT.)
         ret_flag = -1;
       } else if (ret == 1) {
         success = true;
-        // Also check the leaf_addr in cache of compute node and invalidate it
-        // Invalidation: just remove it from page table
-        page_table_->check_and_remove(leaf_addr);
+        // Invalidate the cached copy of the *modified* leaf. Only write ops
+        // (UPDATE/INSERT/DELETE) set leaf_addr; LOOKUP leaves it Null and must
+        // NOT touch the page table (it changed nothing).
+        if (rpc_type != RPC_type::LOOKUP)
+          page_table_->check_and_remove(leaf_addr);
       } else if (ret == 2) {
         success = false;
         if (rpc_type == RPC_type::INSERT) {
