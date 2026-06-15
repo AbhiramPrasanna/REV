@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "boost/coroutine2/all.hpp"
 
 #include "log/log.hpp"
@@ -125,6 +127,9 @@ struct PrheartNode {
     span get_prefix(uint64_t len);
     span get_one_leaf();
     uint64_t add_shortcut(uint64_t level);
+    // Parallel build: root entry that processes only children (i % nshards == shard),
+    // inserting the root's own shortcut once (shard 0). See art-node.cc.
+    uint64_t add_shortcut_sharded(uint64_t level, uint32_t shard, uint32_t nshards);
     bool is_shortcut(uint64_t prev_pos);
 
 
@@ -184,6 +189,9 @@ struct PrheartTree {
     void print_tree();
     uint64_t dfs(uint64_t level=0, uint64_t prev_pos=-1);
     uint64_t create_skip_table();
+    // One shard of the parallel build (shard in [0,nshards)). nshards==1 ⇒ identical
+    // to create_skip_table(). Each shard needs its own tree (own DMC/local buffer).
+    uint64_t create_skip_table_shard(uint32_t shard, uint32_t nshards);
     void cal_cost(bool is_email, uint64_t level=0, uint64_t prev_pos=-1);
 
 

@@ -16,6 +16,7 @@
 //
 // Header-only. Depends only on the DART include/ tree and the two generators.
 //
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <string>
@@ -155,9 +156,20 @@ class WorkloadGenerator {
         }
 
         // ---- materialize records now that buf_ will not move again ----------
+        // LOAD in SORTED key order (matches DEX bulk_load): sequential inserts
+        // land on the tree's right edge, keeping the working path cache-resident
+        // so most inserts are LOCAL instead of an RDMA round trip per key. This
+        // changes ONLY the load order; key_save_ (and thus run_ indices) is left
+        // in scramble(i) order, so the measured run mix is unaffected.
+        vec<uint64_t> load_order(spec_.key_count);
+        for (uint64_t i = 0; i < spec_.key_count; ++i) load_order[i] = i;
+        std::sort(load_order.begin(), load_order.end(),
+                  [](uint64_t a, uint64_t b) { return scramble(a) < scramble(b); });
+
         load_.reserve(spec_.key_count);
         for (uint64_t i = 0; i < spec_.key_count; ++i)
-            load_.emplace_back(operat::insert, buf_.get_span(key_save_[i]),
+            load_.emplace_back(operat::insert,
+                               buf_.get_span(key_save_[load_order[i]]),
                                buf_.get_span(val_save_), buf_.get_span(kNone));
 
         run_.reserve(run_save.size());

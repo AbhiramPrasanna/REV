@@ -84,7 +84,8 @@ uint64_t leaf_num[MAX_LEVEL];
 uint64_t node_prefix_num[MAX_LEVEL];
 uint64_t leaf_prefix_num[MAX_LEVEL];
 uint64_t leaf_len[MAX_LEVEL];
-uint64_t shortcut_num[MAX_LEVEL];
+// atomic: the parallel skip-table build increments these from multiple shards.
+std::atomic<uint64_t> shortcut_num[MAX_LEVEL];
 int costs[MAX_LEVEL];
 uint64_t compress[MAX_LEVEL];
 uint64_t node_type_num[8];
@@ -515,9 +516,16 @@ void PrheartTree::cal_cost(bool is_email, uint64_t level, uint64_t prev_pos) {
 uint64_t PrheartTree::create_skip_table() {
     return get_root().add_shortcut(prefix_list.size()-1);
 }
+uint64_t PrheartTree::create_skip_table_shard(uint32_t shard, uint32_t nshards) {
+    // DYNAMIC build is not parallelized: shard 0 does the whole serial build.
+    return shard == 0 ? create_skip_table() : 0;
+}
 #else
 uint64_t PrheartTree::create_skip_table() {
     return get_root().add_shortcut(2);
+}
+uint64_t PrheartTree::create_skip_table_shard(uint32_t shard, uint32_t nshards) {
+    return get_root().add_shortcut_sharded(2, shard, nshards);
 }
 #endif
 
@@ -2192,28 +2200,9 @@ uint64_t PrheartNode::add_shortcut(uint64_t level) {
                 uint64_t pattern = RACE::hash(key.data, key.len) >> 64;
                 uint64_t mem_idx = pattern % tree->memory_machine_num;
                 tree->rdma_cli[mem_idx]->run(tree->race_cli[mem_idx]->insert(&key, &value));
-
-                RACE::Slice ret_value;
-                char buffer[1024];
-                ret_value.data = buffer;
-                ret_value.len = 0;
-                // log_info << "[Check Correctness]" << std::endl;
-                tree->rdma_cli[mem_idx]->run(tree->race_cli[mem_idx]->search(&key, &ret_value));
-                // log_info << "[Search Done]" << std::endl;
-                // if (ret_value.len != value.len || memcmp(ret_value.data, value.data, value.len) != 0) {
-                //     RACE::Node_Meta ret_node;
-                //     std::memcpy(&ret_node, value.data, sizeof(uint64_t));
-                //     log_info << "[node] "
-                //             << " len:" << value.len
-                //             << " now pos: " << node.pos
-                //             << " type: " << node.type
-                //             << " fptr" << hex_str(node.fptr) << std::endl;
-                //     log_info << "[value] "
-                //             << " len:" << ret_value.len
-                //             << " now pos: " << ret_node.pos
-                //             << " type: " << ret_node.type
-                //             << " fptr" << hex_str(ret_node.fptr) << std::endl;
-                // }
+                // NOTE: the post-insert verification search was removed. Its result
+                // (ret_value) was only consumed by commented-out debug logging, so it
+                // was a pure extra RDMA round trip per shortcut during build.
             }
 
             for (uint32_t i = 0; i < local_len; ++i) {
@@ -2227,6 +2216,63 @@ uint64_t PrheartNode::add_shortcut(uint64_t level) {
             }
             return num;
 
+        }
+    }
+}
+
+// Sharded root entry for the PARALLEL skip-table build. Identical to add_shortcut
+// at this (root) node, EXCEPT: the root's own shortcut is inserted only by shard 0
+// (so it lands exactly once), and only root children with (i % nshards == shard)
+// are descended -- each via the normal add_shortcut, which fully builds that child's
+// independent subtree. Sibling subtrees never interact, so partitioning the root's
+// children across shards yields exactly the same skip table as the serial build.
+uint64_t PrheartNode::add_shortcut_sharded(uint64_t level, uint32_t shard, uint32_t nshards) {
+    uint64_t num = 0;
+    switch (type) {
+        case PrheartNodeType::None:
+        case PrheartNodeType::Leaf:
+            return 0;
+        default: {
+            this->rdma_read_real_data();
+            PrheartSlotData node[local_len];
+            memcpy((void*)node, (void*)tree->local_start_ptr, local_len * sizeof(PrheartSlotData));
+            uint64_t next_level = level;
+            if ((now_pos + 2) > level) {
+                do {
+                    next_level *= 2;
+                } while ((now_pos + 2) > next_level);
+                if (shard == 0) {
+                    num++;
+                    RACE::Slice key, value;
+                    auto prefix = get_prefix(next_level/2-1);
+                    shortcut_num[next_level/2-1]++;
+                    RACE::Node_Meta nmeta;
+                    nmeta.fptr = fptr;
+                    nmeta.pos = now_pos;
+                    nmeta.type = static_cast<uint8_t>(type);
+                    value.len = sizeof(uint64_t);
+                    value.data = (char*)&nmeta;
+                    key.len = prefix.size();
+                    key.data = (char*)prefix.data();
+                    uint64_t pattern = RACE::hash(key.data, key.len) >> 64;
+                    uint64_t mem_idx = pattern % tree->memory_machine_num;
+                    tree->rdma_cli[mem_idx]->run(tree->race_cli[mem_idx]->insert(&key, &value));
+                }
+            } else {
+                // root not itself a shortcut at this level; next_level unchanged
+            }
+
+            for (uint32_t i = 0; i < local_len; ++i) {
+                if ((i % nshards) != shard) continue;     // this shard owns this subtree
+                PrheartNode next(
+                    tree,
+                    node[i].node_type(),
+                    node[i].fptr(),
+                    now_pos + node[i].length()
+                );
+                num += next.add_shortcut(next_level);
+            }
+            return num;
         }
     }
 }

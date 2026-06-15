@@ -1,9 +1,11 @@
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <string>
 #include <thread>
 #include <random>
 #include <algorithm>
+#include <atomic>
 
 #include "boost/coroutine2/all.hpp"
 
@@ -62,7 +64,7 @@ extern uint64_t node_num[MAX_LEVEL];
 extern uint64_t leaf_num[MAX_LEVEL];
 extern uint64_t node_prefix_num[MAX_LEVEL];
 extern uint64_t leaf_prefix_num[MAX_LEVEL];
-extern uint64_t shortcut_num[MAX_LEVEL];
+extern std::atomic<uint64_t> shortcut_num[MAX_LEVEL];
 extern int costs[MAX_LEVEL];
 extern uint64_t node_type_num[8];
 
@@ -459,7 +461,8 @@ void create_skip_table(
     uint32_t bucket_num,
     RDMA::RDMAConnection* memory_connections,
     std::vector<RACE::Client*> race_cli,
-    std::vector<RACE::rdma_client*> rdma_cli
+    std::vector<RACE::rdma_client*> rdma_cli,
+    uint32_t nshards          // total build shards; this call is shard = thread_index
 ) {
     cpu_set_t mask;
     CPU_ZERO(&mask);
@@ -492,19 +495,17 @@ void create_skip_table(
         rdma_cli[i]->run(race_cli[i]->start(1));
     }
 
-    for (uint64_t i=0; i<MAX_LEVEL; ++i) {
-        shortcut_num[i] = 0;
-    }
-    uint64_t shortcuts = prheart_tree.create_skip_table();
-    log_info << "num shortcuts:" << shortcuts << std::endl;
-    for (uint64_t i=0; i<MAX_LEVEL; ++i) {
-        log_info << "[level " << i << "] shortcut num: " << shortcut_num[i] << std::endl;
-    }
-    
+    // NOTE: shortcut_num[] is zeroed by the caller BEFORE spawning shards, and the
+    // per-level totals are logged by the caller AFTER all shards join -- doing it
+    // here would let one shard reset/print another's in-flight counts.
+    uint64_t shortcuts = prheart_tree.create_skip_table_shard(thread_index, nshards);
+    log_info << "[shard " << thread_index << "/" << nshards
+             << "] shortcuts: " << shortcuts << std::endl;
+
     for (uint64_t i=0; i<memory_machine_num; ++i) {
         rdma_cli[i]->run(race_cli[i]->stop());
     }
-    
+
     return;
 }
 
@@ -914,20 +915,50 @@ int main(int argc, char** argv) {
 
         #ifdef SKIP_TABLE
         if (com_ind == 0) {
-            create_skip_table(
-                memory_machine_num,
-                compute_machine_num,
-                thread_num_per_compute,
-                load_thread_num,
-                1,
-                com_ind,
-                0,
-                bucket_num,
-                &rdma_conn_list[mem_thre_di(0, 0)],
-                (std::vector<RACE::Client*>)clis[0],
-                rdma_clis[0]
-            );      
-            log_info << "skip list: load done!" << std::endl;  
+            // PARALLEL skip-table build: shard the root's children across build
+            // threads. Each shard has its own DMC/tree (own local buffer) and its
+            // own per-thread RACE client (clis[t]/rdma_clis[t], all connected at
+            // startup), so subtrees are traversed concurrently. Set DART_BUILD_THREADS
+            // to override; defaults to load_thread_num, capped at the connected count.
+            uint32_t build_threads = load_thread_num;
+            if (const char* e = std::getenv("DART_BUILD_THREADS")) {
+                long v = std::atol(e);
+                if (v > 0) build_threads = (uint32_t)v;
+            }
+            if (build_threads > thread_num_per_compute) build_threads = thread_num_per_compute;
+            if (build_threads < 1) build_threads = 1;
+
+            for (uint64_t i = 0; i < MAX_LEVEL; ++i) shortcut_num[i] = 0;
+
+            log_warn << "skip table build: " << build_threads << " shard(s)" << std::endl;
+            std::vector<std::thread> sths;
+            for (uint32_t t = 0; t < build_threads; ++t) {
+                sths.emplace_back(
+                    create_skip_table,
+                    memory_machine_num,
+                    compute_machine_num,
+                    thread_num_per_compute,
+                    load_thread_num,
+                    1,
+                    com_ind,
+                    t,                                   // thread_index == shard id
+                    bucket_num,
+                    &rdma_conn_list[mem_thre_di(0, t)],
+                    (std::vector<RACE::Client*>)clis[t],
+                    rdma_clis[t],
+                    build_threads                        // nshards
+                );
+            }
+            for (auto& th : sths) th.join();
+
+            uint64_t shortcuts_total = 0;
+            for (uint64_t i = 0; i < MAX_LEVEL; ++i) {
+                uint64_t v = shortcut_num[i].load();
+                shortcuts_total += v;
+                log_info << "[level " << i << "] shortcut num: " << v << std::endl;
+            }
+            log_info << "num shortcuts:" << shortcuts_total << std::endl;
+            log_info << "skip list: load done!" << std::endl;
         }
         #endif
 
