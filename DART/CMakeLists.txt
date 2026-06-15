@@ -9,8 +9,14 @@ add_definitions(-std=c++20)
 # GCC 13+/16 no longer transitively include these; force them so legacy TUs that
 # use sleep()/usleep() (unistd), uintNN_t (cstdint), memcpy()/strlen() (cstring),
 # printf() (cstdio) compile without per-file #include patches. Applied PER-TARGET
-# below (NOT globally) so gflags' own build is left untouched.
-set(DART_FORCE_INCLUDES -include cstdint -include cstring -include cstdio -include unistd.h)
+# below (NOT globally) so gflags' own build is left untouched. The SHELL: prefix
+# stops CMake from de-duplicating the repeated "-include" flags (which would
+# otherwise strand the header names as bare input files).
+set(DART_FORCE_INCLUDES
+    "SHELL:-include cstdint"
+    "SHELL:-include cstring"
+    "SHELL:-include cstdio"
+    "SHELL:-include unistd.h")
 
 find_package(Boost REQUIRED COMPONENTS context coroutine)
 

@@ -72,7 +72,7 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 OUT="$DART_DIR/cache_sweep_baseline_${STAMP}.csv"
 LOGDIR="$DART_DIR/sweep_logs_baseline_${STAMP}"
 mkdir -p "$LOGDIR"
-echo "dist,op,cache_total_mb,th_bytes_per_thread,threads,key_count,op_count,throughput_mops,latency_us" > "$OUT"
+echo "dist,op,cache_total_mb,th_bytes_per_thread,threads,key_count,op_count,throughput_mops,latency_us,bandwidth_gbps" > "$OUT"
 
 # ------------------------------ helpers ------------------------------------
 strip_ansi() { sed -r 's/\x1B\[[0-9;?]*[A-Za-z]//g'; }
@@ -128,11 +128,12 @@ run_one() {
     wait "$mon_pid" 2>/dev/null
 
     # 4) parse results (strip ANSI color codes first)
-    local thp lat
+    local thp lat ban
     thp=$(strip_ansi < "$mlog" | grep -oE 'Total throughput = [0-9.eE+-]+' | tail -1 | grep -oE '[0-9.eE+-]+$')
     lat=$(strip_ansi < "$mlog" | grep -oE 'Average latency = [0-9.eE+-]+'  | tail -1 | grep -oE '[0-9.eE+-]+$')
-    echo "$dist,$op,$cache,$th_b,$THREADS,$KEY_COUNT,$OP_COUNT,${thp:-NA},${lat:-NA}" >> "$OUT"
-    echo "    -> throughput=${thp:-NA} MOps  latency=${lat:-NA} us   (log: $mlog)"
+    ban=$(strip_ansi < "$mlog" | grep -oE 'Total bandwidth = [0-9.eE+-]+'  | tail -1 | grep -oE '[0-9.eE+-]+$')
+    echo "$dist,$op,$cache,$th_b,$THREADS,$KEY_COUNT,$OP_COUNT,${thp:-NA},${lat:-NA},${ban:-NA}" >> "$OUT"
+    echo "    -> throughput=${thp:-NA} MOps  latency=${lat:-NA} us  bw=${ban:-NA} Gbps  (log: $mlog)"
 
     teardown                       # clean slate for the next config
     sleep 2                        # let RDMA QPs / port 9898 release
@@ -149,6 +150,27 @@ for dist in "${DISTS[@]}"; do
   done
 done
 
+# ---- summary over EVERY monitor log present (robust to partial / rerun) -----
+# Re-parses whatever monitor_<dist>_<op>_<cache>MB.log files exist in LOGDIR, so
+# you get one complete table even if the sweep was interrupted or rerun in pieces.
+SUM="$DART_DIR/cache_sweep_baseline_summary_${STAMP}.csv"
+echo "dist,op,cache_mb,throughput_mops,latency_us,bandwidth_gbps" > "$SUM"
+for dist in "${DISTS[@]}"; do
+  for op in "${OPS[@]}"; do
+    for cache in "${CACHE_TOTAL_MB[@]}"; do
+      mlog="$LOGDIR/monitor_${dist}_${op}_${cache}MB.log"
+      [ -f "$mlog" ] || continue
+      thp=$(strip_ansi < "$mlog" | grep -oE 'Total throughput = [0-9.eE+-]+' | tail -1 | grep -oE '[0-9.eE+-]+$')
+      lat=$(strip_ansi < "$mlog" | grep -oE 'Average latency = [0-9.eE+-]+'  | tail -1 | grep -oE '[0-9.eE+-]+$')
+      ban=$(strip_ansi < "$mlog" | grep -oE 'Total bandwidth = [0-9.eE+-]+'  | tail -1 | grep -oE '[0-9.eE+-]+$')
+      echo "${dist},${op},${cache},${thp:-NA},${lat:-NA},${ban:-NA}" >> "$SUM"
+    done
+  done
+done
+
 echo
-echo "Sweep complete. Results:"
-column -t -s, "$OUT" 2>/dev/null || cat "$OUT"
+echo "Sweep complete."
+echo "Per-config CSV : $OUT"
+echo "Summary table  : $SUM"
+echo
+column -t -s, "$SUM" 2>/dev/null || cat "$SUM"

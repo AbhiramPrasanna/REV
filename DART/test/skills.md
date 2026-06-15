@@ -309,9 +309,18 @@ between configs the `.8` script restarts the monitor and the `.6` loop retries
 ### Output
 
 Lands on **`10.30.1.8`** next to the repo root:
-- `cache_sweep_baseline_<stamp>.csv` — one row per config
-  (`dist,op,cache_total_mb,th_bytes_per_thread,threads,key_count,op_count,throughput_mops,latency_us`).
+- `cache_sweep_baseline_<stamp>.csv` — full per-config row
+  (`dist,op,cache_total_mb,th_bytes_per_thread,threads,key_count,op_count,throughput_mops,latency_us,bandwidth_gbps`).
+- `cache_sweep_baseline_summary_<stamp>.csv` — condensed table
+  (`dist,op,cache_mb,throughput_mops,latency_us,bandwidth_gbps`), re-parsed from
+  every `monitor_*.log` at the end so partial/rerun sweeps still aggregate cleanly.
 - `sweep_logs_baseline_<stamp>/` — per-run `monitor_*.log` / `compute_*.log`.
+
+> The DART monitor reports `throughput`, `Average latency`, and `bandwidth` only.
+> DEX-style `p99` and `rdma_read/op` (`rtt/op`) columns require the optional
+> `dart_microbench/bench_stats.h` instrumentation compiled with `BENCH_LATENCY`
+> (see §5/§7) — not enabled in the default build. There is no `offload`/`rpc`
+> dimension: DART has no pushdown, so the DEX off/on split does not apply.
 
 The `.6` side keeps its own `sweep_logs_baseline_memory_<stamp>/` with per-attempt
 memory logs. Expected shape: throughput rises with cache size, more steeply under
