@@ -6,6 +6,14 @@ project(prheart)
 add_definitions(-std=c++20)
 # add_compile_options(-g)
 
+# GCC 13+/16 no longer transitively include these; force them so legacy TUs that
+# use sleep()/usleep() (unistd), uintNN_t (cstdint), memcpy()/strlen() (cstring),
+# printf() (cstdio) compile without per-file #include patches.
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-include$<SEMICOLON>cstdint>)
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-include$<SEMICOLON>cstring>)
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-include$<SEMICOLON>cstdio>)
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-include$<SEMICOLON>unistd.h>)
+
 find_package(Boost REQUIRED COMPONENTS context coroutine)
 
 include_directories(./include)
