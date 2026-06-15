@@ -675,12 +675,24 @@ rdma_conn *rdma_worker::connect(const char *host, int port)
     uint8_t recv_buf[rdma_sock_recv_buf_size];
     int sock;
     sockaddr_in remote_addr;
-    assert_require(-1 != (sock = socket(AF_INET, SOCK_STREAM, 0)));
     bzero(&remote_addr, sizeof(remote_addr));
     remote_addr.sin_family = AF_INET;
     remote_addr.sin_port = htons(port);
     remote_addr.sin_addr.s_addr = inet_addr(host);
-    assert_require(-1 != ::connect(sock, (sockaddr *)&remote_addr, sizeof(sockaddr)));
+    // Retry the connect: at startup the compute and memory processes come up
+    // concurrently (no cross-host "wait for ready"), so the remote RACE server may
+    // not be listening yet. Recreate the socket each attempt; give up after ~60s.
+    int connected = -1;
+    const int max_attempts = 600;                 // 600 * 100ms = 60s
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        assert_require(-1 != (sock = socket(AF_INET, SOCK_STREAM, 0)));
+        connected = ::connect(sock, (sockaddr *)&remote_addr, sizeof(sockaddr));
+        if (connected != -1)
+            break;
+        close(sock);                              // failed connect: socket unusable
+        usleep(100 * 1000);                       // 100ms before retry
+    }
+    assert_require(connected != -1);
     race_log_info("socket connected");
 
     auto conn = new rdma_conn(this, sock);
