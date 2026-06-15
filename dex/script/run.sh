@@ -38,7 +38,7 @@ NODENUM=2          # total machines
 THREADS=36         # worker threads across all compute nodes
 KMAX=36            # threads/node -> CNodeCount = ceil(THREADS/KMAX)
 MEMTHREADS=4       # directory (memory-side) threads -- MUST be <= NR_DIRECTORY (4)
-CACHE_MB=512       # must hold the ~256MB inner set; rest caches churning leaves
+CACHE_MB=1024      # must hold the ~450MB inner set; rest caches churning leaves (~1.9GB)
 UNIFORM=1          # 0 = zipfian, 1 = uniform (uniform favors offloading)
 ZIPF=0.99          # skew (used when UNIFORM=0)
 BULK=50            # bulk-load keys, millions

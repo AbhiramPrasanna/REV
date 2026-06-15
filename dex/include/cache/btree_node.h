@@ -34,12 +34,15 @@ static const uint64_t swizzle_hide = (1ULL << 63) - 1;
 // bytes would need per-type allocation in the split path AND two cache pools;
 // it saves DSM only, not cache, so it is intentionally NOT done here.)
 //
-// Current: inner fanout 5 (160B geometry) -> height ~10 at 50M keys;
-//          leaf  fanout 25 (512B)         -> 100-key scan spans ~4 leaves.
+// Current: inner fanout 13 (288B geometry); leaf fanout 25 (512B).
+// NOTE on height: bulk_load inserts SORTED keys, so nodes end ~50% full and the
+// *effective* fanout is ~half of maxEntries. Empirically maxEntries=5 gave
+// height 22 (branching ~2); maxEntries=13 targets branching ~5 -> height ~10.
+// 100-key scan spans ~4 leaves. Inner working set ~450MB (size CACHE_MB above it).
 // Keep multiples of 16. leafPageSize must stay <= the RDMA buffer slot
 // (max(kLeafPageSize,kInternalPageSize) in Common.h, currently 1024); raise
 // those if you grow leafPageSize past 1024.
-static const uint64_t innerPageSize = 160; // INNER fanout (height) knob
+static const uint64_t innerPageSize = 288; // INNER fanout (height) knob
 static const uint64_t leafPageSize = 512;  // LEAF size knob (fetch cost)
 static const uint64_t pageSize = leafPageSize; // physical / cache-slot / IO size
 static const uint64_t megaLevel =
