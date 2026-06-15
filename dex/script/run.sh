@@ -23,8 +23,9 @@ set -u
 #   CACHE_MB   - MUST hold the ~256MB inner working set (so the inner path stays
 #                resident and misses are leaf-only) while leaves still churn.
 #                Too small -> inner churns too and swamps the offload signal.
-#   MEMTHREADS - raised so the MN directory threads don't saturate (which would
-#                otherwise blow up RPC tail latency and cap throughput)
+#   MEMTHREADS - MN directory threads that service RPCs. HARD CAP = NR_DIRECTORY
+#                (4, in include/Common.h). To go higher (more RPC capacity) you
+#                must raise NR_DIRECTORY and rebuild both nodes.
 # Keep this block IDENTICAL in run_other.sh.
 # ===========================================================================
 
@@ -36,7 +37,7 @@ READ=0; INSERT=0; UPDATE=0; DELETE=0; RANGE=100
 NODENUM=2          # total machines
 THREADS=36         # worker threads across all compute nodes
 KMAX=36            # threads/node -> CNodeCount = ceil(THREADS/KMAX)
-MEMTHREADS=8       # directory (memory-side) threads -- raise to absorb RPCs
+MEMTHREADS=4       # directory (memory-side) threads -- MUST be <= NR_DIRECTORY (4)
 CACHE_MB=512       # must hold the ~256MB inner set; rest caches churning leaves
 UNIFORM=1          # 0 = zipfian, 1 = uniform (uniform favors offloading)
 ZIPF=0.99          # skew (used when UNIFORM=0)

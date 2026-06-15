@@ -432,6 +432,14 @@ saturate — visible as a rising `REMOTE (miss/rpc)` p99 with throughput flat;
 and the scan scratch caps a single RPC at 256 KV pairs, so very large scans make
 several round trips (visible as `scans` ≫ number of range ops).
 
+> **`memThreadCount` is hard-capped by `NR_DIRECTORY` (4, in
+> [Common.h](include/Common.h)).** Only `NR_DIRECTORY` `DirectoryConnection`s are
+> created ([DSM.cpp:137](src/DSM.cpp#L137)) but `memThreadCount` `Directory`
+> agents are built ([DSM.cpp:63](src/DSM.cpp#L63)); setting `MEMTHREADS >
+> NR_DIRECTORY` reads uninitialized `dirCon[]` entries → garbage per-directory
+> DSM size → `Bitmap len = 0` assert in `GlobalAllocator::alloc_chunck`. To run
+> more than 4 MN service threads, raise `NR_DIRECTORY` and rebuild both nodes.
+
 ---
 
 ## 7. Tree-shape tuning: inner/leaf geometry decoupling
