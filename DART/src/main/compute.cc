@@ -19,6 +19,8 @@
 #include "prheart/prheart.hpp"
 
 #include "dart_microbench/workload_gen.h"  // in-memory working-set generator (test_func=1)
+#include "dart_microbench/bench_stats.h"   // p50/p99/p99.9 + LOCAL/REMOTE via rtt (run phase)
+#include <mutex>                            // guards the cross-thread stats enrollment
 
 // some factors here
 // #define LEVEL_COUNT
@@ -333,7 +335,8 @@ static void microbench_core(
     counter::TimeCounter& time_counter,
     std::vector<RACE::Client*> race_cli,
     std::vector<RACE::rdma_client*> rdma_cli,
-    YCSB::FileLoader::records& recs
+    YCSB::FileLoader::records& recs,
+    bool collect_stats          // true only for the measured RUN phase
 ) {
     cpu_set_t mask;
     CPU_ZERO(&mask);
@@ -369,13 +372,40 @@ static void microbench_core(
         prheart_tree.alloc_now_fptr = alloc_now_pos[thread_index];
     }
 
-    auto search_it = [&](span key, str& result) -> void { prheart_tree.search(key); };
-    auto insert_it = [&](span key, span value) -> void { prheart_tree.insert(key, value); };
-    auto update_it = [&](span key, span value) -> void { prheart_tree.update(key, value); };
-    auto scan_it = [&](span start_key, span end_key, vec<str>& result_vec) -> void {
-        prheart_tree.scan(start_key, end_key, result_vec);
+    // Per-thread latency/LOCAL-REMOTE histogram (DEX-style), RUN phase only. It is
+    // heap-allocated and intentionally NOT freed: the registry keeps the pointer and
+    // Reporter::print() reads it in main AFTER these threads have joined, so a stack
+    // local would dangle. enroll() into the shared registry is mutex-guarded.
+    static std::mutex stats_mu;
+    dart_bench::ThreadStats* ts = nullptr;
+    if (collect_stats) {
+        ts = new dart_bench::ThreadStats();
+        std::lock_guard<std::mutex> _g(stats_mu);
+        dart_bench::registry().enroll(ts);
+    }
+
+    // ScopedOp times the op and classifies it LOCAL/REMOTE via the rtt delta.
+    // collect_stats==true  <=>  ts!=nullptr, so *ts is only formed when valid.
+    auto search_it = [&](span key, str& result) -> void {
+        if (collect_stats) { dart_bench::ScopedOp _t(*ts, dart_bench::OP_READ);   prheart_tree.search(key); }
+        else prheart_tree.search(key);
     };
-    auto remove_it = [&](span key) -> void { prheart_tree.remove(key); };
+    auto insert_it = [&](span key, span value) -> void {
+        if (collect_stats) { dart_bench::ScopedOp _t(*ts, dart_bench::OP_INSERT); prheart_tree.insert(key, value); }
+        else prheart_tree.insert(key, value);
+    };
+    auto update_it = [&](span key, span value) -> void {
+        if (collect_stats) { dart_bench::ScopedOp _t(*ts, dart_bench::OP_UPDATE); prheart_tree.update(key, value); }
+        else prheart_tree.update(key, value);
+    };
+    auto scan_it = [&](span start_key, span end_key, vec<str>& result_vec) -> void {
+        if (collect_stats) { dart_bench::ScopedOp _t(*ts, dart_bench::OP_SCAN);   prheart_tree.scan(start_key, end_key, result_vec); }
+        else prheart_tree.scan(start_key, end_key, result_vec);
+    };
+    auto remove_it = [&](span key) -> void {
+        if (collect_stats) { dart_bench::ScopedOp _t(*ts, dart_bench::OP_REMOVE); prheart_tree.remove(key); }
+        else prheart_tree.remove(key);
+    };
 
     YCSB::Benchmark ycsb;
     ycsb.register_read(search_it);
@@ -432,7 +462,8 @@ void test_microbench_load(
     microbench_core(memory_machine_num, compute_machine_num, total_thread_num,
                     used_thread_num, coro_num, compute_index, thread_index,
                     payload_byte, bucket_num, memory_connections, time_counter,
-                    race_cli, rdma_cli, g_gen->load_records());
+                    race_cli, rdma_cli, g_gen->load_records(),
+                    /*collect_stats=*/false);
 }
 
 void test_microbench_run(
@@ -447,7 +478,8 @@ void test_microbench_run(
     microbench_core(memory_machine_num, compute_machine_num, total_thread_num,
                     used_thread_num, coro_num, compute_index, thread_index,
                     payload_byte, bucket_num, memory_connections, time_counter,
-                    race_cli, rdma_cli, g_gen->run_records());
+                    race_cli, rdma_cli, g_gen->run_records(),
+                    /*collect_stats=*/true);
 }
 
 void create_skip_table(
@@ -1014,6 +1046,12 @@ int main(int argc, char** argv) {
     // join threads
     for (auto& i : threads)
         i.join();
+
+    // DEX-style tail-latency + LOCAL/REMOTE report (microbench run only). Safe to
+    // call now: every run thread has joined, so all enrolled ThreadStats are stable.
+    if (is_microbench) {
+        dart_bench::Reporter::print(com_ind);
+    }
 
 
     // collect and show results

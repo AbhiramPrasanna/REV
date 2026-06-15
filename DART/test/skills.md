@@ -316,11 +316,14 @@ Lands on **`10.30.1.8`** next to the repo root:
   every `monitor_*.log` at the end so partial/rerun sweeps still aggregate cleanly.
 - `sweep_logs_baseline_<stamp>/` — per-run `monitor_*.log` / `compute_*.log`.
 
-> The DART monitor reports `throughput`, `Average latency`, and `bandwidth` only.
-> DEX-style `p99` and `rdma_read/op` (`rtt/op`) columns require the optional
-> `dart_microbench/bench_stats.h` instrumentation compiled with `BENCH_LATENCY`
-> (see §5/§7) — not enabled in the default build. There is no `offload`/`rpc`
-> dimension: DART has no pushdown, so the DEX off/on split does not apply.
+> The DART monitor reports `throughput`, `Average latency`, and `bandwidth` (these
+> land in the CSV). DEX-style **per-op tail latency** is now wired in: the microbench
+> RUN phase is instrumented with `dart_microbench/bench_stats.h` (`ScopedOp` around
+> every op, `Reporter::print` after join), so each `compute_*.log` prints a
+> `DART LATENCY BUCKETS` block with per-op **p50/p99/p99.9**, a **LOCAL/REMOTE**
+> split, and **rtt/op** (the DART analog of DEX's `rdma_read/op`). It's always on
+> for `test_func=1` (negligible overhead vs an RDMA round trip). There is no
+> `offload`/`rpc` dimension: DART has no pushdown, so the DEX off/on split does not apply.
 
 The `.6` side keeps its own `sweep_logs_baseline_memory_<stamp>/` with per-attempt
 memory logs. Expected shape: throughput rises with cache size, more steeply under
