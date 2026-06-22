@@ -43,7 +43,8 @@ foreach(main_exec monitor compute memory)
 
     add_executable(${main_exec} ${CMAKE_SOURCE_DIR}/src/main/${main_exec}.cc ${src_file})
     target_link_libraries(${main_exec} gflags ibverbs Boost::context Boost::coroutine)
-    target_compile_options(${main_exec} PRIVATE ${DART_FORCE_INCLUDES})
+    target_compile_options(${main_exec} PRIVATE "SHELL:-include cstdint" "SHELL:-include cstring" "SHELL:-include cstdio" "SHELL:-include unistd.h")
+    target_compile_options(${main_exec} PRIVATE "SHELL:-include cstdint" "SHELL:-include cstring" "SHELL:-include cstdio" "SHELL:-include unistd.h")
 
     # 幽默，这好像是我之前还没上 RDMA 的时候在 windows 上用的
     if (WIN32 OR MSVC OR MSYS)
