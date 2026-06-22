@@ -59,7 +59,7 @@ COMPUTE_NUM=1
 # cache stays at the sweep value. (DART has no memory-side service threads to
 # match DEX's MEMTHREADS=4 -- the MN does no CPU work; see COMPARISON.md sec 3.)
 # *** KEEP THREADS_SET IDENTICAL in cache_sweep_baseline_other.sh ***
-THREADS_SET=(34 36 38 40)
+THREADS_SET=(34 36)
 CORO=1
 MEM_MB=8192                     # memory-node RDMA region (the disaggregated heap)
 BUCKET=256
@@ -84,7 +84,7 @@ echo "dist,op,cache_total_mb,th_bytes_per_thread,threads,key_count,op_count,thro
 # ------------------------------ helpers ------------------------------------
 strip_ansi() { sed -r 's/\x1B\[[0-9;?]*[A-Za-z]//g'; }
 
-teardown() { killall -9 monitor compute 2>/dev/null; }   # local only (no SSH)
+teardown() { sudo killall -9 monitor compute 2>/dev/null; }   # local only (no SSH)
 
 run_one() {
     local dist="$1" op="$2" cache="$3" THREADS="$4"
@@ -108,7 +108,7 @@ run_one() {
     sleep 1
 
     # 1) monitor (background, THIS host) — owns all workload/sizing flags
-    "$DART_DIR/bin/monitor" \
+    sudo "$DART_DIR/bin/monitor" \
         --monitor_addr="$MONITOR_BIND" \
         --memory_num=$MEMORY_NUM --compute_num=$COMPUTE_NUM \
         --load_thread_num=$THREADS --run_thread_num=$THREADS --coro_num=$CORO \
@@ -126,7 +126,7 @@ run_one() {
     # 2) compute node (THIS host, blocks until the run finishes). The memory node
     #    is launched by cache_sweep_baseline_other.sh on 10.30.1.6; the monitor
     #    barrier waits for both before the run begins.
-    "$DART_DIR/bin/compute" \
+    sudo "$DART_DIR/bin/compute" \
         --monitor_addr="$MONITOR_BIND" --nic_index=$CMP_NIC --ib_port=$IB_PORT \
         --numa_node_total_num=2 --numa_node_group=0 \
         > "$LOGDIR/compute_${tag}.log" 2>&1
