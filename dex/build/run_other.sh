@@ -18,10 +18,10 @@ READ=0; INSERT=0; UPDATE=0; DELETE=0; RANGE=100
 
 # ---- topology & sizes ------------------------------------------------------
 NODENUM=2
-THREADS=36
-KMAX=36
+THREADS=32
+KMAX=32
 MEMTHREADS=4       # MUST be <= NR_DIRECTORY (4) (match run.sh)
-CACHE_MB=512       # hold ~256MB inner set; rest caches churning leaves (match run.sh)
+CACHE_MB=1024      # hold ~450MB inner set; rest caches churning leaves (match run.sh)
 UNIFORM=1          # uniform favors offloading (match run.sh)
 ZIPF=0.99
 BULK=50

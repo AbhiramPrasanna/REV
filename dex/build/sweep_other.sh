@@ -11,8 +11,8 @@ set -u
 
 # ---- must match sweep.sh ---------------------------------------------------
 NODENUM=2
-THREADS=36
-KMAX=36
+THREADS=32
+KMAX=32
 MEMTHREADS=4
 BULK=50
 WARMUP=10

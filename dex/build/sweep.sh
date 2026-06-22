@@ -23,8 +23,8 @@ set -u
 
 # ---- fixed parameters ------------------------------------------------------
 NODENUM=2
-THREADS=36
-KMAX=36
+THREADS=32
+KMAX=32
 MEMTHREADS=4       # MUST be <= NR_DIRECTORY (4)
 BULK=50            # bulk-load keys, millions
 WARMUP=10          # warmup ops, millions
