@@ -3,6 +3,7 @@
 
 #include "Connection.h"
 #include "cache/btree_rpc.h"
+#include "remote_load.h" // memory-node "remote CPU load" (dir-thread active %)
 
 #include <gperftools/profiler.h>
 
@@ -14,7 +15,7 @@ Directory::Directory(DirectoryConnection *dCon, RemoteConnection *remoteInfo,
                      uint32_t machineNR, uint16_t dirID, uint16_t nodeID,
                      int memThreadCount)
     : dCon(dCon), remoteInfo(remoteInfo), machineNR(machineNR), dirID(dirID),
-      nodeID(nodeID), dirTh(nullptr) {
+      nodeID(nodeID), memThreadCount(memThreadCount), dirTh(nullptr) {
 
   { // chunck alloctor
     GlobalAddress dsm_start;
@@ -42,6 +43,10 @@ void Directory::dirThread() {
   bindCore(39 - dirID);
   Debug::notifyInfo("dir %d launch!\n", dirID);
 
+  // Start the periodic remote-CPU-load report once (the memory node has no
+  // explicit run boundary, so this is how its steady-state load is observed).
+  remoteload::start_reporter(memThreadCount);
+
   while (true) {
     struct ibv_wc wc;
     pollWithCQ(dCon->cq, 1, &wc);
@@ -51,7 +56,12 @@ void Directory::dirThread() {
       // printf("Dir receives a mesage\n");
       auto *m = (RawMessage *)dCon->message->getMessage();
 
-      process_message(m);
+      // Attribute the time spent serving this RPC to this dir-thread: this is
+      // the "remote compute load" (vs spinning in pollWithCQ above).
+      {
+        remoteload::ScopedActive _active(dirID);
+        process_message(m);
+      }
 
       break;
     }

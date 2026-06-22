@@ -58,7 +58,11 @@
 #define DIR_MESSAGE_NR 512
 // }
 
-#define NR_DIRECTORY 4
+// Max memory-node directory (service) threads. memThreadCount must be <= this.
+// Raised 4 -> 8 to allow the memThreadCount sweep up to 8 (sweep_memthreads.sh).
+// NOTE: changing this changes per-node DSM/directory layout, so BOTH nodes must
+// be rebuilt with the same value or QP/DSM metadata desyncs.
+#define NR_DIRECTORY 8
 
 #define LOCK_VERSION 1
 

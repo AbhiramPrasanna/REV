@@ -9,6 +9,8 @@
 #include "ycsb/ycsb.hpp"
 #include "prheart/prheart.hpp"
 
+#include "dart_microbench/cpu_sampler.h"   // per-node CPU utilization (remote load)
+
 // some factors here
 #define SKIP_TABLE
 #ifdef SKIP_TABLE
@@ -27,6 +29,12 @@ DEFINE_uint64(ib_port, 1, "port of ib");
 int main(int argc, char** argv) {
 
     InstallSignalHandlers();
+
+    // Per-node CPU utilization sampler. DART's memory node does NO CPU work for
+    // ops (all access is one-sided RDMA; this process blocks on a socket until
+    // the run ends), so process% should read ~0 -- the direct evidence that the
+    // "remote load" on DART is zero (vs DEX, where offload puts work on the MN).
+    cpusample::start("memory");
 
     bool result;
     int iresult;

@@ -47,7 +47,11 @@ DART_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CACHE_TOTAL_MB=(64 128 256 512)
 DISTS=(uniform zipf99)
 OPS=(lookup scan)
-NUM_CONFIGS=$(( ${#CACHE_TOTAL_MB[@]} * ${#DISTS[@]} * ${#OPS[@]} ))   # = 16
+# Compute-thread sweep: the memory side carries no thread flags (the monitor
+# pushes them), but each thread count is a separate run, so it must be counted
+# here. KEEP THREADS_SET IDENTICAL to cache_sweep_baseline.sh.
+THREADS_SET=(32)
+NUM_CONFIGS=$(( ${#CACHE_TOTAL_MB[@]} * ${#DISTS[@]} * ${#OPS[@]} * ${#THREADS_SET[@]} ))
 
 # How long (in 1s retry attempts) to wait for the monitor between/at configs
 # before giving up on a configuration. Generous: covers the compute-side gap and

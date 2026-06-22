@@ -2,6 +2,7 @@
 // #include "Tree.h"
 #include "../util/system.hpp"
 #include "bench_stats.h"
+#include "cpu_sampler.h" // per-node CPU utilization (memory vs compute)
 #include "sherman_wrapper.h"
 #include "smart/smart_wrapper.h"
 #include "tree/leanstore_tree.h"
@@ -887,6 +888,12 @@ int main(int argc, char *argv[]) {
   } else {
     kThreadCount = kMaxThread;
   }
+
+  // Per-node CPU utilization sampler (compute node vs memory node). The memory
+  // node (node_id >= CNodeCount) only runs the busy-polling dir-threads, so its
+  // process% pins high while its USEFUL work is the dir-thread "active %" from
+  // remote_load.h; the compute node's process% is the compute load.
+  cpusample::start(node_id < CNodeCount ? "compute" : "memory");
 
   // if (node_id == 0) {
   //   test_workload_generator();

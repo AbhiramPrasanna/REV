@@ -35,8 +35,8 @@ READ=0; INSERT=0; UPDATE=0; DELETE=0; RANGE=100
 
 # ---- topology & sizes ------------------------------------------------------
 NODENUM=2          # total machines
-THREADS=36         # worker threads across all compute nodes
-KMAX=36            # threads/node -> CNodeCount = ceil(THREADS/KMAX)
+THREADS=32         # worker threads across all compute nodes
+KMAX=32            # threads/node -> CNodeCount = ceil(THREADS/KMAX)
 MEMTHREADS=4       # directory (memory-side) threads -- MUST be <= NR_DIRECTORY (4)
 CACHE_MB=1024      # must hold the ~450MB inner set; rest caches churning leaves (~1.9GB)
 UNIFORM=1          # 0 = zipfian, 1 = uniform (uniform favors offloading)

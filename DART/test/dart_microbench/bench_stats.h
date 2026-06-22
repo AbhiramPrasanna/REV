@@ -87,8 +87,10 @@ struct ScopedOp {
 
 // Merge every enrolled thread and print the report (call once per node).
 struct Reporter {
+    // Upper edge (ns) of the bucket holding percentile p (p=1.0 -> max bucket).
     static uint64_t pct(const std::vector<uint64_t>& cdf, uint64_t total,
                         double p) {
+        if (!total) return 0;
         uint64_t target = (uint64_t)(total * p);
         uint64_t acc = 0;
         for (uint64_t b = 0; b < kNumBuckets; ++b) {
@@ -96,6 +98,60 @@ struct Reporter {
             if (acc >= target) return (b + 1) * kBucketWidthNs;
         }
         return kNumBuckets * kBucketWidthNs;
+    }
+
+    // mean via bucket midpoints (matches DEX's histogram-based estimate).
+    static double mean_ns(const std::vector<uint64_t>& v, uint64_t total) {
+        if (!total) return 0.0;
+        long double sum = 0;
+        for (uint64_t b = 0; b < kNumBuckets; ++b)
+            sum += (long double)v[b] *
+                   (b * kBucketWidthNs + kBucketWidthNs / 2.0L);
+        return (double)(sum / total);
+    }
+
+    static void lat_row(const char* label, const std::vector<uint64_t>& v) {
+        uint64_t n = 0;
+        for (uint64_t b = 0; b < kNumBuckets; ++b) n += v[b];
+        if (!n) {
+            std::printf("  %-18s        (no samples)\n", label);
+            return;
+        }
+        std::printf(
+            "  %-18s n=%-10llu mean=%8.2fus  p50=%7.2fus  p90=%7.2fus  "
+            "p99=%7.2fus  p99.9=%7.2fus  max>=%6.2fus\n",
+            label, (unsigned long long)n, mean_ns(v, n) / 1000.0,
+            pct(v, n, 0.50) / 1000.0, pct(v, n, 0.90) / 1000.0,
+            pct(v, n, 0.99) / 1000.0, pct(v, n, 0.999) / 1000.0,
+            pct(v, n, 1.0) / 1000.0);
+    }
+
+    // Headline artifact: raw, non-empty 500 ns buckets as count / pct / CDF.
+    // This is the literal "number of operations in each 500 ns bucket".
+    static void print_buckets(const std::vector<uint64_t>& v) {
+        uint64_t total = 0;
+        for (uint64_t b = 0; b < kNumBuckets; ++b) total += v[b];
+        if (!total) {
+            std::printf("  (no samples)\n");
+            return;
+        }
+        std::printf("  %-22s %12s %10s %9s\n", "bucket [lo,hi) ns", "count",
+                    "pct", "cdf");
+        uint64_t cum = 0;
+        for (uint64_t i = 0; i < kNumBuckets; ++i) {
+            if (!v[i]) continue;
+            cum += v[i];
+            uint64_t lo = i * kBucketWidthNs, hi = lo + kBucketWidthNs;
+            if (i == kNumBuckets - 1)
+                std::printf("  [%9llu, +inf)        %12llu %9.4f%% %8.4f%%\n",
+                            (unsigned long long)lo, (unsigned long long)v[i],
+                            100.0 * v[i] / total, 100.0 * cum / total);
+            else
+                std::printf("  [%9llu,%9llu) %12llu %9.4f%% %8.4f%%\n",
+                            (unsigned long long)lo, (unsigned long long)hi,
+                            (unsigned long long)v[i], 100.0 * v[i] / total,
+                            100.0 * cum / total);
+        }
     }
 
     static void print(int node = 0) {
@@ -112,44 +168,53 @@ struct Reporter {
             node);
         uint64_t ops_total = 0, ops_local = 0, ops_remote = 0;
 
-        auto dump = [&](int op, int net, const char* label) {
-            const uint64_t* base = &m[(op * NET_N + net) * kNumBuckets];
-            std::vector<uint64_t> v(base, base + kNumBuckets);
-            uint64_t n = 0, sum_ns = 0;
-            for (uint64_t b = 0; b < kNumBuckets; ++b) {
-                n += v[b];
-                sum_ns += v[b] * ((b + 1) * kBucketWidthNs);
+        // Extract one merged (op,net) bucket vector; net<0 => LOCAL+REMOTE.
+        auto vec = [&](int op, int net) {
+            std::vector<uint64_t> v(kNumBuckets, 0);
+            for (int c = 0; c < NET_N; ++c) {
+                if (net >= 0 && c != net) continue;
+                const uint64_t* base = &m[(op * NET_N + c) * kNumBuckets];
+                for (uint64_t b = 0; b < kNumBuckets; ++b) v[b] += base[b];
             }
-            if (!n) return;
-            std::printf(
-                "  %-18s n=%-10llu mean=%7.2fus p50=%6.2fus p99=%6.2fus "
-                "p99.9=%6.2fus\n",
-                label, (unsigned long long)n, sum_ns / 1000.0 / n,
-                pct(v, n, 0.50) / 1000.0, pct(v, n, 0.99) / 1000.0,
-                pct(v, n, 0.999) / 1000.0);
+            return v;
         };
 
+        // Per-op-type latency summary (ALL / LOCAL / REMOTE), like DEX.
         for (int op = 0; op < OP_N; ++op) {
-            // skip op-types with no ops
+            std::vector<uint64_t> all = vec(op, -1);
             uint64_t any = 0;
-            for (int net = 0; net < NET_N; ++net)
-                for (uint64_t b = 0; b < kNumBuckets; ++b)
-                    any += m[(op * NET_N + net) * kNumBuckets + b];
+            for (uint64_t b = 0; b < kNumBuckets; ++b) any += all[b];
             if (!any) continue;
             std::printf("[%s]\n", op_name(op));
-            dump(op, NET_LOCAL, "LOCAL (cache hit)");
-            dump(op, NET_REMOTE, "REMOTE (>=1 rtt)");
+            lat_row("ALL", all);
+            lat_row("LOCAL (cache hit)", vec(op, NET_LOCAL));
+            lat_row("REMOTE (>=1 rtt)", vec(op, NET_REMOTE));
         }
 
+        // Aggregate over every op type.
+        std::vector<uint64_t> agg_all(kNumBuckets, 0), agg_loc(kNumBuckets, 0),
+            agg_rem(kNumBuckets, 0);
         for (int op = 0; op < OP_N; ++op) {
+            std::vector<uint64_t> l = vec(op, NET_LOCAL),
+                                  r = vec(op, NET_REMOTE);
             for (uint64_t b = 0; b < kNumBuckets; ++b) {
-                uint64_t l = m[(op * NET_N + NET_LOCAL) * kNumBuckets + b];
-                uint64_t r = m[(op * NET_N + NET_REMOTE) * kNumBuckets + b];
-                ops_total += l + r;
-                ops_local += l;
-                ops_remote += r;
+                agg_loc[b] += l[b];
+                agg_rem[b] += r[b];
+                agg_all[b] += l[b] + r[b];
+                ops_total += l[b] + r[b];
+                ops_local += l[b];
+                ops_remote += r[b];
             }
         }
+        std::printf("[ALL OPS]\n");
+        lat_row("ALL", agg_all);
+        lat_row("LOCAL (cache hit)", agg_loc);
+        lat_row("REMOTE (>=1 rtt)", agg_rem);
+
+        // Headline: the raw 500 ns bucket CDF over all operations.
+        std::printf("\n----- 500 ns bucket CDF (all ops) [node %d] -----\n",
+                    node);
+        print_buckets(agg_all);
 
         std::printf("\n----- LOCAL / REMOTE [node %d] -----\n", node);
         if (ops_total) {

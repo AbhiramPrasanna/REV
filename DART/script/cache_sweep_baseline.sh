@@ -52,7 +52,14 @@ DART_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # --------------------------- experiment config -----------------------------
 MEMORY_NUM=1
 COMPUTE_NUM=1
-THREADS=56                      # load_thread_num == run_thread_num
+# Compute worker threads (load_thread_num == run_thread_num). Matched to DEX's
+# 32 compute threads. This is now a SWEPT dimension, the DART analog of varying
+# THREADS in the DEX scripts: add values to study thread scaling, e.g.
+# THREADS_SET=(8 16 24 32). --th_b is recomputed per thread count so the TOTAL
+# cache stays at the sweep value. (DART has no memory-side service threads to
+# match DEX's MEMTHREADS=4 -- the MN does no CPU work; see COMPARISON.md sec 3.)
+# *** KEEP THREADS_SET IDENTICAL in cache_sweep_baseline_other.sh ***
+THREADS_SET=(34 36 38 40)
 CORO=1
 MEM_MB=8192                     # memory-node RDMA region (the disaggregated heap)
 BUCKET=256
@@ -72,7 +79,7 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 OUT="$DART_DIR/cache_sweep_baseline_${STAMP}.csv"
 LOGDIR="$DART_DIR/sweep_logs_baseline_${STAMP}"
 mkdir -p "$LOGDIR"
-echo "dist,op,cache_total_mb,th_bytes_per_thread,threads,key_count,op_count,throughput_mops,latency_us,bandwidth_gbps" > "$OUT"
+echo "dist,op,cache_total_mb,th_bytes_per_thread,threads,key_count,op_count,throughput_mops,latency_us,p99_us,bandwidth_gbps" > "$OUT"
 
 # ------------------------------ helpers ------------------------------------
 strip_ansi() { sed -r 's/\x1B\[[0-9;?]*[A-Za-z]//g'; }
@@ -80,8 +87,8 @@ strip_ansi() { sed -r 's/\x1B\[[0-9;?]*[A-Za-z]//g'; }
 teardown() { killall -9 monitor compute 2>/dev/null; }   # local only (no SSH)
 
 run_one() {
-    local dist="$1" op="$2" cache="$3"
-    local tag="${dist}_${op}_${cache}MB"
+    local dist="$1" op="$2" cache="$3" THREADS="$4"
+    local tag="${dist}_${op}_${cache}MB_t${THREADS}"
     local mlog="$LOGDIR/monitor_${tag}.log"
 
     # The cache is per-thread; the sweep value is TOTAL. Use --th_b (exact bytes)
@@ -128,12 +135,18 @@ run_one() {
     wait "$mon_pid" 2>/dev/null
 
     # 4) parse results (strip ANSI color codes first)
-    local thp lat ban
+    local thp lat ban p99 clog
+    clog="$LOGDIR/compute_${tag}.log"
     thp=$(strip_ansi < "$mlog" | grep -oE 'Total throughput = [0-9.eE+-]+' | tail -1 | grep -oE '[0-9.eE+-]+$')
     lat=$(strip_ansi < "$mlog" | grep -oE 'Average latency = [0-9.eE+-]+'  | tail -1 | grep -oE '[0-9.eE+-]+$')
     ban=$(strip_ansi < "$mlog" | grep -oE 'Total bandwidth = [0-9.eE+-]+'  | tail -1 | grep -oE '[0-9.eE+-]+$')
-    echo "$dist,$op,$cache,$th_b,$THREADS,$KEY_COUNT,$OP_COUNT,${thp:-NA},${lat:-NA},${ban:-NA}" >> "$OUT"
-    echo "    -> throughput=${thp:-NA} MOps  latency=${lat:-NA} us  bw=${ban:-NA} Gbps  (log: $mlog)"
+    # p99 of ALL ops, from the [ALL OPS] block of the DART LATENCY BUCKETS report
+    # (bench_stats.h; the "ALL" row right after the [ALL OPS] header).
+    p99=$(strip_ansi < "$clog" 2>/dev/null | awk '
+      /\[ALL OPS\]/{f=1; next}
+      f && match($0,/p99=[ ]*[0-9.]+/){s=substr($0,RSTART,RLENGTH);gsub(/p99=[ ]*/,"",s);print s; exit}')
+    echo "$dist,$op,$cache,$th_b,$THREADS,$KEY_COUNT,$OP_COUNT,${thp:-NA},${lat:-NA},${p99:-NA},${ban:-NA}" >> "$OUT"
+    echo "    -> throughput=${thp:-NA} MOps  latency=${lat:-NA} us  p99=${p99:-NA} us  bw=${ban:-NA} Gbps  (log: $mlog)"
 
     teardown                       # clean slate for the next config
     sleep 2                        # let RDMA QPs / port 9898 release
@@ -142,30 +155,38 @@ run_one() {
 # ------------------------------- the sweep ---------------------------------
 echo "BASELINE DART cache sweep (COMPUTE side, 10.30.1.8) -> $OUT  (logs in $LOGDIR)"
 echo ">>> Make sure cache_sweep_baseline_other.sh is running on 10.30.1.6 <<<"
-for dist in "${DISTS[@]}"; do
-  for op in "${OPS[@]}"; do
-    for cache in "${CACHE_TOTAL_MB[@]}"; do
-      run_one "$dist" "$op" "$cache"
+for threads in "${THREADS_SET[@]}"; do
+  for dist in "${DISTS[@]}"; do
+    for op in "${OPS[@]}"; do
+      for cache in "${CACHE_TOTAL_MB[@]}"; do
+        run_one "$dist" "$op" "$cache" "$threads"
+      done
     done
   done
 done
 
 # ---- summary over EVERY monitor log present (robust to partial / rerun) -----
-# Re-parses whatever monitor_<dist>_<op>_<cache>MB.log files exist in LOGDIR, so
-# you get one complete table even if the sweep was interrupted or rerun in pieces.
+# Re-parses whatever monitor_<dist>_<op>_<cache>MB_t<threads>.log files exist in
+# LOGDIR, so you get one complete table even if interrupted or rerun in pieces.
 SUM="$DART_DIR/cache_sweep_baseline_summary_${STAMP}.csv"
-echo "dist,op,cache_mb,throughput_mops,latency_us,bandwidth_gbps" > "$SUM"
-for dist in "${DISTS[@]}"; do
+echo "dist,op,cache_mb,threads,throughput_mops,latency_us,p99_us,bandwidth_gbps" > "$SUM"
+for threads in "${THREADS_SET[@]}"; do
+ for dist in "${DISTS[@]}"; do
   for op in "${OPS[@]}"; do
     for cache in "${CACHE_TOTAL_MB[@]}"; do
-      mlog="$LOGDIR/monitor_${dist}_${op}_${cache}MB.log"
+      mlog="$LOGDIR/monitor_${dist}_${op}_${cache}MB_t${threads}.log"
+      clog="$LOGDIR/compute_${dist}_${op}_${cache}MB_t${threads}.log"
       [ -f "$mlog" ] || continue
       thp=$(strip_ansi < "$mlog" | grep -oE 'Total throughput = [0-9.eE+-]+' | tail -1 | grep -oE '[0-9.eE+-]+$')
       lat=$(strip_ansi < "$mlog" | grep -oE 'Average latency = [0-9.eE+-]+'  | tail -1 | grep -oE '[0-9.eE+-]+$')
       ban=$(strip_ansi < "$mlog" | grep -oE 'Total bandwidth = [0-9.eE+-]+'  | tail -1 | grep -oE '[0-9.eE+-]+$')
-      echo "${dist},${op},${cache},${thp:-NA},${lat:-NA},${ban:-NA}" >> "$SUM"
+      p99=$(strip_ansi < "$clog" 2>/dev/null | awk '
+        /\[ALL OPS\]/{f=1; next}
+        f && match($0,/p99=[ ]*[0-9.]+/){s=substr($0,RSTART,RLENGTH);gsub(/p99=[ ]*/,"",s);print s; exit}')
+      echo "${dist},${op},${cache},${threads},${thp:-NA},${lat:-NA},${p99:-NA},${ban:-NA}" >> "$SUM"
     done
   done
+ done
 done
 
 echo

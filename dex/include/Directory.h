@@ -25,6 +25,7 @@ private:
   uint32_t machineNR;
   uint16_t dirID;
   uint16_t nodeID;
+  int memThreadCount; // # of dir-threads on this MN (for the remote-load report)
 
   std::thread *dirTh;
 

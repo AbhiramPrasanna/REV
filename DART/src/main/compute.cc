@@ -20,6 +20,7 @@
 
 #include "dart_microbench/workload_gen.h"  // in-memory working-set generator (test_func=1)
 #include "dart_microbench/bench_stats.h"   // p50/p99/p99.9 + LOCAL/REMOTE via rtt (run phase)
+#include "dart_microbench/cpu_sampler.h"   // per-node CPU utilization (compute load)
 #include <mutex>                            // guards the cross-thread stats enrollment
 
 // some factors here
@@ -587,6 +588,10 @@ void dfs(
 int main(int argc, char** argv) {
 
     InstallSignalHandlers();
+
+    // Per-node CPU utilization sampler. The compute node runs all the index
+    // logic (and spin-waits on RDMA), so its process% is the "compute load".
+    cpusample::start("compute");
 
     bool result;
     int iresult;
