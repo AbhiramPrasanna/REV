@@ -1129,7 +1129,8 @@ int main(int argc, char *argv[]) {
       // Per-node 500 ns latency buckets + remote-operation report for this run.
       bench::Reporter::print(bench::g_stats, kThreadCount, node_id,
                              tree->get_inner_miss(), tree->get_leaf_miss(),
-                             tree->get_cache_writeback());
+                             tree->get_cache_writeback(),
+                             tree->get_node_hit());
 #endif
 
       throughput_vec.push_back(total_cluster_tp);

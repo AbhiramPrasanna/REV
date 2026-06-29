@@ -330,16 +330,21 @@ public:
               << std::endl;
   }
 
-  uint64_t get_inner_miss() { return cache.inner_miss_; }
+  uint64_t get_inner_miss() { return cache.inner_miss_total(); }
 
-  uint64_t get_leaf_miss() { return cache.leaf_miss_; }
+  uint64_t get_leaf_miss() { return cache.leaf_miss_total(); }
 
-  uint64_t get_miss() { return cache.inner_miss_ + cache.leaf_miss_; }
+  uint64_t get_node_hit() { return cache.node_hit_total(); }
+
+  uint64_t get_miss() {
+    return cache.inner_miss_total() + cache.leaf_miss_total();
+  }
 
   uint64_t get_write_rdma() { return cache.rdma_write; }
 
   uint64_t get_all_rdma() {
-    return (cache.inner_miss_ + cache.leaf_miss_ + cache.rdma_write);
+    return (cache.inner_miss_total() + cache.leaf_miss_total() +
+            cache.rdma_write);
   }
 
   void set_left_bound(Key left) {
@@ -1864,6 +1869,21 @@ public:
         goto restart;
       }
 
+      // Path-aware cache accounting (one count per level descended): a non-null
+      // node was resolved from the local cache (HIT); a null node here -- we are
+      // past the needRestart check, so this is a genuine miss, not a retry --
+      // must be fetched from the memory node (MISS), inner vs leaf by parent
+      // level (level 1 is the leaf's parent). Holds for offload on and off:
+      // the miss is the same whether served by RDMA read or RPC pushdown.
+      if (cur_node == nullptr) {
+        if (inner->level == 1)
+          cache.record_leaf_miss(dsm_->getMyThreadID());
+        else
+          cache.record_inner_miss(dsm_->getMyThreadID());
+      } else {
+        cache.record_node_hit(dsm_->getMyThreadID());
+      }
+
       // IO flag has been inserted into the page table
       // But the operation is not finished
       if (cur_node == nullptr) {
@@ -1997,6 +2017,18 @@ public:
           new_refresh_from_root(k);
         }
         goto restart;
+      }
+
+      // Path-aware cache accounting (see lookup()): non-null = HIT resolved from
+      // local cache; null past the needRestart check = genuine MISS fetched from
+      // the memory node, inner vs leaf by parent level.
+      if (cur_node == nullptr) {
+        if (inner->level == 1)
+          cache.record_leaf_miss(dsm_->getMyThreadID());
+        else
+          cache.record_inner_miss(dsm_->getMyThreadID());
+      } else {
+        cache.record_node_hit(dsm_->getMyThreadID());
       }
 
       // IO flag has been inserted into the page table
@@ -2620,8 +2652,7 @@ public:
   // Reset the path-aware cache miss counters so the measured window excludes
   // warmup traffic.  Called right after warmup finishes (see thread_run).
   void clear_statistic() {
-    cache.inner_miss_ = 0;
-    cache.leaf_miss_ = 0;
+    cache.reset_path_stats();
     cache.full_page_miss_ = 0;
     cache.rdma_write = 0;
   }

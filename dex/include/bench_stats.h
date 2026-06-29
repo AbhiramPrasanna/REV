@@ -243,7 +243,7 @@ struct Reporter {
   // remote breakdown can show how much remote traffic is inner vs leaf.
   static void print(const ThreadStats *st, int nthreads, int node_id,
                     uint64_t inner_miss, uint64_t leaf_miss,
-                    uint64_t cache_writes) {
+                    uint64_t cache_writes, uint64_t node_hit = 0) {
     printf("\n==================== LATENCY BUCKETS (500 ns) "
            "[node %d] ====================\n",
            node_id);
@@ -347,18 +347,31 @@ struct Reporter {
       }
     }
 
-    // ---- Path-aware cache miss breakdown (inner vs leaf) ------------------
-    // Because DEX caches inner nodes along the path, inner misses should be a
-    // small fraction; leaf misses dominate the remote read traffic.
+    // ---- Path-aware cache miss rate (per node access) ---------------------
+    // Counted per level descended during traversal: a node resolved from the
+    // local cache is a HIT; a node fetched from the memory node (RDMA read or
+    // RPC pushdown) is a MISS. The MISS RATE is the headline number -- it falls
+    // as the cache grows. Because DEX caches inner nodes along the path, inner
+    // misses are a small fraction; leaf misses dominate the remote traffic.
     uint64_t path_miss = inner_miss + leaf_miss;
-    printf("\n----- PATH-AWARE CACHE MISSES [node %d] -----\n", node_id);
-    printf("  inner-node read miss     = %lu (%.2f%%)\n",
+    uint64_t node_access = node_hit + path_miss;
+    printf("\n----- PATH-AWARE CACHE MISS RATE [node %d] -----\n", node_id);
+    printf("  node accesses (hit+miss) = %lu\n", (unsigned long)node_access);
+    printf("  node cache hits          = %lu (%.2f%%)\n",
+           (unsigned long)node_hit,
+           node_access ? 100.0 * node_hit / node_access : 0.0);
+    printf("  MISS RATE                = %.4f%%  (%lu / %lu)\n",
+           node_access ? 100.0 * path_miss / node_access : 0.0,
+           (unsigned long)path_miss, (unsigned long)node_access);
+    printf("  inner-node miss          = %lu (%.2f%% of misses, %.4f%% rate)\n",
            (unsigned long)inner_miss,
-           path_miss ? 100.0 * inner_miss / path_miss : 0.0);
-    printf("  leaf-node  read miss     = %lu (%.2f%%)\n",
+           path_miss ? 100.0 * inner_miss / path_miss : 0.0,
+           node_access ? 100.0 * inner_miss / node_access : 0.0);
+    printf("  leaf-node  miss          = %lu (%.2f%% of misses, %.4f%% rate)\n",
            (unsigned long)leaf_miss,
-           path_miss ? 100.0 * leaf_miss / path_miss : 0.0);
-    printf("  total read miss          = %lu\n", (unsigned long)path_miss);
+           path_miss ? 100.0 * leaf_miss / path_miss : 0.0,
+           node_access ? 100.0 * leaf_miss / node_access : 0.0);
+    printf("  total miss               = %lu\n", (unsigned long)path_miss);
     printf("  cache writebacks         = %lu\n", (unsigned long)cache_writes);
     printf("============================================================="
            "============\n\n");

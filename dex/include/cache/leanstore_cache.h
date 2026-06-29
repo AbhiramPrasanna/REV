@@ -59,11 +59,49 @@ public:
   std::atomic<int> state; // 0 means warm-up phase, also use the page from
                           // allocator; 1 means dynamic phase
 
-  /* Below is cache statistic */
-  uint64_t inner_miss_ = 0;     // inner read miss
-  uint64_t leaf_miss_ = 0;      // leaf read miss
+  /* Below is cache statistic.
+   *
+   * Path-aware cache hit/miss is counted PER NODE ACCESS during traversal (one
+   * count per level descended): a node resolved from the local cache (swizzled
+   * pointer or page table) is a HIT; a node that must be fetched from the memory
+   * node (RDMA read or RPC pushdown) is a MISS, split into inner vs leaf. The
+   * proper miss rate is therefore (inner_miss+leaf_miss)/(hit+inner_miss+
+   * leaf_miss).  Counters are per-thread (cache-line spaced) so the 32 worker
+   * threads never contend -- matches the cache_hit[MAX_APP_THREAD][8] pattern in
+   * Tree.cpp.  Incremented from the tree traversal via record_* below. */
+  uint64_t inner_miss_arr_[MAX_APP_THREAD][8] = {};
+  uint64_t leaf_miss_arr_[MAX_APP_THREAD][8] = {};
+  uint64_t node_hit_arr_[MAX_APP_THREAD][8] = {};
   uint64_t full_page_miss_ = 0; // full read miss
   uint64_t rdma_write = 0;
+
+  inline void record_node_hit(int tid) { ++node_hit_arr_[tid][0]; }
+  inline void record_inner_miss(int tid) { ++inner_miss_arr_[tid][0]; }
+  inline void record_leaf_miss(int tid) { ++leaf_miss_arr_[tid][0]; }
+
+  uint64_t inner_miss_total() const {
+    uint64_t s = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++i)
+      s += inner_miss_arr_[i][0];
+    return s;
+  }
+  uint64_t leaf_miss_total() const {
+    uint64_t s = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++i)
+      s += leaf_miss_arr_[i][0];
+    return s;
+  }
+  uint64_t node_hit_total() const {
+    uint64_t s = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++i)
+      s += node_hit_arr_[i][0];
+    return s;
+  }
+  void reset_path_stats() {
+    memset(inner_miss_arr_, 0, sizeof(inner_miss_arr_));
+    memset(leaf_miss_arr_, 0, sizeof(leaf_miss_arr_));
+    memset(node_hit_arr_, 0, sizeof(node_hit_arr_));
+  }
 
   // Concurrent hash table
   hash_table *hash_table_;
@@ -1128,8 +1166,7 @@ public:
     if (flush_dirty)
       flush_all();
     state.store(0);
-    inner_miss_ = 0;
-    leaf_miss_ = 0;
+    reset_path_stats();
     full_page_miss_ = 0;
     rdma_write = 0;
 
@@ -1139,8 +1176,7 @@ public:
   }
 
   void flush_all() {
-    inner_miss_ = 0;
-    leaf_miss_ = 0;
+    reset_path_stats();
     // Flush where are dirty in allocator
     uint64_t start = cache_allocator::instance_->base_address;
     uint64_t page_num = cache_allocator::instance_->page_num_;
