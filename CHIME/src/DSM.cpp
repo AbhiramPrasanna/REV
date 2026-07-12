@@ -609,14 +609,22 @@ void DSM::cas_mask(GlobalAddress gaddr, uint64_t equal, uint64_t val,
 
 bool DSM::cas_mask_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
                         uint64_t *rdma_buffer, uint64_t compare_mask, uint64_t swap_mask, CoroPull* sink) {
-  cas_mask(gaddr, equal, val, rdma_buffer, compare_mask, swap_mask, true, sink);
-
-  if (sink == nullptr) {
-    ibv_wc wc;
-    pollWithCQ(iCon->cq, 1, &wc);
+  // rdma-core has no masked compare-and-swap (was ibv_exp EXT_MASKED_ATOMIC).
+  // Emulate it with read + plain 64-bit CAS. This is correct for CHIME's only
+  // masked-CAS caller -- the vacancy-aware node lock (compare_mask = lock bit,
+  // released by a plain WRITE from the single holder): we read the current word,
+  // reject if the masked bits don't match `equal` (e.g. already locked), then
+  // CAS the exact word we read to the masked-in `val`. A concurrent change to
+  // other bits just makes the CAS fail and the caller (lock_node) retries -- the
+  // same liveness the hardware masked CAS relied on, minus the "compare only the
+  // masked bits" relaxation (so slightly more retries under heavy contention).
+  read_sync((char *)rdma_buffer, gaddr, sizeof(uint64_t), sink);
+  uint64_t cur = *rdma_buffer;
+  if ((cur & compare_mask) != (equal & compare_mask)) {
+    return false;
   }
-
-  return (equal & compare_mask) == (*rdma_buffer & compare_mask);
+  uint64_t new_val = (cur & ~swap_mask) | (val & swap_mask);
+  return cas_sync(gaddr, cur, new_val, rdma_buffer, sink);
 }
 
 bool DSM::cas_mask_sync_without_sink(GlobalAddress gaddr, uint64_t equal, uint64_t val,

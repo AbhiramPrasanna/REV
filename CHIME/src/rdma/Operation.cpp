@@ -70,19 +70,6 @@ static inline void fillSgeWr(ibv_sge &sg, ibv_recv_wr &wr, uint64_t source,
   wr.num_sge = 1;
 }
 
-static inline void fillSgeWr(ibv_sge &sg, ibv_exp_send_wr &wr, uint64_t source,
-                             uint64_t size, uint32_t lkey) {
-  memset(&sg, 0, sizeof(sg));
-  sg.addr = (uintptr_t)source;
-  sg.length = size;
-  sg.lkey = lkey;
-
-  memset(&wr, 0, sizeof(wr));
-  wr.wr_id = 0;
-  wr.sg_list = &sg;
-  wr.num_sge = 1;
-}
-
 // for UD and DC
 bool rdmaSend(ibv_qp *qp, uint64_t source, uint64_t size, uint32_t lkey,
               ibv_ah *ah, uint32_t remoteQPN /* remote dct_number */,
@@ -256,33 +243,32 @@ bool rdmaFetchAndAdd(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t add,
   return true;
 }
 
+// rdma-core has no masked/bounded atomics (was ibv_exp EXT_MASKED_ATOMIC).
+// Fall back to a plain 64-bit fetch-and-add. `boundary` (carry-boundary bit) is
+// ignored; this path is unused by the default CHIME config (only the masked CAS
+// lock at Tree.cpp is exercised, emulated in DSM::cas_mask_sync).
 bool rdmaFetchAndAddBoundary(ibv_qp *qp, uint64_t source, uint64_t dest,
                              uint64_t add, uint32_t lkey, uint32_t remoteRKey,
                              uint64_t boundary, bool singal, uint64_t wr_id) {
+  (void)boundary;
   struct ibv_sge sg;
-  struct ibv_exp_send_wr wr;
-  struct ibv_exp_send_wr *wrBad;
+  struct ibv_send_wr wr;
+  struct ibv_send_wr *wrBad;
 
   fillSgeWr(sg, wr, source, 8, lkey);
 
-  wr.exp_opcode = IBV_EXP_WR_EXT_MASKED_ATOMIC_FETCH_AND_ADD;
-  wr.exp_send_flags = IBV_EXP_SEND_EXT_ATOMIC_INLINE;
+  wr.opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
   wr.wr_id = wr_id;
-
   if (singal) {
-    wr.exp_send_flags |= IBV_EXP_SEND_SIGNALED;
+    wr.send_flags = IBV_SEND_SIGNALED;
   }
 
-  wr.ext_op.masked_atomics.log_arg_sz = 3;
-  wr.ext_op.masked_atomics.remote_addr = dest;
-  wr.ext_op.masked_atomics.rkey = remoteRKey;
+  wr.wr.atomic.remote_addr = dest;
+  wr.wr.atomic.rkey = remoteRKey;
+  wr.wr.atomic.compare_add = add;
 
-  auto &op = wr.ext_op.masked_atomics.wr_data.inline_data.op.fetch_add;
-  op.add_val = add;
-  op.field_boundary = 1ull << boundary;
-
-  if (ibv_exp_post_send(qp, &wr, &wrBad)) {
-    Debug::notifyError("Send with MASK FETCH_AND_ADD failed.");
+  if (ibv_post_send(qp, &wr, &wrBad)) {
+    Debug::notifyError("Send with FETCH_AND_ADD failed.");
     return false;
   }
   return true;
@@ -319,36 +305,35 @@ bool rdmaCompareAndSwap(ibv_qp *qp, uint64_t source, uint64_t dest,
   return true;
 }
 
+// rdma-core has no masked compare-and-swap (was ibv_exp EXT_MASKED_ATOMIC).
+// Fall back to a plain 64-bit CAS; the mask arguments are ignored. The one masked
+// CAS CHIME actually relies on (the vacancy-aware lock) is emulated correctly at
+// the DSM layer (DSM::cas_mask_sync = read + this plain CAS), so this low-level
+// helper only needs to compile for the other (unused) masked wrappers.
 bool rdmaCompareAndSwapMask(ibv_qp *qp, uint64_t source, uint64_t dest,
                             uint64_t compare, uint64_t swap, uint32_t lkey,
                             uint32_t remoteRKey, uint64_t compare_mask, uint64_t swap_mask, bool singal, uint64_t wrID) {
+  (void)compare_mask;
+  (void)swap_mask;
   struct ibv_sge sg;
-  struct ibv_exp_send_wr wr;
-  struct ibv_exp_send_wr *wrBad;
+  struct ibv_send_wr wr;
+  struct ibv_send_wr *wrBad;
 
   fillSgeWr(sg, wr, source, 8, lkey);
 
-  wr.exp_opcode = IBV_EXP_WR_EXT_MASKED_ATOMIC_CMP_AND_SWP;
-  wr.exp_send_flags = IBV_EXP_SEND_EXT_ATOMIC_INLINE;
-
+  wr.opcode = IBV_WR_ATOMIC_CMP_AND_SWP;
   if (singal) {
-    wr.exp_send_flags |= IBV_EXP_SEND_SIGNALED;
+    wr.send_flags = IBV_SEND_SIGNALED;
   }
 
-  wr.ext_op.masked_atomics.log_arg_sz = 3;
-  wr.ext_op.masked_atomics.remote_addr = dest;
-  wr.ext_op.masked_atomics.rkey = remoteRKey;
+  wr.wr.atomic.remote_addr = dest;
+  wr.wr.atomic.rkey = remoteRKey;
+  wr.wr.atomic.compare_add = compare;
+  wr.wr.atomic.swap = swap;
   wr.wr_id = wrID;
 
-  auto &op = wr.ext_op.masked_atomics.wr_data.inline_data.op.cmp_swap;
-  op.compare_val = compare;
-  op.swap_val = swap;
-
-  op.compare_mask = compare_mask;
-  op.swap_mask = swap_mask;
-
-  if (ibv_exp_post_send(qp, &wr, &wrBad)) {
-    Debug::notifyError("Send with MASK ATOMIC_CMP_AND_SWP failed.");
+  if (ibv_post_send(qp, &wr, &wrBad)) {
+    Debug::notifyError("Send with ATOMIC_CMP_AND_SWP failed.");
     return false;
   }
   return true;
