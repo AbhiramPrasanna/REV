@@ -16,7 +16,9 @@
 
 % Pull figures straight from the comparison-plot directory so they stay in sync
 % with compare_dex_dart.py.  (Copy them into ./figures/ if you move the paper.)
-\graphicspath{{../compare_plots/}{C:/Users/abhir/Downloads/REV/compare_plots/}{./figures/}}
+\graphicspath{{../compare_plots/}{C:/Users/abhir/Downloads/REV/compare_plots/}{./figures/}%
+  {../dex/build/results/qload/plots/}%
+  {C:/Users/abhir/Downloads/REV/dex/build/results/qload/plots/}}
 
 \settopmatter{printacmref=false}
 \renewcommand\footnotetextcopyrightpermission[1]{}
@@ -58,8 +60,11 @@ under Zipfian lookups DEX leads at \emph{every} cache size, while uniform range
 scans need the largest cache and still trail in tail latency; and (iv)~offloading
 moves a measurable slice of useful work onto memory-node CPUs, where extra
 service threads buy throughput only until the network or compute node becomes the
-bottleneck. We frame these as a portrait of three operating points and discuss
-when each design is the right one.
+bottleneck. Finally, (v)~we measure remote cost \emph{per operation} (misses and
+RDMA reads per op), a fixed-denominator view that makes offloading's effect
+directly comparable across cache and explains why its speedup is nearly
+independent of the key distribution. We frame these as a portrait of three
+operating points and discuss when each design is the right one.
 \end{abstract}
 
 \keywords{Disaggregated memory, RDMA, ordered index, caching, compute offloading,
@@ -156,6 +161,11 @@ $\in\{$uniform, Zipfian-0.99$\}$.
         memory-node service threads raises throughput only while the memory node
         is the bottleneck; past $\sim$4 threads the gain flattens as the network
         or compute node saturates (Section~\ref{sec:memthreads}).
+  \item \textbf{A per-operation remote-cost view.} We measure \emph{misses and
+        RDMA reads per operation}---a fixed-denominator metric that compares
+        cleanly across cache and the offload switch, quantifies how offloading
+        converts page reads into RPCs, and explains why offloading's speedup is
+        nearly distribution-independent (Section~\ref{sec:missrate}).
 \end{enumerate}
 
 % ===========================================================================
@@ -258,6 +268,17 @@ against an RDMA round trip.
 All figures are produced by a single script over the committed sweep CSVs, so
 every number in the text is reproducible from the same source. Throughput is in
 Mops/s (higher is better); latency is p99 in $\mu$s (lower is better).
+
+\paragraph{Miss and traffic instrumentation.}
+DEX's path-aware cache carries a per-thread, per-level hit/miss counter that
+labels each miss inner- or leaf-node and is reset at the start of each measured
+run; dividing the miss counts by the operation count yields \emph{misses per
+operation}, and the memory-node counters give the read-vs-RPC split of the remote
+traffic. A dedicated queue-load sweep (\texttt{summary\_qload.csv}) repeats the
+point-lookup and range-scan matrix with memory-node service threads in $\{2,6\}$;
+the per-operation figures in Section~\ref{sec:missrate} are drawn from it. The
+counter is exercised in the lookup and scan traversals, which is the entire matrix
+here.
 
 % ===========================================================================
 \section{The Caching Axis: Does More Cache Catch DART?}
@@ -461,6 +482,241 @@ working set). It catches \emph{earlier under skew} (free hot-set hits) and
 \emph{needs more cache for scans} (more leaves per op). DART wins precisely when
 you cannot or should not spend memory-node CPU: it stays flat-fast with zero
 remote load, most visibly on uniform scans.
+
+% ===========================================================================
+\section{Per-Operation Remote Cost}
+\label{sec:missrate}
+% ===========================================================================
+Section~\ref{sec:offload} showed \emph{that} offloading collapses DEX's remote
+reads; here we quantify the collapse \emph{per operation}. Because the denominator
+is the operation count---identical whether offloading is on or off---this view
+compares cleanly across cache and the offload switch. DEX's path-aware cache
+counts, at each level descended, whether the next node is resolved from the local
+cache or fetched from the memory node; dividing the fetch counts by the number of
+operations gives \emph{misses per operation}, and the memory-node counters give
+the read-vs-RPC split of that remote traffic.
+
+\subsection{Misses per operation across the sweep}
+Tables~\ref{tab:mpo-lookup} and~\ref{tab:mpo-range} give misses per operation.
+Cache growth lowers every entry; skew lowers it further (Zipf keeps a hot set
+resident); offloading roughly halves it for lookups and cuts it $\sim$2.7$\times$
+for scans. The inner/leaf split (Figure~\ref{fig:mpostack}) exposes the
+mechanism and doubles as a correctness check: a no-offload lookup carries almost
+exactly \emph{one} leaf miss per operation (the counter reads
+$0.9999$--$0.9968$), which is right---each lookup touches one leaf and the
+$\sim$1.9\,GB leaf level never fits---while offloading drives that leaf band to
+$\approx0$, because the leaf is served inside the RPC and never fetched as a node.
+Scans keep an entry-leaf component but still shrink sharply.
+
+\begin{table}[t]
+  \centering
+  \caption{Misses per operation, point lookup (2 cores; 6 cores identical to
+  within $0.1\%$).}
+  \label{tab:mpo-lookup}
+  \small
+  \begin{tabular}{r rrrr}
+    \toprule
+    cache (MB) & uni off & uni on & zipf off & zipf on \\
+    \midrule
+    64  & 6.79 & 3.33 & 4.18 & 2.11 \\
+    128 & 5.66 & 2.12 & 3.20 & 1.27 \\
+    256 & 4.52 & 1.01 & 2.33 & 0.63 \\
+    512 & 3.34 & 1.00 & 1.54 & 0.54 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[t]
+  \centering
+  \caption{Misses per operation, range scan (2 cores).}
+  \label{tab:mpo-range}
+  \small
+  \begin{tabular}{r rrrr}
+    \toprule
+    cache (MB) & uni off & uni on & zipf off & zipf on \\
+    \midrule
+    64  & 22.35 & 8.18 & 15.30 & 5.33 \\
+    128 & 20.94 & 6.98 & 13.43 & 4.23 \\
+    256 & 19.22 & 5.68 & 11.46 & 3.20 \\
+    512 & 16.88 & 4.26 & \phantom{0}9.28 & 2.22 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{misses_per_op_vs_cache_lookup_uniform.png}
+    \caption{Lookup / uniform}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{misses_per_op_vs_cache_lookup_zipfian.png}
+    \caption{Lookup / Zipf-0.99}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{misses_per_op_vs_cache_range_uniform.png}
+    \caption{Scan / uniform}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{misses_per_op_vs_cache_range_zipfian.png}
+    \caption{Scan / Zipf-0.99}
+  \end{subfigure}
+  \caption{Total misses per operation vs.\ cache (fixed denominator; 2 cores;
+  shared 0--25 scale). Offloading (blue) is $\le$ no-offloading (grey) in every
+  panel; both fall with cache and skew.}
+  \label{fig:mpototal}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{misses_per_op_stacked_lookup_uniform.png}
+    \caption{Lookup / uniform}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{misses_per_op_stacked_lookup_zipfian.png}
+    \caption{Lookup / Zipf-0.99}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{misses_per_op_stacked_range_uniform.png}
+    \caption{Scan / uniform}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{misses_per_op_stacked_range_zipfian.png}
+    \caption{Scan / Zipf-0.99}
+  \end{subfigure}
+  \caption{Misses per operation split into inner (blue) vs.\ leaf (amber); each
+  bar-pair is off\,$|$\,on per cache. Offloaded lookups drive the leaf band to
+  $\approx0$ (the leaf is served inside the RPC); scans retain an entry-leaf
+  component.}
+  \label{fig:mpostack}
+\end{figure*}
+
+\subsection{Composition of the traffic, and the role of cores}
+No-offload remote traffic is 100\% one-sided reads; offloading swaps a slab of
+reads for a handful of RPCs (Figure~\ref{fig:rtsplit}). For lookups at
+$\ge256$\,MB the read band nearly vanishes and the operation is essentially one
+RPC (uniform: $4.5$ reads $\to\approx1.0$ total). Crucially, per-operation traffic
+is a \emph{compute-side} quantity: sweeping memory-node cores from 2 to 6 leaves
+it unchanged---the curves overlap in Figure~\ref{fig:rtperop}, and misses per op
+differ by $<0.1\%$. Cores act on the \emph{rate}, not the per-op demand:
+multiplying traffic by throughput, the aggregate remote-op rate delivered to the
+memory node \emph{does} separate by core count (Figure~\ref{fig:rtrate}), because
+more service threads let throughput climb. This is the queue-load reading of the
+knee in Section~\ref{sec:memthreads}.
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{remote_traffic_per_op_lookup_uniform.png}
+    \caption{Lookup / uniform}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{remote_traffic_per_op_lookup_zipfian.png}
+    \caption{Lookup / Zipf-0.99}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{remote_traffic_per_op_range_uniform.png}
+    \caption{Scan / uniform}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{remote_traffic_per_op_range_zipfian.png}
+    \caption{Scan / Zipf-0.99}
+  \end{subfigure}
+  \caption{Remote traffic \emph{per operation}, four series (offload off/on
+  $\times$ 2/6 cores). The 2- and 6-core markers overlap: per-op traffic is
+  compute-side, set by cache misses, not by memory-node threads. Offloading is the
+  lever.}
+  \label{fig:rtperop}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{remote_traffic_split_lookup_uniform.png}
+    \caption{Lookup / uniform}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{remote_traffic_split_lookup_zipfian.png}
+    \caption{Lookup / Zipf-0.99}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{remote_traffic_split_range_uniform.png}
+    \caption{Scan / uniform}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{remote_traffic_split_range_zipfian.png}
+    \caption{Scan / Zipf-0.99}
+  \end{subfigure}
+  \caption{Composition of remote traffic per op: direct RDMA reads (blue) vs.\ RPC
+  pushdowns (amber), off\,$|$\,on per cache (2 cores). Offloading converts reads
+  into a much smaller number of RPCs.}
+  \label{fig:rtsplit}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{remote_traffic_rate_lookup_uniform.png}
+    \caption{Lookup / uniform}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{remote_traffic_rate_lookup_zipfian.png}
+    \caption{Lookup / Zipf-0.99}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{remote_traffic_rate_range_uniform.png}
+    \caption{Scan / uniform}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.245\textwidth}
+    \includegraphics[width=\linewidth]{remote_traffic_rate_range_zipfian.png}
+    \caption{Scan / Zipf-0.99}
+  \end{subfigure}
+  \caption{Aggregate remote-traffic \emph{rate} (throughput $\times$ ops/op). Here
+  2 vs.\ 6 cores diverge: more service threads let throughput climb, delivering
+  more remote ops/s to the memory node.}
+  \label{fig:rtrate}
+\end{figure*}
+
+\subsection{Why offloading helps both distributions by the same factor}
+The offload/no-offload throughput ratio is nearly identical for uniform and Zipf
+(Table~\ref{tab:ratio}) even though absolute throughput differs $\sim$2$\times$.
+The misses-per-op data explains why. In this regime throughput is
+traffic-bound---for no-offload, throughput$\,\times\,$misses-per-op is nearly
+constant ($\approx7.7$ across the lookup sweep). Write misses per op as a product
+of a \emph{locality} factor set by the distribution and a \emph{structural} factor
+set by offloading. The distribution scales the offload-on and offload-off curves
+by the \emph{same} factor, so it cancels in their ratio, leaving only the offload
+term:
+\[
+\frac{\text{thr}_\text{on}}{\text{thr}_\text{off}}
+\approx\frac{\text{misses}_\text{off}}{\text{misses}_\text{on}}
+=\frac{M_0\,L(\text{dist})\,F_\text{off}}{M_0\,L(\text{dist})\,F_\text{on}}
+=\frac{F_\text{off}}{F_\text{on}} .
+\]
+Empirically the Zipf/uniform misses-per-op ratio at 64\,MB is $0.62$ (off) and
+$0.63$ (on)---the same factor that cancels. A residual constant---an RPC costs the
+memory node slightly more to serve than a one-sided read---damps the throughput
+ratio below the raw traffic ratio, but it is a property of the RPC-vs-RDMA
+mechanism, not the distribution, so the matching survives.
+
+\begin{table}[t]
+  \centering
+  \caption{Throughput ratio (offload on\,$/$\,off), point lookup, 2 cores. Nearly
+  identical across distributions despite a $\sim$2$\times$ absolute gap.}
+  \label{tab:ratio}
+  \small
+  \begin{tabular}{r rr}
+    \toprule
+    cache (MB) & uniform & zipf \\
+    \midrule
+    64  & 1.66 & 1.59 \\
+    128 & 1.85 & 1.74 \\
+    256 & 1.74 & 1.73 \\
+    512 & 1.48 & 1.45 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
 % ===========================================================================
 \section{The Remote-Thread Axis: \texttt{memThreadCount}}
