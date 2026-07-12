@@ -12,8 +12,9 @@ enum RpcType : uint8_t {
   NEW_ROOT,
   NOP,
   // --- RPC offloading (see chime_rpc.h / Directory::process_message) ---
-  LOOKUP, // point lookup pushdown: probe leaf on the memory node
-  SCAN,   // range-scan pushdown: memory node scans across sibling leaves
+  // Prefixed to avoid clashing with RequestType::SCAN (unscoped enum in Tree.h).
+  RPC_LOOKUP, // point lookup pushdown: probe leaf on the memory node
+  RPC_SCAN,   // range-scan pushdown: memory node scans across sibling leaves
 };
 
 struct RawMessage {

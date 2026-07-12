@@ -236,7 +236,7 @@ public:
   // Returns 1 (found, `result` set) or 2 (not found).
   int rpc_lookup(const GlobalAddress &leaf_addr, const Key &k, Value &result) {
     RawMessage m;
-    m.type = RpcType::LOOKUP;
+    m.type = RpcType::RPC_LOOKUP;
     m.addr = leaf_addr;
     memcpy(&m.k, k.data(), define::keyLen);
     rpc_call_dir(m, leaf_addr.nodeID, thread_id % NR_DIRECTORY);
@@ -252,7 +252,7 @@ public:
   int rpc_scan(const GlobalAddress &leaf_addr, const Key &from, const Key &to,
                int num, GlobalAddress &result_addr, Key &max_key, int &leaves) {
     RawMessage m;
-    m.type = RpcType::SCAN;
+    m.type = RpcType::RPC_SCAN;
     m.addr = leaf_addr;
     memcpy(&m.k, from.data(), define::keyLen);
     memcpy(&m.v, to.data(), define::keyLen);

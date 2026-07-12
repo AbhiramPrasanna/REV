@@ -87,7 +87,7 @@ void Directory::process_message(const RawMessage *m) {
   switch (m->type) {
 
 #ifdef ENABLE_OFFLOAD
-  case RpcType::LOOKUP: {
+  case RpcType::RPC_LOOKUP: {
     // m->addr = entry-leaf address (resolved by the CN's cached traversal),
     // m->k = key bytes. Probe the leaf locally and reply with the value.
     Key k;
@@ -100,7 +100,7 @@ void Directory::process_message(const RawMessage *m) {
     break;
   }
 
-  case RpcType::SCAN: {
+  case RpcType::RPC_SCAN: {
     // m->addr = entry leaf, m->k = `from`, m->v = `to`, m->level = requested count.
     Key from, to;
     memcpy(from.data(), &m->k, define::keyLen);
