@@ -106,10 +106,14 @@ run_one() {
   ( cd "$BUILD_DIR" && "${cmd[@]}" ) 2>&1 | tee "$log"
 
   # ---- extract headline numbers into a CSV row -------------------------
+  # NOTE: the trailing "|| true" is essential -- these greps legitimately match
+  # nothing on the COMPUTE node ("cluster throughput" only prints on node 0), and
+  # under `set -euo pipefail` a failing pipeline would abort the whole sequence
+  # after the first round (that's the "only ran OFFLOAD=off" bug).
   local tput lat
-  tput="$(grep -E 'cluster throughput' "$log" | tail -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1)"
-  lat="$(awk '/^\[ALL OPS\]/{f=1} f&&/^  ALL /{print; f=0}' "$log" \
-         | sed -nE 's/.*p99=[[:space:]]*([0-9.]+)us.*/\1/p' | head -1)"
+  tput="$( { grep -E 'cluster throughput' "$log" | tail -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1; } 2>/dev/null || true)"
+  lat="$( { awk '/^\[ALL OPS\]/{f=1} f&&/^  ALL /{print; f=0}' "$log" \
+           | sed -nE 's/.*p99=[[:space:]]*([0-9.]+)us.*/\1/p' | head -1; } 2>/dev/null || true)"
   local csv="$outdir/summary_${role}.csv"
   [[ -f "$csv" ]] || echo "workload,offload,role,cluster_tput_mops,p99_us,log" > "$csv"
   echo "${WORKLOAD},${mode},${role},${tput:-NA},${lat:-NA},${log}" >> "$csv"
