@@ -36,7 +36,7 @@ WORKLOAD="${WORKLOAD:-point-uniform}"  # point-uniform|point-zipf|range-uniform|
 ZIPF_THETA="${ZIPF_THETA:-0.99}"
 SCAN_RANGE="${SCAN_RANGE:-100}"
 BULK="${BULK:-50}"; WARMUP="${WARMUP:-10}"
-POINT_OP="${POINT_OP:-50}"; RANGE_OP="${RANGE_OP:-10}"
+POINT_OP="${POINT_OP:-50}"; RANGE_OP="${RANGE_OP:-50}"   # 50M ops per cell (DEX/DART-scale)
 
 # --- offload A/B: OFFLOAD=on -> rate 100 ; OFFLOAD=off -> rate 0 ------------
 OFFLOAD="${OFFLOAD:-on}"
@@ -92,7 +92,7 @@ run_one() {
     sleep 4
   fi
 
-  local dir="$outdir/$mode"; mkdir -p "$dir"
+  local dir="$outdir/$WORKLOAD/$mode"; mkdir -p "$dir"
   local log="$dir/${role}.log"
   local args; args="$(workload_args)"
   local cmd=("$BIN" "$NODES" "$THREADS" $args "$rate")
@@ -119,10 +119,14 @@ run_one() {
   echo "${WORKLOAD},${mode},${role},${tput:-NA},${lat:-NA},${log}" >> "$csv"
 }
 
-# Run the whole OFFLOAD sequence back-to-back (default: off then on).
-#   $1 = role (memory|compute)   env SEQUENCE (default "off on")
+# Run the full matrix back-to-back, DEX/DART-style:
+#   WORKLOADS (default all 4 cells) x SEQUENCE (default off then on).
+# Both machines MUST use the same WORKLOADS + SEQUENCE so they stay in lockstep
+# (each micro_test round ends on a shared barrier).
+#   $1 = role (memory|compute)
 run_sequence() {
   local role="$1"
+  local wls=(${WORKLOADS:-point-uniform point-zipf range-uniform range-zipf})
   local seq=(${SEQUENCE:-off on})
 
   if [[ ! -x "$BIN" ]]; then
@@ -134,21 +138,24 @@ run_sequence() {
   local ts host outdir
   ts="${SEQ_TS:-$(date +%Y%m%d_%H%M%S)}"
   host="$(hostname -s 2>/dev/null || hostname)"
-  outdir="$LOG_DIR/seq_${WORKLOAD}_${ts}"
+  outdir="$LOG_DIR/sweep_${ts}"
   mkdir -p "$outdir"
 
-  echo ">> SEQUENCE: ${seq[*]}   role=$role   results -> $outdir"
+  echo ">> SWEEP: workloads=[${wls[*]}]  offload=[${seq[*]}]  role=$role"
+  echo ">>        point op=${POINT_OP}M  range op=${RANGE_OP}M scan_range=${SCAN_RANGE}  zipf theta=${ZIPF_THETA}"
+  echo ">>        results -> $outdir"
   local m
-  for m in "${seq[@]}"; do
-    run_one "$role" "$m" "$outdir"
-    sleep 3           # let memcached / QPs settle before the next round
+  for WORKLOAD in "${wls[@]}"; do        # global: workload_args()/run_one read it
+    for m in "${seq[@]}"; do
+      run_one "$role" "$m" "$outdir"
+      sleep 3           # let memcached / QPs settle before the next round
+    done
   done
 
-  echo; echo "==================== SEQUENCE SUMMARY ($role) ===================="
+  echo; echo "==================== SWEEP SUMMARY ($role) ===================="
   cat "$outdir/summary_${role}.csv" 2>/dev/null || true
   echo
-  echo "per-round logs + summary CSV in: $outdir"
-  echo "  off:  $outdir/off/${role}.log"
-  echo "  on:   $outdir/on/${role}.log"
-  echo "================================================================="
+  echo "all logs + summary CSV under: $outdir"
+  echo "  layout: $outdir/<workload>/<off|on>/${role}.log"
+  echo "=============================================================="
 }

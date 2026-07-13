@@ -8,17 +8,19 @@
 # OFFLOAD=on, serves lookup/scan RPCs -- printing "REMOTE CPU LOAD ... active=%".
 # Node 0 also prints the per-epoch CLUSTER THROUGHPUT.
 #
-# Runs the full A/B SEQUENCE automatically: OFFLOAD off first, then on (env
-# SEQUENCE, default "off on"). Each round resets memcached and stores its
-# results under build/results/offload_ab/seq_<workload>_<ts>/{off,on}/.
+# Runs the full DEX/DART-style matrix automatically:
+#   WORKLOADS = point-uniform, point-zipf(0.99), range-uniform, range-zipf(0.99)
+#   x OFFLOAD = off then on          (4 cells x 2 = 8 rounds), 50M ops each.
+# Each round resets memcached and stores results under
+#   build/results/offload_ab/sweep_<ts>/<workload>/<off|on>/memory.log
 #
 # Start THIS first, then run_compute.sh on the compute node.
 #
-#   ./run_memory.sh                        # off then on, point-uniform
-#   WORKLOAD=point-zipf ./run_memory.sh    # different workload
-#   SEQUENCE="on off"   ./run_memory.sh    # change order / subset
+#   ./run_memory.sh                                   # full matrix
+#   WORKLOADS="point-uniform range-uniform" ./run_memory.sh   # subset
+#   SEQUENCE=on ./run_memory.sh                       # offload-only
 #
-# Must use the SAME WORKLOAD + SEQUENCE as run_compute.sh.
+# Must use the SAME WORKLOADS + SEQUENCE as run_compute.sh (they run in lockstep).
 # ===========================================================================
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench_common.sh"
 run_sequence memory
