@@ -33,15 +33,36 @@ line="$(ip -o -4 addr show 2>/dev/null | awk -v s="$SUBNET" '$4 ~ s {print; exit
 NETDEV="$(awk '{print $2}' <<<"$line")"
 MYIP="$(awk '{print $4}' <<<"$line" | cut -d/ -f1)"
 
-# 2) IB device bound to that netdev -> its trailing digit ------------------
+# 2) IB (mlx5) device -> its trailing digit -------------------------------
+# The RDMA device is usually SEPARATE from the IP interface (DART selects it by
+# --nic_index, not by name). So: (a) if the IP netdev happens to bind an IB
+# device, use it; else (b) pick the IB device with an ACTIVE port; allow an
+# explicit override with IBIDX=<digit> (mlx5_<digit>).
 IBDEV=""
 if [[ -d "/sys/class/net/$NETDEV/device/infiniband" ]]; then
   IBDEV="$(ls "/sys/class/net/$NETDEV/device/infiniband" 2>/dev/null | head -1)"
 fi
-if [[ -z "$IBDEV" ]] && command -v ibdev2netdev >/dev/null 2>&1; then
-  IBDEV="$(ibdev2netdev | awk -v d="$NETDEV" '$0 ~ d {print $1; exit}')"
+if [[ -z "$IBDEV" ]]; then                       # fall back: first ACTIVE IB dev
+  for d in /sys/class/infiniband/*; do
+    [[ -e "$d" ]] || continue
+    for st in "$d"/ports/*/state; do
+      [[ -e "$st" ]] || continue
+      if grep -qi active "$st"; then IBDEV="$(basename "$d")"; break; fi
+    done
+    [[ -n "$IBDEV" ]] && break
+  done
 fi
-[[ -n "$IBDEV" ]] || { echo "ERROR: could not map $NETDEV to an IB device (try 'ibdev2netdev')" >&2; exit 1; }
+if [[ -z "$IBDEV" ]] && command -v ibdev2netdev >/dev/null 2>&1; then
+  IBDEV="$(ibdev2netdev | awk '/Up/{print $1; exit}')"
+fi
+[[ -n "${IBIDX:-}" ]] && IBDEV="mlx5_${IBIDX}"   # explicit override
+
+if [[ -z "$IBDEV" ]]; then
+  echo "ERROR: no IB/RDMA device found. Available devices:" >&2
+  ls /sys/class/infiniband/ 2>/dev/null | sed 's/^/  /' >&2 || echo "  (none in /sys/class/infiniband)" >&2
+  echo "Run 'ibv_devices'/'ibstat', then re-run with the right one, e.g. IBIDX=0 ./configure_nic.sh" >&2
+  exit 1
+fi
 
 # CHIME matches ibv_get_device_name(dev)[5] == IB_DEV_NAME_IDX, i.e. mlx5_<X>[5]
 DIGIT="${IBDEV:5:1}"
@@ -50,12 +71,14 @@ if [[ "${IBDEV:5}" == ?* && ${#IBDEV} -gt 6 ]]; then
   echo "WARN: '$IBDEV' has a multi-digit index; CHIME keys on a single char ('$DIGIT'). Verify no other mlx5_${DIGIT}* exists." >&2
 fi
 
+LINK="$(cat /sys/class/infiniband/$IBDEV/ports/$PORT/link_layer 2>/dev/null || echo '?')"
+
 echo "discovered on $(hostname -s 2>/dev/null || hostname):"
-echo "  IP          $MYIP  (subnet $SUBNET)"
-echo "  NET_DEV     $NETDEV"
-echo "  IB_DEV      $IBDEV   -> IB_DEV_NAME_IDX '$DIGIT'"
+echo "  IP          $MYIP  (subnet $SUBNET)   [node identity only]"
+echo "  NET_DEV     $NETDEV                    [getIP(); need not be the RDMA NIC]"
+echo "  IB_DEV      $IBDEV   -> IB_DEV_NAME_IDX '$DIGIT'   link_layer=$LINK"
 echo "  MLX_PORT    $PORT"
-echo "  MLX_GID     $GID"
+echo "  MLX_GID     $GID   (override GID=<idx> if a run says 'could not get gid'; RoCE needs the RoCEv2 idx for $MYIP)"
 
 # 3) patch include/Rdma.h (comments preserved) ----------------------------
 cp "$RDMA_H" "$RDMA_H.bak.$(date +%s)"
