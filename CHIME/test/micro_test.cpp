@@ -239,8 +239,15 @@ void thread_run(int id) {
     dsm->barrier("warm_finish");
     printf("node %d warmup done in %lds\n", dsm->getMyNodeID(),
            bench_timer.end() / 1000 / 1000 / 1000);
-    // Reset boundary: exclude warmup from the measured numbers.
+    // Reset boundary: exclude warmup from the measured numbers. Warmup runs
+    // while the tree is still bulk-loading (the 16 non-loader threads start it
+    // immediately), so warmup lookups legitimately miss on an incomplete tree --
+    // counting them tanks the found-ratio. Reset here so [CORRECTNESS] reflects
+    // only the measured phase, against the fully-loaded tree.
     bench::clear_all();
+    std::fill(g_lk_found, g_lk_found + MAX_APP_THREAD, 0);
+    std::fill(g_lk_total, g_lk_total + MAX_APP_THREAD, 0);
+    std::fill(g_scan_rows, g_scan_rows + MAX_APP_THREAD, 0);
     std::fill(need_clear, need_clear + MAX_APP_THREAD, true);
     ready = true;
     warmup_cnt.store(-1);
