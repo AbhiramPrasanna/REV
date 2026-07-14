@@ -621,22 +621,26 @@ void DSM::cas_mask(GlobalAddress gaddr, uint64_t equal, uint64_t val,
 
 bool DSM::cas_mask_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
                         uint64_t *rdma_buffer, uint64_t compare_mask, uint64_t swap_mask, CoroPull* sink) {
-  // rdma-core has no masked compare-and-swap (was ibv_exp EXT_MASKED_ATOMIC).
-  // Emulate it with read + plain 64-bit CAS. This is correct for CHIME's only
-  // masked-CAS caller -- the vacancy-aware node lock (compare_mask = lock bit,
-  // released by a plain WRITE from the single holder): we read the current word,
-  // reject if the masked bits don't match `equal` (e.g. already locked), then
-  // CAS the exact word we read to the masked-in `val`. A concurrent change to
-  // other bits just makes the CAS fail and the caller (lock_node) retries -- the
-  // same liveness the hardware masked CAS relied on, minus the "compare only the
-  // masked bits" relaxation (so slightly more retries under heavy contention).
-  read_sync((char *)rdma_buffer, gaddr, sizeof(uint64_t), sink);
-  uint64_t cur = *rdma_buffer;
-  if ((cur & compare_mask) != (equal & compare_mask)) {
-    return false;
+  // rdma-core has no masked compare-and-swap (was ibv_exp EXT_MASKED_ATOMIC), so
+  // emulate it with read + plain 64-bit CAS. The plain CAS compares the WHOLE
+  // word, so a concurrent change to bits OUTSIDE compare_mask -- e.g. another
+  // holder's unlock rewriting the vacancy bitmap while the lock bit stays 0 --
+  // makes it fail even though the masked compare still holds. Reporting that as a
+  // failure is wrong: the only caller is the vacancy-aware node lock, and a
+  // spurious false makes lock_node's retry loop spin to its 10M-iteration
+  // deadlock assert under heavy contention. So retry INTERNALLY and return false
+  // ONLY when the masked bits genuinely don't match (the lock bit is set). This
+  // reproduces the hardware masked CAS stock CHIME uses (succeed iff the masked
+  // bits were unset); it does not change the lock protocol or the data structure.
+  for (int spin = 0; spin < (1 << 22); ++spin) {
+    read_sync((char *)rdma_buffer, gaddr, sizeof(uint64_t), sink);
+    uint64_t cur = *rdma_buffer;
+    if ((cur & compare_mask) != (equal & compare_mask)) return false;  // genuinely locked
+    uint64_t new_val = (cur & ~swap_mask) | (val & swap_mask);
+    if (cas_sync(gaddr, cur, new_val, rdma_buffer, sink)) return true;  // acquired
+    // CAS lost to a concurrent writer that kept the masked bits equal -> re-read.
   }
-  uint64_t new_val = (cur & ~swap_mask) | (val & swap_mask);
-  return cas_sync(gaddr, cur, new_val, rdma_buffer, sink);
+  return false;  // pathological churn; let the caller retry
 }
 
 bool DSM::cas_mask_sync_without_sink(GlobalAddress gaddr, uint64_t equal, uint64_t val,
