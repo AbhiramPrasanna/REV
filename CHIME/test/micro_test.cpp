@@ -56,7 +56,11 @@
   #define TIME_INTERVAL 0.5
 #endif
 
-#define LOADER_NUM 8
+// Bulk-load parallelism (setup only; the measured phase always uses kThreadCount
+// threads). Overridable via CHIME_LOADERS -- lowering it reduces lock contention
+// during bulk load, which sidesteps the intermittent masked-CAS-emulation wedge
+// on the rdma-core port without affecting the measured numbers.
+int LOADER_NUM = 8;
 
 extern volatile bool need_stop;
 extern volatile bool need_clear[MAX_APP_THREAD];
@@ -342,6 +346,7 @@ int main(int argc, char *argv[]) {
   dsm->registerThread();
   // Runtime index-cache size (MB) for a rebuild-free cache sweep (DEX-style).
   if (const char *cm = getenv("CHIME_CACHE_MB")) g_index_cache_mb = atoi(cm);
+  if (const char *ld = getenv("CHIME_LOADERS")) LOADER_NUM = atoi(ld);  // bulk-load threads
   if (dsm->getMyNodeID() == 0)
     printf("index cache = %d MB (CHIME_CACHE_MB)\n", g_index_cache_mb);
   tree = new Tree(dsm);
