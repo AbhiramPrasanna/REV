@@ -28,7 +28,7 @@ public:
   void statistics();
 
 private:
-  void evict_one();
+  bool evict_one();  // returns false when nothing was evictable
   void evict();
 
   bool add_entry(const Key &from, const Key &to, InternalNode *ptr);
@@ -272,44 +272,50 @@ inline bool TreeCache::invalidate(const TreeCacheEntry *entry) {
 }
 
 inline const TreeCacheEntry *TreeCache::get_a_random_entry(uint64_t &freq) {
-retry:
+  // BOUNDED sampling. When the cache is heavily over budget most entries are
+  // already invalidated (ptr == 0), so the original unbounded `goto retry` would
+  // livelock (and could hang a thread mid-operation, cascading into lock stalls).
+  // Give up after a fixed number of probes and let the caller treat it as
+  // "nothing evictable right now".
+  for (int tries = 0; tries < 128; ++tries) {
 #ifdef CACHE_MORE_INTERNAL_NODE
-  auto e = this->seek_entry(dsm->getRandomKey());
+    auto e = this->seek_entry(dsm->getRandomKey());
 #else
-  auto e = this->fine_entry(dsm->getRandomKey());
+    auto e = this->fine_entry(dsm->getRandomKey());
 #endif
-
-  if (!e) {
-    goto retry;
+    if (!e) continue;
+    auto ptr = e->ptr;
+    if (!ptr) continue;
+    freq = e->cache_entry_freq;
+    if (e->ptr != ptr) continue;      // raced with a concurrent invalidate
+    return e;
   }
-  auto ptr = e->ptr;
-  if (!ptr) {
-    goto retry;
-  }
-
-  freq = e->cache_entry_freq;
-  if (e->ptr != ptr) {
-    goto retry;
-  }
-  return e;
+  return nullptr;
 }
 
-inline void TreeCache::evict_one() {
-  uint64_t freq1, freq2;
+inline bool TreeCache::evict_one() {
+  // Random two-choices, evict the COLDER (lower access frequency) entry -- a
+  // hot/cold LFU approximation: cache_entry_freq is bumped on every hit
+  // (search_from_cache), so frequently-traversed internal nodes are kept and
+  // cold ones are dropped. Null-safe under heavy pressure.
+  uint64_t freq1 = 0, freq2 = 0;
   auto e1 = get_a_random_entry(freq1);
   auto e2 = get_a_random_entry(freq2);
-
-  if (freq1 < freq2) {
-    invalidate(e1);
-  } else {
-    invalidate(e2);
-  }
+  if (!e1 && !e2) return false;                    // nothing evictable this round
+  if (!e1) return invalidate(e2);
+  if (!e2) return invalidate(e1);
+  return invalidate(freq1 <= freq2 ? e1 : e2);     // drop the less-hot one
 }
 
 inline void TreeCache::evict() {
-  do {
-    evict_one();
-  } while (free_size.load() < 0);
+  // BOUNDED per call. The original `do { evict_one(); } while (free_size < 0)`
+  // spins forever if the deficit can't be recovered (nothing evictable, or
+  // inserts outpacing eviction). free_size is a SOFT cap: a transient overshoot
+  // is fine -- the next add_to_cache evicts again. Stop early once nothing is
+  // evictable so we never hang the insert path.
+  for (int i = 0; i < 4096 && free_size.load() < 0; ++i) {
+    if (!evict_one()) break;
+  }
 }
 
 inline void TreeCache::safely_delete(InternalNode* cached_node) {
