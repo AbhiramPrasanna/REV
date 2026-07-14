@@ -35,6 +35,7 @@
 #include "GlobalAddress.h"
 #include "Key.h"
 #include "LeafNode.h"
+#include "InternalNode.h"
 #include "Metadata.h"
 #include "VersionManager.h"
 #include "LeafVersionManager.h"
@@ -85,6 +86,23 @@ inline bool sibling_on_this_node(const GlobalAddress &sib, uint16_t node_id) {
          sib.nodeID == node_id;
 }
 
+// Scratch for decoding one internal node out of local DSM.
+struct alignas(64) InternalScratch {
+  char raw[define::allocationLeafSize];   // encoded internal, as it sits in DSM
+  char dec[define::allocationLeafSize];   // logical InternalNode
+};
+
+// Copy one internal node out of local DSM and decode it into a logical
+// InternalNode. false on a version mismatch (concurrent one-sided writer) -> retry.
+inline bool read_internal_local(char *dsm_base, GlobalAddress addr,
+                                InternalScratch &s, InternalNode *&node) {
+  std::memcpy(s.raw, dsm_base + addr.offset, define::transInternalSize);
+  if (!VersionManager<InternalNode, InternalEntry>::decode_node_versions(s.raw, s.dec))
+    return false;
+  node = (InternalNode *)s.dec;
+  return true;
+}
+
 // Point lookup. `leaf_addr` is the leaf the CN resolved via its cached internal
 // traversal. We probe it; if the key sorts past this leaf (a concurrent split
 // pushed it right), follow the sibling chain -- CHIME keys only ever migrate
@@ -117,6 +135,58 @@ inline int lookup(char *dsm_base, GlobalAddress leaf_addr, const Key &k,
       continue; // turn right
     }
     return 2;
+  }
+  return 2;
+}
+
+// DEX-style lookup pushdown from the CN's CACHE BOUNDARY (not just the leaf).
+// `node_addr`/`level` are the deepest node the CN's cache resolved; the MN walks
+// the remaining internal nodes AND the leaf entirely in local DSM, collapsing
+// what would have been (level-1) remote internal reads + the leaf read into ONE
+// RPC. This is what makes offload beat one-sided as the cache shrinks -- the
+// misses are served by the MN, mirroring DEX. Faithfully replays
+// Tree::internal_node_search (Tree.cpp:387) then probes the leaf via lookup().
+// Returns 1 (found, v_out set) or 2 (not found).
+inline int lookup_from(char *dsm_base, GlobalAddress node_addr, int level,
+                       const Key &k, Value &v_out) {
+  static thread_local InternalScratch is;
+  for (int hops = 0; hops < 64; ++hops) {   // bounded descent (height + turn-rights)
+    if (level <= 1) return lookup(dsm_base, node_addr, k, v_out);  // leaf probe
+
+    InternalNode *node = nullptr;
+    for (int spin = 0; !read_internal_local(dsm_base, node_addr, is, node); ++spin)
+      if (spin > (1 << 22)) return 2;       // pathological concurrent writer
+
+    const auto &fk = node->metadata.fence_keys;
+    if (k >= fk.highest) {                   // key migrated right (concurrent split)
+      GlobalAddress sib = node->metadata.sibling_ptr;
+      if (!sibling_on_this_node(sib, node_addr.nodeID)) return 2;
+      node_addr = sib;
+      continue;                              // re-read the sibling at the same level
+    }
+
+    level = node->metadata.level;            // same update as internal_node_search
+    auto &records = node->records;
+#ifdef UNORDERED_INTERNAL_NODE
+    std::sort(records, records + define::internalSpanSize,
+              [](const InternalEntry &a, const InternalEntry &b) {
+                if (a.key == define::kkeyNull) return false;
+                if (b.key == define::kkeyNull) return true;
+                return a.key < b.key;
+              });
+#endif
+    if (k < records[0].key) {
+      node_addr = node->metadata.leftmost_ptr;
+    } else {
+      GlobalAddress child = records[define::internalSpanSize - 1].ptr;
+      for (int i = 1; i < (int)define::internalSpanSize; ++i) {
+        if (k < records[i].key || records[i].key == define::kkeyNull) {
+          child = records[i - 1].ptr;
+          break;
+        }
+      }
+      node_addr = child;
+    }
   }
   return 2;
 }

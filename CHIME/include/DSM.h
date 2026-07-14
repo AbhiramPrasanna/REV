@@ -232,14 +232,18 @@ public:
 
 #ifdef ENABLE_OFFLOAD
   // --- RPC offloading (compute-side stubs; handlers in Directory.cpp) ---
-  // Point-lookup pushdown: ask the MN holding `leaf_addr` to probe it for `k`.
+  // Point-lookup pushdown from the CN's CACHE BOUNDARY: `node_addr`/`level` are
+  // the deepest node the CN's cache resolved (leaf if fully cached, else an
+  // internal node). The MN traverses the rest -- internals + leaf -- locally and
+  // returns the value, so cache misses are served by the MN (DEX-style).
   // Returns 1 (found, `result` set) or 2 (not found).
-  int rpc_lookup(const GlobalAddress &leaf_addr, const Key &k, Value &result) {
+  int rpc_lookup(const GlobalAddress &node_addr, int level, const Key &k, Value &result) {
     RawMessage m;
     m.type = RpcType::RPC_LOOKUP;
-    m.addr = leaf_addr;
+    m.addr = node_addr;
+    m.level = level;                 // request: starting level (reply reuses it as status)
     memcpy(&m.k, k.data(), define::keyLen);
-    rpc_call_dir(m, leaf_addr.nodeID, thread_id % NR_DIRECTORY);
+    rpc_call_dir(m, node_addr.nodeID, thread_id % NR_DIRECTORY);
     auto *mm = rpc_wait();
     if (mm->level == 1) result = mm->v;
     return mm->level;

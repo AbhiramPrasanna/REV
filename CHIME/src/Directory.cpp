@@ -88,12 +88,12 @@ void Directory::process_message(const RawMessage *m) {
 
 #ifdef ENABLE_OFFLOAD
   case RpcType::RPC_LOOKUP: {
-    // m->addr = entry-leaf address (resolved by the CN's cached traversal),
-    // m->k = key bytes. Probe the leaf locally and reply with the value.
+    // m->addr / m->level = the CN's cache-boundary node + its level; m->k = key.
+    // Traverse the remaining internals + leaf locally and reply with the value.
     Key k;
     memcpy(k.data(), &m->k, define::keyLen);
     Value v_result = define::kValueNull;
-    int ret = chime_offload::lookup((char *)dCon->dsmPool, m->addr, k, v_result);
+    int ret = chime_offload::lookup_from((char *)dCon->dsmPool, m->addr, m->level, k, v_result);
     send = (RawMessage *)dCon->message->getSendPool();
     send->level = ret;                 // 1 = found, 2 = not found
     if (ret == 1) send->v = v_result;  // inline value back to the CN

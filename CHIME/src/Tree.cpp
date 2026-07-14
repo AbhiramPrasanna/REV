@@ -1699,24 +1699,27 @@ bool Tree::search(const Key &k, Value &v, CoroPull* sink) {
   assert(level != 0);
   v = define::kValueNull;
 
+#ifdef ENABLE_OFFLOAD
+  // Cache-boundary pushdown (DEX-style): `p`/`level` are the deepest node the
+  // cache resolved. Instead of the CN reading the remaining internals + leaf
+  // over one-sided RDMA (one round trip per level below the cache boundary),
+  // push the whole descent to the memory node -- it walks internals + leaf in
+  // local memory and returns the value in ONE RPC. So the MN serves the cache
+  // MISSES: the smaller the cache, the more remote reads offload collapses.
+  if (should_offload(dsm->getMyThreadID())) {
+    Value off_v = define::kValueNull;
+    int ret = dsm->rpc_lookup(p, (int)level, k, off_v);
+    v = (ret == 1) ? off_v : define::kValueNull;
+    search_res = (ret == 1);
+    offload_lookup_cnt[dsm->getMyThreadID()] ++;
+    goto search_finish;
+  }
+#endif
+
 next:
   retry_cnt[dsm->getMyThreadID()][retry_flag] ++;
   // read leaf node
   if (level == 1) {
-#ifdef ENABLE_OFFLOAD
-    // Leaf-parent pushdown (mirrors DEX): the CN has resolved the covering leaf
-    // `p` via its cached internal traversal; instead of a one-sided leaf read,
-    // ask the memory node to probe `p` for `k`. The MN follows the sibling
-    // chain internally, so a concurrent split is handled remotely.
-    if (should_offload(dsm->getMyThreadID())) {
-      Value off_v = define::kValueNull;
-      int ret = dsm->rpc_lookup(p, k, off_v);
-      v = (ret == 1) ? off_v : define::kValueNull;
-      search_res = (ret == 1);
-      offload_lookup_cnt[dsm->getMyThreadID()] ++;
-      goto search_finish;
-    }
-#endif
     if (!leaf_node_search(p, sibling_p, k, v, from_cache, sink)) {  // return false if cache validation fail
       // cache invalidation
       assert(from_cache);
