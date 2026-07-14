@@ -343,6 +343,9 @@ int main(int argc, char *argv[]) {
 #endif
 
   generate_workload();
+  // Give the tree cache a random-key pool (bulk keys) for eviction victim
+  // selection; without it getRandomKey() divides by zero once the cache fills.
+  dsm->set_key_space(bulk_array, bulk_load_num);
   bench::clear_all();
   dsm->barrier("benchmark");
 

@@ -35,6 +35,7 @@ DSM *DSM::getInstance(const DSMConfig &conf) {
 
 DSM::DSM(const DSMConfig &conf)
     : conf(conf), appID(0), cache(conf.cacheConfig) {
+  keySpaceSize = 0;   // until loadKeySpace()/set_key_space(); guards getRandomKey
 
   baseAddr = (uint64_t)hugePageAlloc(conf.dsmSize * define::GB);
 
@@ -100,8 +101,19 @@ void DSM::loadKeySpace(const std::string& load_workloads_path, bool is_str) {
   Debug::notifyInfo("Key space load done: keySpaceSize=%d", keySpaceSize);
 }
 
+// Fill the random-key pool used by cache eviction. YCSB tests call loadKeySpace;
+// self-generating benchmarks (micro_test) call this with their bulk keys. Without
+// it keySpaceSize is 0 and getRandomKey() would divide by zero once the cache
+// overflows and evict() runs (only reached when cache < working set).
+void DSM::set_key_space(const uint64_t *keys, uint64_t n) {
+  keySpaceSize = (n < MAX_KEY_SPACE_SIZE) ? n : MAX_KEY_SPACE_SIZE;
+  for (uint64_t i = 0; i < keySpaceSize; ++i) keyBuffer[i] = int2key(keys[i]);
+  Debug::notifyInfo("Key space set: keySpaceSize=%lu", (unsigned long)keySpaceSize);
+}
+
 Key DSM::getRandomKey() {
   uint32_t seed = asm_rdtsc();
+  if (keySpaceSize == 0) return int2key(rand_r(&seed));  // no key space loaded -> avoid %0
   return keyBuffer[rand_r(&seed) % keySpaceSize];
 }
 

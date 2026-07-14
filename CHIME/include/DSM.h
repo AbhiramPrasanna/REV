@@ -21,6 +21,7 @@ class DSM {
 public:
   void registerThread();
   void loadKeySpace(const std::string& load_workloads_path, bool is_str);
+  void set_key_space(const uint64_t *keys, uint64_t n);  // random-key pool for cache eviction
   Key getRandomKey();
   Key getNoComflictKey(uint64_t key_hash, uint64_t global_thread_id, uint64_t global_thread_num);
   static DSM *getInstance(const DSMConfig &conf);
