@@ -45,6 +45,11 @@ static inline bool should_offload(int tid) {
 }
 #endif
 
+// Index-cache size (MB) as a RUNTIME knob, so a cache sweep needs no rebuild
+// (mirrors DEX's cacheSize argv). Defaults to the compile-time kIndexCacheSize;
+// the benchmark app overrides it (e.g. from CHIME_CACHE_MB) before `new Tree`.
+int g_index_cache_mb = define::kIndexCacheSize;
+
 double cache_miss[MAX_APP_THREAD];
 double cache_hit[MAX_APP_THREAD];
 uint64_t lock_fail[MAX_APP_THREAD];
@@ -87,15 +92,15 @@ Tree::Tree(DSM *dsm, uint16_t tree_id, bool init_root) : dsm(dsm), tree_id(tree_
 
 #ifdef TREE_ENABLE_CACHE
 #ifdef SPECULATIVE_READ
-  if (define::kIndexCacheSize > define::kHotspotBufSize + 20) tree_cache = new TreeCache(define::kIndexCacheSize - define::kHotspotBufSize, dsm);  // enable hotspot idx cache
-  else tree_cache = new TreeCache(define::kIndexCacheSize, dsm);
+  if (g_index_cache_mb > define::kHotspotBufSize + 20) tree_cache = new TreeCache(g_index_cache_mb - define::kHotspotBufSize, dsm);  // enable hotspot idx cache
+  else tree_cache = new TreeCache(g_index_cache_mb, dsm);
 #else
-  tree_cache = new TreeCache(define::kIndexCacheSize, dsm);
+  tree_cache = new TreeCache(g_index_cache_mb, dsm);
 #endif
 #endif
 
 #ifdef SPECULATIVE_READ
-  if (define::kIndexCacheSize > define::kHotspotBufSize + 20) idx_cache = new IdxCache(define::kHotspotBufSize, dsm);
+  if (g_index_cache_mb > define::kHotspotBufSize + 20) idx_cache = new IdxCache(define::kHotspotBufSize, dsm);
   else idx_cache = new IdxCache(0, dsm);
 #endif
 

@@ -138,7 +138,13 @@ constexpr uint32_t cachelineSize   = 64;
 constexpr uint32_t blockSize       = cachelineSize - versionSize;
 
 // Leaf Node
-constexpr uint32_t leafSpanSize    = 64;  // 64
+// [CACHE-SWEEP GEOMETRY] 16 (was 64). Smaller leaves => more leaves => the
+// compute-side INDEX cache (kIndexCacheSize, internals only) working set grows
+// from ~20MB to ~84MB for 50M keys, so a 32-512MB cache sweep is meaningful and
+// comparable to DEX. Must be a multiple of neighborSize (8) and >= neighborSize.
+// (Increasing internalSpanSize does NOT help: level-1 internal bytes are ~=
+// num_leaves*16 regardless of fanout.) Set back to 64 for stock CHIME.
+constexpr uint32_t leafSpanSize    = 16;
 #ifdef SIBLING_BASED_VALIDATION
 constexpr uint32_t scatterMetadataSize = versionSize + sizeof(uint8_t) + sizeof(uint64_t);
 #else

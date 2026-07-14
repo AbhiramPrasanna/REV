@@ -60,6 +60,7 @@
 
 extern volatile bool need_stop;
 extern volatile bool need_clear[MAX_APP_THREAD];
+extern int g_index_cache_mb;   // runtime index-cache size (MB); see Tree.cpp
 
 #ifdef ENABLE_OFFLOAD
 extern uint64_t offload_lookup_cnt[MAX_APP_THREAD];
@@ -332,6 +333,10 @@ int main(int argc, char *argv[]) {
   dsm = DSM::getInstance(config);
   bindCore(kThreadCount * 2 + 1);
   dsm->registerThread();
+  // Runtime index-cache size (MB) for a rebuild-free cache sweep (DEX-style).
+  if (const char *cm = getenv("CHIME_CACHE_MB")) g_index_cache_mb = atoi(cm);
+  if (dsm->getMyNodeID() == 0)
+    printf("index cache = %d MB (CHIME_CACHE_MB)\n", g_index_cache_mb);
   tree = new Tree(dsm);
 #ifdef ENABLE_OFFLOAD
   g_offload_rate = kOffloadRate;

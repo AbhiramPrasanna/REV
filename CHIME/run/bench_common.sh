@@ -104,7 +104,12 @@ run_one() {
   echo "## ${cmd[*]}"
   echo "## log: $log"
   echo "############################################################"; echo
-  ( cd "$BUILD_DIR" && "${cmd[@]}" ) 2>&1 | tee "$log"
+  # Runtime index-cache size (MB) via env -> no rebuild between cache points.
+  if [[ "${CACHE_CUR:-}" =~ ^[0-9]+$ ]]; then
+    ( cd "$BUILD_DIR" && CHIME_CACHE_MB="$CACHE_CUR" "${cmd[@]}" ) 2>&1 | tee "$log"
+  else
+    ( cd "$BUILD_DIR" && "${cmd[@]}" ) 2>&1 | tee "$log"
+  fi
 
   # ---- extract headline numbers into a CSV row -------------------------
   # NOTE: the trailing "|| true" is essential -- these greps legitimately match
@@ -118,16 +123,6 @@ run_one() {
   local csv="${SWEEP_CSV:-$outdir/summary_${role}.csv}"
   [[ -f "$csv" ]] || echo "cache_mb,workload,offload,role,cluster_tput_mops,p99_us,log" > "$csv"
   echo "${CACHE_CUR:-NA},${WORKLOAD},${mode},${role},${tput:-NA},${lat:-NA},${log}" >> "$csv"
-}
-
-# Set kIndexCacheSize (MB) in Common.h and rebuild. Both machines call this with
-# the SAME size list so their binaries match at each cache point.
-set_index_cache_mb() {
-  local mb="$1"
-  echo ">> [cache] kIndexCacheSize = ${mb} MB -> rebuilding $BIN ..."
-  sed -i -E "s/(constexpr[[:space:]]+int[[:space:]]+kIndexCacheSize[[:space:]]*=[[:space:]]*)[0-9]+/\1${mb}/" "$COMMON_H"
-  ( cd "$BUILD_DIR" && make -j ) >/tmp/chime_cache_build.log 2>&1 || {
-    echo "ERROR: rebuild failed at cache=${mb}MB (see /tmp/chime_cache_build.log)" >&2; exit 1; }
 }
 
 # One WORKLOADS x SEQUENCE matrix into $2.  $1 = role, $2 = outdir
@@ -176,11 +171,10 @@ run_sequence() {
     CACHE_CUR="build"
     _run_matrix "$role" "$base"
   else
-    echo ">>        CACHE SWEEP kIndexCacheSize=[${caches[*]}] MB (rebuild per size)"
+    echo ">>        CACHE SWEEP CHIME_CACHE_MB=[${caches[*]}] (runtime, no rebuild)"
     local cmb
     for cmb in "${caches[@]}"; do
-      set_index_cache_mb "$cmb"
-      CACHE_CUR="$cmb"
+      CACHE_CUR="$cmb"                     # passed to micro_test as CHIME_CACHE_MB
       _run_matrix "$role" "$base/cache_${cmb}MB"
     done
   fi

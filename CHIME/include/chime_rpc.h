@@ -86,10 +86,16 @@ inline bool sibling_on_this_node(const GlobalAddress &sib, uint16_t node_id) {
          sib.nodeID == node_id;
 }
 
-// Scratch for decoding one internal node out of local DSM.
+// Scratch for decoding one internal node out of local DSM. Sized to the LARGER
+// of leaf/internal node footprints, so it is safe even when leafSpanSize <
+// internalSpanSize (internal node bigger than a leaf, e.g. under a cache-sweep
+// geometry that shrinks the leaf).
+static constexpr uint32_t kNodeScratchBytes =
+    (define::allocationLeafSize > define::allocationInternalSize)
+        ? define::allocationLeafSize : define::allocationInternalSize;
 struct alignas(64) InternalScratch {
-  char raw[define::allocationLeafSize];   // encoded internal, as it sits in DSM
-  char dec[define::allocationLeafSize];   // logical InternalNode
+  char raw[kNodeScratchBytes];   // encoded internal, as it sits in DSM
+  char dec[kNodeScratchBytes];   // logical InternalNode
 };
 
 // Copy one internal node out of local DSM and decode it into a logical
