@@ -161,11 +161,23 @@ void generate_workload() {
 }
 
 
+// Correctness signal: lookups found and scan rows returned, per thread. On a
+// static (read-only) tree these MUST match between OFFLOAD off and on -- a
+// mismatch means the offload traversal returned wrong results.
+uint64_t g_lk_found[MAX_APP_THREAD] = {0};
+uint64_t g_lk_total[MAX_APP_THREAD] = {0};
+uint64_t g_scan_rows[MAX_APP_THREAD] = {0};
+
 // Execute one packed item.
 inline void run_item(uint64_t item, CoroPull *sink) {
   MicroOp op = static_cast<MicroOp>(item >> 56);
   Key k = int2key(item & kOpMask);
-  if (op == M_LOOKUP) { Value v; tree->search(k, v, sink); }
+  if (op == M_LOOKUP) {
+    Value v;
+    bool f = tree->search(k, v, sink);
+    int t = dsm->getMyThreadID();
+    g_lk_total[t]++; if (f) g_lk_found[t]++;
+  }
   else if (op == M_INSERT) { tree->insert(k, randval(e), sink); }
   else if (op == M_UPDATE) { tree->update(k, randval(e), sink); }
   else {
@@ -175,6 +187,7 @@ inline void run_item(uint64_t item, CoroPull *sink) {
 #else
     tree->range_query(k, k + (uint8_t)scan_range, ret);
 #endif
+    g_scan_rows[dsm->getMyThreadID()] += ret.size();
   }
 }
 inline int item_lat_op(uint64_t item) {
@@ -358,6 +371,16 @@ int main(int argc, char *argv[]) {
 
   for (int i = 0; i < kThreadCount; i++) th[i].join();
   bench::Reporter::print(bench::g_stats, kThreadCount, dsm->getMyNodeID());
+
+  // Correctness signal (compare across OFFLOAD off vs on -- must be identical on
+  // a static tree). Lookup found-ratio and scan rows/op.
+  uint64_t lf = 0, lt = 0, sr = 0;
+  for (int i = 0; i < kThreadCount; ++i) { lf += g_lk_found[i]; lt += g_lk_total[i]; sr += g_scan_rows[i]; }
+  if (lt) printf("[CORRECTNESS node %d] lookup found %lu / %lu = %.4f%%\n",
+                 dsm->getMyNodeID(), (unsigned long)lf, (unsigned long)lt, 100.0 * lf / lt);
+  if (sr) printf("[CORRECTNESS node %d] scan rows returned = %lu\n",
+                 dsm->getMyNodeID(), (unsigned long)sr);
+
   printf("[END]\n");
   dsm->barrier("fin");
   return 0;
