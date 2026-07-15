@@ -369,7 +369,13 @@ int main(int argc, char *argv[]) {
   int count = 0;
   clock_gettime(CLOCK_REALTIME, &s);
   while (!need_stop) {
-    sleep(TIME_INTERVAL);
+    // NOTE: must be usleep, not sleep(). POSIX sleep() takes an unsigned int, so
+    // sleep(TIME_INTERVAL) with TIME_INTERVAL=0.5 truncates to sleep(0) -- the
+    // epochs then complete in microseconds, need_stop fires immediately, and the
+    // measured phase records only a few hundred ops (garbage throughput and
+    // percentiles). Stock ycsb_test gets away with sleep() only because its
+    // TIME_INTERVAL is the integer 1.
+    usleep((useconds_t)(TIME_INTERVAL * 1000000));
     clock_gettime(CLOCK_REALTIME, &e2);
     int us = (e2.tv_sec - s.tv_sec) * 1000000 + (double)(e2.tv_nsec - s.tv_nsec) / 1000;
     uint64_t all_tp = 0;
