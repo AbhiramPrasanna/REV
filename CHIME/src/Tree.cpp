@@ -26,6 +26,14 @@ std::mutex debug_lock;
 #ifdef ENABLE_OFFLOAD
 int g_offload_rate = 100;  // percent of point lookups pushed down; set by app
 
+// Minimum cache-boundary level at which a lookup is worth offloading.
+// 2 = "offload only when >=1 internal level still has to be walked", i.e. only
+// on a cache MISS; a fully-resolved descent (level==1, the cache handed us the
+// leaf) takes the one-sided read instead, which costs the memory node nothing.
+// Raise it to demand a deeper miss before paying for an RPC; set it to 1 to get
+// the old always-offload behaviour back. Set from CHIME_OFFLOAD_MIN_LEVEL.
+int g_offload_min_level = 2;
+
 // Offload accounting counters (same per-thread idiom as CHIME's other stats
 // below). Incremented ONLY inside offload paths; the benchmark app snapshots
 // their deltas around each op, exactly as DEX snapshots its num_push_* counters.
@@ -1711,7 +1719,20 @@ bool Tree::search(const Key &k, Value &v, CoroPull* sink) {
   // push the whole descent to the memory node -- it walks internals + leaf in
   // local memory and returns the value in ONE RPC. So the MN serves the cache
   // MISSES: the smaller the cache, the more remote reads offload collapses.
-  if (should_offload(dsm->getMyThreadID())) {
+  //
+  // Gate on the cache boundary, NOT just the rate. `level` is the deepest level
+  // the cache resolved, and level==1 IS the leaf (internals are level>=2), so
+  // level==1 means the cache already resolved the entire descent and handed back
+  // the leaf address. Offloading THAT asks a dir core to perform the one read a
+  // one-sided RDMA would have done with ZERO memory-node CPU -- strictly worse,
+  // and it burns the MN core budget that the genuine misses need. Offload only
+  // pays where internal levels remain to be walked, i.e. exactly the cache-miss
+  // case (DEX offloads misses, not hits).
+  //
+  // The threshold is a knob because the break-even is empirical: at level==2 the
+  // RPC replaces only ~2 round trips and may not beat them, while deeper
+  // boundaries collapse more. Sweep CHIME_OFFLOAD_MIN_LEVEL to find it.
+  if ((int)level >= g_offload_min_level && should_offload(dsm->getMyThreadID())) {
     Value off_v = define::kValueNull;
     int ret = dsm->rpc_lookup(p, (int)level, k, off_v);
     v = (ret == 1) ? off_v : define::kValueNull;

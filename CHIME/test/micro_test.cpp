@@ -188,7 +188,13 @@ inline void run_item(uint64_t item, CoroPull *sink) {
   else {
     std::map<Key, Value> ret;
 #ifdef ENABLE_OFFLOAD
-    tree->range_query_offload(k, k + (uint8_t)scan_range, ret);
+    // Runtime-gated, NOT #ifdef-gated. The sweep builds ONE binary with
+    // ENABLE_OFFLOAD=ON and A/Bs via the rate, so selecting the path at compile
+    // time made the range workloads run range_query_offload in the OFF cells too
+    // -- both halves of the A/B executed identical code and every range
+    // off-vs-on comparison was meaningless. Honour the rate like lookups do.
+    if (g_offload_rate > 0) tree->range_query_offload(k, k + (uint8_t)scan_range, ret);
+    else                    tree->range_query(k, k + (uint8_t)scan_range, ret);
 #else
     tree->range_query(k, k + (uint8_t)scan_range, ret);
 #endif
@@ -405,6 +411,17 @@ int main(int argc, char *argv[]) {
   tree = new Tree(dsm);
 #ifdef ENABLE_OFFLOAD
   g_offload_rate = kOffloadRate;
+  // Offload only lookups the cache could NOT fully resolve (level==1 means the
+  // cache already produced the leaf address, and a one-sided read fetches it
+  // with zero memory-node CPU). 1 restores the old offload-everything behaviour.
+  if (const char *ml = getenv("CHIME_OFFLOAD_MIN_LEVEL"))
+    g_offload_min_level = atoi(ml);
+  if (dsm->getMyNodeID() == 0)
+    printf("[CONFIG] offload rate = %d%%, min cache-boundary level = %d"
+           " (%s)\n",
+           g_offload_rate, g_offload_min_level,
+           g_offload_min_level <= 1 ? "offload EVERY lookup, incl. cache hits"
+                                    : "offload cache MISSES only");
 #endif
 
   generate_workload();

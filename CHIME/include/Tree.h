@@ -32,6 +32,7 @@ enum RequestType : int {
 // Fraction of point lookups (0..100) served via LOOKUP pushdown to the memory
 // node instead of a one-sided leaf read. Set by the benchmark app; default 100.
 extern int g_offload_rate;
+extern int g_offload_min_level;  // cache-boundary level below which we DON'T offload
 #endif
 
 struct Request {
