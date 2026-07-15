@@ -105,10 +105,12 @@ run_one() {
   echo "## log: $log"
   echo "############################################################"; echo
   # Runtime index-cache size (MB) via env -> no rebuild between cache points.
+  # stdbuf -oL: line-buffer through the `| tee` pipe, otherwise progress prints
+  # sit in a 4KB buffer during the (slow) bulk load and the run looks hung.
   if [[ "${CACHE_CUR:-}" =~ ^[0-9]+$ ]]; then
-    ( cd "$BUILD_DIR" && CHIME_CACHE_MB="$CACHE_CUR" "${cmd[@]}" ) 2>&1 | tee "$log"
+    ( cd "$BUILD_DIR" && CHIME_CACHE_MB="$CACHE_CUR" stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "$log"
   else
-    ( cd "$BUILD_DIR" && "${cmd[@]}" ) 2>&1 | tee "$log"
+    ( cd "$BUILD_DIR" && stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "$log"
   fi
 
   # ---- extract headline numbers into a CSV row -------------------------
