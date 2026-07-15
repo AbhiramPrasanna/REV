@@ -1,0 +1,110 @@
+nodes 2, threads 24, mix R/I/U/S=100/0/0/0, uniform, bulk 50M warmup 10M op 50M, offload 100%, scan_range 100
+[4mshared memory size: 64GB, 0x7f221b200000[0m
+[4mrdma cache size: 4GB[0m
+[4mMachine NR: 2[0m
+[4mCompute server 1 start up [252.127.0.0]
+[0m
+I connect server 0
+workload generated: keyspace=50001000 bulk=50000000 warmup=9999984 op=49999992
+[4mKey space set: keySpaceSize=50000000[0m
+I am 24
+I am 25
+I am 37
+I am 31
+I am 40
+I am 46
+I am 34
+I am 32
+I am 41
+I am 43
+I am 36
+I am 39
+I am 38
+I am 44
+I am 30
+I am 29
+I am 47
+I am 27
+I am 28
+I am 45
+I am 26
+I am 35
+I am 42
+I am 33
+[INFO] new root level 3
+[INFO] new root level 5
+node 1 warmup done in 67s
+1, throughput 0.6290 Mops
+1, throughput 0.7419 Mops
+1, throughput 0.7683 Mops
+1, throughput 0.8590 Mops
+1, throughput 0.7531 Mops
+1, throughput 0.7821 Mops
+1, throughput 0.8590 Mops
+1, throughput 0.8261 Mops
+1, throughput 0.7975 Mops
+1, throughput 0.8649 Mops
+
+==================== LATENCY BUCKETS (500 ns) [node 1] ====================
+[LOOKUP]
+  ALL                n=632        mean=   29.99us  p50=  29.50us  p90=  31.50us  p99=  37.00us  p99.9= 277.00us  max>=280.50us
+  DIRECT (1-sided)          (no samples)
+  OFFLOAD (rpc)      n=632        mean=   29.99us  p50=  29.50us  p90=  31.50us  p99=  37.00us  p99.9= 277.00us  max>=280.50us
+[ALL OPS]
+  ALL                n=632        mean=   29.99us  p50=  29.50us  p90=  31.50us  p99=  37.00us  p99.9= 277.00us  max>=280.50us
+  DIRECT (1-sided)          (no samples)
+  OFFLOAD (rpc)      n=632        mean=   29.99us  p50=  29.50us  p90=  31.50us  p99=  37.00us  p99.9= 277.00us  max>=280.50us
+
+----- 500 ns bucket CDF (all ops) [node 1] -----
+  bucket [lo,hi) ns             count        pct       cdf
+  [    16000,    16500)            3    0.4747%   0.4747%
+  [    17000,    17500)            1    0.1582%   0.6329%
+  [    18500,    19000)            1    0.1582%   0.7911%
+  [    19000,    19500)            1    0.1582%   0.9494%
+  [    19500,    20000)            1    0.1582%   1.1076%
+  [    20500,    21000)            1    0.1582%   1.2658%
+  [    24000,    24500)            1    0.1582%   1.4241%
+  [    24500,    25000)            5    0.7911%   2.2152%
+  [    25000,    25500)           15    2.3734%   4.5886%
+  [    25500,    26000)           28    4.4304%   9.0190%
+  [    26000,    26500)           30    4.7468%  13.7658%
+  [    26500,    27000)           25    3.9557%  17.7215%
+  [    27000,    27500)           34    5.3797%  23.1013%
+  [    27500,    28000)           49    7.7532%  30.8544%
+  [    28000,    28500)           42    6.6456%  37.5000%
+  [    28500,    29000)           78   12.3418%  49.8418%
+  [    29000,    29500)           98   15.5063%  65.3481%
+  [    29500,    30000)           70   11.0759%  76.4241%
+  [    30000,    30500)           49    7.7532%  84.1772%
+  [    30500,    31000)           32    5.0633%  89.2405%
+  [    31000,    31500)           18    2.8481%  92.0886%
+  [    31500,    32000)            8    1.2658%  93.3544%
+  [    32000,    32500)            9    1.4241%  94.7785%
+  [    32500,    33000)            9    1.4241%  96.2025%
+  [    33000,    33500)            3    0.4747%  96.6772%
+  [    33500,    34000)            3    0.4747%  97.1519%
+  [    34000,    34500)            1    0.1582%  97.3101%
+  [    34500,    35000)            2    0.3165%  97.6266%
+  [    35000,    35500)            2    0.3165%  97.9430%
+  [    35500,    36000)            2    0.3165%  98.2595%
+  [    36000,    36500)            2    0.3165%  98.5759%
+  [    36500,    37000)            5    0.7911%  99.3671%
+  [    37000,    37500)            1    0.1582%  99.5253%
+  [   276000,   276500)            1    0.1582%  99.6835%
+  [   276500,   277000)            1    0.1582%  99.8418%
+  [   280000,   280500)            1    0.1582% 100.0000%
+
+----- OFFLOADED TASKS [node 1] -----
+  ops total                = 632
+  ops direct (1-sided)     = 0 (0.00%)
+  ops offload (rpc)        = 632 (100.00%)
+  lookup pushdowns         = 632
+  scan   pushdowns (RPC)   = 0
+    kv pairs returned      = 0
+    leaves scanned remotely= 0
+    kv / scan pushdown     = 0.00
+    leaves / scan pushdown = 0.00
+=========================================================================
+
+[CORRECTNESS node 1] lookup found 632 / 632 = 100.0000%
+[END]
