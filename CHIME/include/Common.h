@@ -54,8 +54,17 @@
 #define APP_MESSAGE_NR 96
 #define POLL_CQ_MAX_CNT_ONCE 8
 
-// dir thread
-#define NR_DIRECTORY 1
+// dir thread -- RPC-serving threads on the memory node.
+// [CONFIG] 4 (stock CHIME: 1). Stock CHIME never needs these: its data path is
+// pure one-sided RDMA, served by the NIC with ZERO memory-node CPU, so 1 dir
+// thread (which only handles malloc/free/root RPCs) is plenty. But the offload
+// path turns every lookup into an RPC that a dir thread must execute, so with
+// NR_DIRECTORY=1 all client threads serialize through ONE core (~700K RPC/s
+// ceiling) and offload loses to one-sided reads no matter how many round trips
+// it saves. DEX runs its offload with 4 memory threads (its results are labelled
+// "offload_4mt"), so 4 is the apples-to-apples setting.
+// RPCs shard automatically: rpc_call_dir(..., thread_id % NR_DIRECTORY).
+#define NR_DIRECTORY 4
 #define DIR_MESSAGE_NR 128
 
 
