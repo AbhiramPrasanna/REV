@@ -2,15 +2,24 @@
 # ===========================================================================
 # run_dex_cache_sweep.sh  --  DEX-comparable cache sweep on CHIME
 #
-# Comparable to DEX (which also uses 50M keys, 8B/8B):
+# Comparable to DEX (which also uses 50M keys):
 #   * DEX caches whole pages incl. leaves; CHIME's kIndexCacheSize caches INTERNAL
 #     nodes only. With stock leafSpanSize=64 CHIME's internals are ~20MB, so a
-#     32-512MB sweep is flat. So the build sets leafSpanSize=16 (Common.h): more
-#     leaves -> ~84MB internal working set -> the 8-512MB index-cache sweep is
-#     meaningful, and offload (which serves internal MISSES) wins as cache shrinks.
+#     32-512MB sweep is flat. The build therefore sets (Common.h):
+#         leafSpanSize     16   more leaves -> index ~65-95MB, so the sweep straddles it
+#         internalSpanSize 16   internal node 319B < leaf 979B, index unchanged
+#         simulatedValLen  48   leaf-only inflation -> DEX-scale ~3GB tree
 #   * 50M keys, 50M OPS, OFFLOAD off vs on, uniform + zipf-0.99.
-#   * cache size applied at RUNTIME via CHIME_CACHE_MB -> ONE build, no rebuilds.
-#   REQUIRES a rebuild after the leafSpanSize=16 change (see build steps).
+#   * cache size AND dir-thread count applied at RUNTIME -> ONE build, no rebuilds.
+#
+# CALIBRATE FIRST -- the index size depends on the bulk-load fill factor (67MB if
+# leaves end up 100% full, 95MB at 70%), and that difference decides whether a
+# 64MB point evicts at all. Do one run with a cache far above the index and read
+# the truth off the log:
+#   CACHE_MB=1024 POINT_OP=1 WORKLOADS=point-uniform SEQUENCE=off ./run_dex_cache_sweep.sh memory
+#   -> grep "consumed cache size" = the TRUE index working set.
+# Then choose the sweep so the index falls inside it. It is also recorded in the
+# index_mb CSV column for every cell.
 #
 # Run the MEMORY node first, then the COMPUTE node with the SAME args:
 #   ./run_dex_cache_sweep.sh memory      # on 10.30.1.8
@@ -31,6 +40,12 @@ export ZIPF_THETA="${ZIPF_THETA:-0.99}"
 export CACHE_MB="${CACHE_MB:-8 16 32 64 128 256 512}"
 export WORKLOADS="${WORKLOADS:-point-uniform point-zipf}"
 export SEQUENCE="${SEQUENCE:-off on}"
+# MN dir threads = DEX's "memory threads" (its offload runs are labelled 4mt).
+# This is offload's hard ceiling -- every offloaded lookup costs one MN core-slice,
+# whereas a one-sided read costs the MN nothing (the NIC serves it). MUST be the
+# same on both machines. Sweep it (1/2/4/8) to separate "offload is slower" from
+# "offload is starved of MN cores".
+export DIR_THREADS="${DIR_THREADS:-4}"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench_common.sh"
 run_sequence "$role"
