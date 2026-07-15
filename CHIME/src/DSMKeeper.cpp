@@ -20,7 +20,7 @@ void DSMKeeper::initLocalMeta() {
   }
 
   // per thread DIR
-  for (int i = 0; i < NR_DIRECTORY; ++i) {
+  for (int i = 0; i < chime::num_dir(); ++i) {
     localMeta.dirTh[i].lid = dirCon[i]->ctx.lid;
     localMeta.dirTh[i].rKey = dirCon[i]->dsmMR->rkey;
 #ifdef TREE_TEST_HOCL_HANDOVER
@@ -50,7 +50,7 @@ bool DSMKeeper::connectNode(uint16_t remoteID) {
 }
 
 void DSMKeeper::setDataToRemote(uint16_t remoteID) {
-  for (int i = 0; i < NR_DIRECTORY; ++i) {
+  for (int i = 0; i < chime::num_dir(); ++i) {
     auto &c = dirCon[i];
 
     for (int k = 0; k < MAX_APP_THREAD; ++k) {
@@ -60,7 +60,7 @@ void DSMKeeper::setDataToRemote(uint16_t remoteID) {
 
   for (int i = 0; i < MAX_APP_THREAD; ++i) {
     auto &c = thCon[i];
-    for (int k = 0; k < NR_DIRECTORY; ++k) {
+    for (int k = 0; k < chime::num_dir(); ++k) {
       localMeta.appRcQpn2dir[i][k] = c->data[k][remoteID]->qp_num;
     }
   
@@ -68,7 +68,7 @@ void DSMKeeper::setDataToRemote(uint16_t remoteID) {
 }
 
 void DSMKeeper::setDataFromRemote(uint16_t remoteID, ExchangeMeta *remoteMeta) {
-  for (int i = 0; i < NR_DIRECTORY; ++i) {
+  for (int i = 0; i < chime::num_dir(); ++i) {
     auto &c = dirCon[i];
 
     for (int k = 0; k < MAX_APP_THREAD; ++k) {
@@ -85,7 +85,7 @@ void DSMKeeper::setDataFromRemote(uint16_t remoteID, ExchangeMeta *remoteMeta) {
 
   for (int i = 0; i < MAX_APP_THREAD; ++i) {
     auto &c = thCon[i];
-    for (int k = 0; k < NR_DIRECTORY; ++k) {
+    for (int k = 0; k < chime::num_dir(); ++k) {
       auto &qp = c->data[k][remoteID];
 
       assert(qp->qp_type == IBV_QPT_RC);
@@ -102,7 +102,7 @@ void DSMKeeper::setDataFromRemote(uint16_t remoteID, ExchangeMeta *remoteMeta) {
   info.cacheBase = remoteMeta->cacheBase;
   info.lockBase = remoteMeta->lockBase;
 
-  for (int i = 0; i < NR_DIRECTORY; ++i) {
+  for (int i = 0; i < chime::num_dir(); ++i) {
     info.dsmRKey[i] = remoteMeta->dirTh[i].rKey;
 #ifdef TREE_TEST_HOCL_HANDOVER
     info.lockRKey[i] = remoteMeta->dirTh[i].lock_rkey;
@@ -124,7 +124,7 @@ void DSMKeeper::setDataFromRemote(uint16_t remoteID, ExchangeMeta *remoteMeta) {
     info.appRKey[i] = remoteMeta->appTh[i].rKey;
     info.appMessageQPN[i] = remoteMeta->appUdQpn[i];
 
-    for (int k = 0; k < NR_DIRECTORY; ++k) {
+    for (int k = 0; k < chime::num_dir(); ++k) {
       struct ibv_ah_attr ahAttr;
       fillAhAttr(&ahAttr, remoteMeta->appTh[i].lid, remoteMeta->appTh[i].gid,
                  &dirCon[k]->ctx);

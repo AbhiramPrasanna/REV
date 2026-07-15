@@ -9,6 +9,16 @@
 #include <arpa/inet.h>
 
 void bindCore(uint16_t core) {
+    // CHIME's callers derive core ids from the compile-time CPU_PHYSICAL_CORE_NUM
+    // (e.g. Directory::dirThread does (CPU_PHYSICAL_CORE_NUM-1-dirID)*2+1), which
+    // is 72 by default and therefore asks for cores 137..143. On a machine with
+    // fewer cores every one of those binds fails, the thread silently runs
+    // UNPINNED, and we lose the NUMA/core locality the whole design assumes --
+    // announced only by a stream of "can't bind core!". Wrap into the range that
+    // actually exists so the pinning stays valid on any core count.
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n > 0 && core >= n) core = (uint16_t)(core % n);
+
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(core, &cpuset);

@@ -37,6 +37,13 @@ DSM::DSM(const DSMConfig &conf)
     : conf(conf), appID(0), cache(conf.cacheConfig) {
   keySpaceSize = 0;   // until loadKeySpace()/set_key_space(); guards getRandomKey
 
+  // dirCon[]/dirAgent[] are sized NR_DIRECTORY (the max) but only num_dir() slots
+  // get filled, so the tail would otherwise hold garbage pointers. Nothing walks
+  // past num_dir() today; NULL makes a future one fail loudly instead of chasing
+  // a wild pointer.
+  memset(dirCon, 0, sizeof(dirCon));
+  memset(dirAgent, 0, sizeof(dirAgent));
+
   baseAddr = (uint64_t)hugePageAlloc(conf.dsmSize * define::GB);
 
   Debug::notifyInfo("shared memory size: %dGB, 0x%lx", conf.dsmSize, baseAddr);
@@ -48,11 +55,17 @@ DSM::DSM(const DSMConfig &conf)
 
   initRDMAConnection();
   if (myNodeID < MEMORY_NODE_NUM) {  // start memory server
-    for (int i = 0; i < NR_DIRECTORY; ++i) {
+    // Spawn only the ACTIVE dir threads (CHIME_DIR_THREADS). Everything
+    // dir-indexed -- connections, QPs, the keeper's exchange, RPC sharding, the
+    // DSM slicing -- is driven by the same num_dir() on both nodes, so the two
+    // sides agree on exactly which dirs exist. Slots >= num_dir() are never
+    // built and never addressed.
+    for (int i = 0; i < chime::num_dir(); ++i) {
       dirAgent[i] =
           new Directory(dirCon[i], remoteInfo, MEMORY_NODE_NUM, i, myNodeID);
     }
-    Debug::notifyInfo("Memory server %d start up", myNodeID);
+    Debug::notifyInfo("Memory server %d start up (%d/%d dir threads active)",
+                      myNodeID, chime::num_dir(), NR_DIRECTORY);
   }
   keeper->barrier("DSM-init");
 }
@@ -134,7 +147,13 @@ void DSM::initRDMAConnection() {
                              conf.machineNR, remoteInfo);
   }
 
-  for (int i = 0; i < NR_DIRECTORY; ++i) {
+  // Active dirs only. Each DirectoryConnection opens its OWN RDMA context and
+  // registers its OWN MR over the whole DSM region, so this loop costs one 64GB
+  // ibv_reg_mr per iteration. Building all NR_DIRECTORY of them would register
+  // 8 x 64GB = 512GB of translations for dirs that never run -- and
+  // createMemoryRegion only *prints* on failure and returns NULL, so exhausting
+  // the NIC here would surface as a null-deref, not a diagnosable error.
+  for (int i = 0; i < chime::num_dir(); ++i) {
     dirCon[i] =
         new DirectoryConnection(i, (void *)baseAddr, conf.dsmSize * define::GB,
                                 conf.machineNR, remoteInfo);

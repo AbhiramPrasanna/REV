@@ -20,8 +20,12 @@ Directory::Directory(DirectoryConnection *dCon, RemoteConnection *remoteInfo,
       nodeID(nodeID), dirTh(nullptr) {
 
   { // chunck alloctor
+    // Slice by the ACTIVE dir count, not NR_DIRECTORY: the running dirs must
+    // between them cover the whole DSM region. Slicing by the max (8) while only
+    // running 4 dirs would strand half the region and give each dir an
+    // unnecessarily small pool to run out of.
     GlobalAddress dsm_start;
-    uint64_t per_directory_dsm_size = dCon->dsmSize / NR_DIRECTORY;
+    uint64_t per_directory_dsm_size = dCon->dsmSize / chime::num_dir();
     dsm_start.nodeID = nodeID;
     dsm_start.offset = per_directory_dsm_size * dirID;
     chunckAlloc = new GlobalAllocator(dsm_start, per_directory_dsm_size);
@@ -46,7 +50,11 @@ void Directory::dirThread() {
 #ifdef ENABLE_OFFLOAD
   // The memory node has no explicit run boundary, so a periodic report is how
   // its steady-state remote CPU load is observed.
-  remoteload::start_reporter(NR_DIRECTORY);
+  // dir 0 only: this runs in EVERY dir thread, so without the guard N dir threads
+  // each spawn their own reporter and N copies of the aggregate interleave.
+  // Report over the ACTIVE dir count so "active %" is a fraction of the dirs that
+  // really exist -- that ratio is what says whether the MN is the bottleneck.
+  if (dirID == 0) remoteload::start_reporter(chime::num_dir());
 #endif
 
   while (true) {

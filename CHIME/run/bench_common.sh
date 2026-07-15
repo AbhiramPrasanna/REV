@@ -39,6 +39,13 @@ SCAN_RANGE="${SCAN_RANGE:-100}"
 BULK="${BULK:-50}"; WARMUP="${WARMUP:-10}"
 POINT_OP="${POINT_OP:-50}"; RANGE_OP="${RANGE_OP:-50}"   # 50M ops per cell (DEX/DART-scale)
 
+# Memory-node dir (RPC-serving) threads -- the DEX "memory threads" equivalent.
+# MUST be identical on both machines: the MN spawns this many, the CN shards RPCs
+# over this many. Mismatch => RPCs to a dir nobody polls => hangs reported as a
+# lock "Deadlock". Offload's ceiling is this number of MN cores, so it is the knob
+# that decides whether offload can compete with NIC-served one-sided reads at all.
+DIR_THREADS="${DIR_THREADS:-4}"
+
 # --- offload A/B: OFFLOAD=on -> rate 100 ; OFFLOAD=off -> rate 0 ------------
 OFFLOAD="${OFFLOAD:-on}"
 if [[ -z "${OFFLOAD_RATE:-}" ]]; then
@@ -108,9 +115,11 @@ run_one() {
   # stdbuf -oL: line-buffer through the `| tee` pipe, otherwise progress prints
   # sit in a 4KB buffer during the (slow) bulk load and the run looks hung.
   if [[ "${CACHE_CUR:-}" =~ ^[0-9]+$ ]]; then
-    ( cd "$BUILD_DIR" && CHIME_CACHE_MB="$CACHE_CUR" stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "$log"
+    ( cd "$BUILD_DIR" && CHIME_CACHE_MB="$CACHE_CUR" CHIME_DIR_THREADS="$DIR_THREADS" \
+        stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "$log"
   else
-    ( cd "$BUILD_DIR" && stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "$log"
+    ( cd "$BUILD_DIR" && CHIME_DIR_THREADS="$DIR_THREADS" \
+        stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "$log"
   fi
 
   # ---- extract headline numbers into a CSV row -------------------------
@@ -126,9 +135,15 @@ run_one() {
   ops="$( { grep -E '^\[RESULT node' "$log" | tail -1 | sed -nE 's/.*ops=([0-9]+).*/\1/p'; } 2>/dev/null || true)"
   lat="$( { awk '/^\[ALL OPS\]/{f=1} f&&/^  ALL /{print; f=0}' "$log" \
            | sed -nE 's/.*p99=[[:space:]]*([0-9.]+)us.*/\1/p' | head -1; } 2>/dev/null || true)"
+  # index_mb = the TRUE index working set, measured (not estimated) from
+  # TreeCache's post-bulk-load occupancy. Recorded per row so every cell says
+  # whether its cache was above or below the index -- i.e. whether eviction ran.
+  local idx
+  idx="$( { grep -E '^consumed cache size' "$log" | tail -1 \
+           | sed -nE 's/.*= ([0-9.]+) MB.*/\1/p'; } 2>/dev/null || true)"
   local csv="${SWEEP_CSV:-$outdir/summary_${role}.csv}"
-  [[ -f "$csv" ]] || echo "cache_mb,workload,offload,role,node_tput_mops,ops,p99_us,log" > "$csv"
-  echo "${CACHE_CUR:-NA},${WORKLOAD},${mode},${role},${tput:-NA},${ops:-NA},${lat:-NA},${log}" >> "$csv"
+  [[ -f "$csv" ]] || echo "cache_mb,dir_threads,workload,offload,role,node_tput_mops,ops,p99_us,index_mb,log" > "$csv"
+  echo "${CACHE_CUR:-NA},${DIR_THREADS},${WORKLOAD},${mode},${role},${tput:-NA},${ops:-NA},${lat:-NA},${idx:-NA},${log}" >> "$csv"
 }
 
 # One WORKLOADS x SEQUENCE matrix into $2.  $1 = role, $2 = outdir

@@ -19,7 +19,7 @@ ThreadConnection::ThreadConnection(uint16_t threadID, void *cachePool,
   cacheLKey = cacheMR->lkey;
 
   // dir, RC
-  for (int i = 0; i < NR_DIRECTORY; ++i) {
+  for (int i = 0; i < chime::num_dir(); ++i) {
     data[i] = new ibv_qp *[machineNR];
     for (size_t k = 0; k < machineNR; ++k) {
       createQueuePair(&data[i][k], IBV_QPT_RC, cq, &ctx);

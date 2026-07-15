@@ -244,7 +244,9 @@ public:
     m.addr = node_addr;
     m.level = level;                 // request: starting level (reply reuses it as status)
     memcpy(&m.k, k.data(), define::keyLen);
-    rpc_call_dir(m, node_addr.nodeID, thread_id % NR_DIRECTORY);
+    // Shard over the ACTIVE dirs only -- a dir >= num_dir() has no thread polling
+    // its CQ, so an RPC sent there never completes and rpc_wait() blocks forever.
+    rpc_call_dir(m, node_addr.nodeID, thread_id % chime::num_dir());
     auto *mm = rpc_wait();
     if (mm->level == 1) result = mm->v;
     return mm->level;
@@ -262,7 +264,7 @@ public:
     memcpy(&m.k, from.data(), define::keyLen);
     memcpy(&m.v, to.data(), define::keyLen);
     m.level = num;
-    rpc_call_dir(m, leaf_addr.nodeID, thread_id % NR_DIRECTORY);
+    rpc_call_dir(m, leaf_addr.nodeID, thread_id % chime::num_dir());
     auto *mm = rpc_wait();
     result_addr = mm->addr;
     memcpy(max_key.data(), &mm->k, define::keyLen);
@@ -274,8 +276,10 @@ public:
 
 inline GlobalAddress DSM::alloc(size_t size, uint8_t align_bit) {
   thread_local int cur_target_node = (this->getMyThreadID() + this->getMyNodeID()) % MEMORY_NODE_NUM;
-  thread_local int cur_target_dir_id = (this->getMyThreadID() + this->getMyNodeID()) % NR_DIRECTORY;
-  if (++cur_target_dir_id == NR_DIRECTORY) {
+  // Cycle over ACTIVE dirs only: a chunk-alloc RPC to a dir with no thread would
+  // block forever, and dirs >= num_dir() own no slice of the DSM region anyway.
+  thread_local int cur_target_dir_id = (this->getMyThreadID() + this->getMyNodeID()) % chime::num_dir();
+  if (++cur_target_dir_id == chime::num_dir()) {
     cur_target_node = (cur_target_node + 1) % MEMORY_NODE_NUM;
     cur_target_dir_id = 0;
   }

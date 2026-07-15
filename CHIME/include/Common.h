@@ -63,9 +63,44 @@
 // ceiling) and offload loses to one-sided reads no matter how many round trips
 // it saves. DEX runs its offload with 4 memory threads (its results are labelled
 // "offload_4mt"), so 4 is the apples-to-apples setting.
-// RPCs shard automatically: rpc_call_dir(..., thread_id % NR_DIRECTORY).
-#define NR_DIRECTORY 4
+// RPCs shard automatically: rpc_call_dir(..., thread_id % chime::num_dir()).
+//
+// NR_DIRECTORY is the compile-time MAXIMUM: it sizes arrays (dirCon[],
+// dsmRKey[], local_allocators[][], dirMessageQPN[], ...) and drives the QP
+// exchange in DSMKeeper. Those stay at the max on every node so the two nodes'
+// connection exchange is symmetric no matter how many dir threads actually run.
+#define NR_DIRECTORY 8
 #define DIR_MESSAGE_NR 128
+
+namespace chime {
+// How many dir threads ACTUALLY run -- the DEX-style runtime knob (DEX exposes
+// its memory-thread count the same way; its offload results are labelled
+// "offload_4mt" = 4 memory threads). Set with CHIME_DIR_THREADS; default 4.
+//
+// Runtime, not compile-time, so the dir count can be swept (1/2/4/8) with NO
+// rebuild -- which is what makes an offload-vs-one-sided comparison fair instead
+// of hostage to a single hard-coded value.
+//
+// !! BOTH NODES MUST SET THE SAME VALUE !!  The memory node uses it to decide how
+// many dir threads to spawn; the compute node uses it to shard RPCs
+// (thread_id % num_dir()). If the compute node shards over more dirs than the
+// memory node spawned, those RPCs target a dir with no thread polling its CQ and
+// the caller blocks forever in rpc_wait() -- which surfaces as a lock-held-forever
+// "Deadlock" report, not as an obvious config error.
+//
+// Static-local init is thread-safe (C++11) and runs on first use, so there is no
+// static-init-order hazard with DSM's thread_local allocators.
+inline int num_dir() {
+  static const int n = [] {
+    const char *e = getenv("CHIME_DIR_THREADS");
+    int v = e ? atoi(e) : 4;
+    if (v < 1) v = 1;
+    if (v > NR_DIRECTORY) v = NR_DIRECTORY;  // never exceed the array bound
+    return v;
+  }();
+  return n;
+}
+}  // namespace chime
 
 
 void bindCore(uint16_t core);
@@ -88,7 +123,18 @@ using CoroQueue = std::queue<uint16_t>;
 namespace define {
 // KV size
 constexpr uint32_t keyLen = 8;
-constexpr uint32_t simulatedValLen = 8;
+// [CACHE-SWEEP GEOMETRY] 48 (was 8, stock CHIME). The value size inflates ONLY
+// the leaf (decodedLeafSize = 196 + 16*V at leafSpanSize=16 with the build's
+// SIBLING_BASED_VALIDATION on); it does not touch the internal node or the cached
+// index. Two things at once:
+//   (1) leaf 979B vs internal 319B (transferred) -> a 3.1x "internal < leaf"
+//       margin. This is NOT cosmetic: at V=8 the leaf is 329B against a 319B
+//       internal, a 3% margin that flips outright depending on whether
+//       SIBLING_BASED_VALIDATION is on (it shrinks scatterMetadataSize 26 -> 10).
+//       V=48 puts the inequality beyond the reach of any validation macro.
+//   (2) tree = ~3.1M leaves * 979B ~= 3.0GB, i.e. DEX-scale, while the index stays
+//       ~65-95MB so the cache sweep still straddles it.
+constexpr uint32_t simulatedValLen = 48;
 #ifndef ENABLE_VAR_LEN_KV
 constexpr uint32_t inlineValLen = simulatedValLen;
 #else
@@ -167,7 +213,23 @@ constexpr uint32_t leafEntrySize = versionSize + keyLen + inlineValLen;
 #endif
 
 // Internal Node
-constexpr uint32_t internalSpanSize = 64;
+// [CACHE-SWEEP GEOMETRY] 16 (was 64, stock CHIME).
+//
+// Rationale: the cached INDEX working set is ~= num_leaves * (internalMetadataSize
+// + internalEntrySize*S)/(S-1), which is nearly INVARIANT in the fanout S
+// (18B/leaf at S=64 vs 21B/leaf at S=16) -- the entries-per-node and the
+// nodes-per-level cancel. But the internal NODE size, 43 + 17*S, is linear in S.
+// So shrinking S is the one knob that makes an internal node SMALLER than a leaf
+// WITHOUT shrinking the index we want to overflow the cache:
+// (transferred sizes, with the build's SIBLING_BASED_VALIDATION + HOPSCOTCH +
+//  METADATA_REPLICATION all ON, and simulatedValLen=48):
+//   S=64 -> internal 1148B  >  leaf 979B   (internal BIGGER -- unwanted)
+//   S=16 -> internal  319B  <  leaf 979B   (internal 3.1x smaller -- wanted)
+// Cost: fanout 16 makes the tree ~6 levels deep instead of ~4, so a cache MISS
+// costs more RDMA round-trips -- which is exactly the regime where offloading the
+// walk to one MN RPC is supposed to pay off.
+// Set back to 64 for stock CHIME.
+constexpr uint32_t internalSpanSize = 16;
 constexpr uint32_t internalMetadataSize = versionSize + sizeof(uint8_t) * 2 + sizeof(uint64_t) * 3 + keyLen * 2;
 constexpr uint32_t internalEntrySize    = versionSize + keyLen + sizeof(uint64_t);
 

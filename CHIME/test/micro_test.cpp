@@ -360,6 +360,48 @@ int main(int argc, char *argv[]) {
   if (const char *tb = getenv("CHIME_TIME_BASED")) g_time_based = atoi(tb);
   if (dsm->getMyNodeID() == 0)
     printf("index cache = %d MB (CHIME_CACHE_MB)\n", g_index_cache_mb);
+
+  // Printed on BOTH nodes on purpose: the memory node spawns this many dir
+  // threads and the compute node shards RPCs over this many, so a mismatch makes
+  // the compute node address a dir that nobody polls -- which shows up as a lock
+  // "Deadlock" report rather than as a config error. Two lines to eyeball beats
+  // debugging a phantom deadlock.
+  printf("[CONFIG node %d] dir threads = %d (CHIME_DIR_THREADS, max %d)"
+         " -- MUST match the other node\n",
+         dsm->getMyNodeID(), chime::num_dir(), NR_DIRECTORY);
+
+  // ---- [GEOMETRY] ---------------------------------------------------------
+  // The cache-eviction experiment only means anything if (a) an internal node is
+  // SMALLER than a leaf and (b) the index working set straddles the cache sweep.
+  // Both are pure functions of the compile-time span/value knobs, so print them
+  // rather than re-deriving them by hand. The index estimate below is a LOWER
+  // bound: it assumes leaves are 100% full. Real bulk load leaves them partly
+  // empty, so the true index is larger -- see the [TreeCache] "consumed cache
+  // size" line printed after bulk load, which is the ground truth.
+  if (dsm->getMyNodeID() == 0) {
+    const double idx_per_leaf =
+        (double)define::transInternalSize / (define::internalSpanSize - 1);
+    const double leaves_full = (double)bulk_load_num / define::leafSpanSize;
+    const double idx_mb_full = leaves_full * idx_per_leaf / define::MB;
+    printf("[GEOMETRY] leaf    : span=%u val=%uB trans=%uB alloc=%uB\n"
+           "[GEOMETRY] internal: span=%u        trans=%uB alloc=%uB\n"
+           "[GEOMETRY] internal/leaf = %.2fx  (%s)\n"
+           "[GEOMETRY] tree ~= %.2fM leaves * %uB = %.2f GB\n"
+           "[GEOMETRY] index ~= %.1f MB (leaves 100%% full; TRUE value is HIGHER --\n"
+           "[GEOMETRY]          read '[TreeCache] consumed cache size' below)\n",
+           define::leafSpanSize, define::simulatedValLen,
+           define::transLeafSize, define::allocationLeafSize,
+           define::internalSpanSize,
+           define::transInternalSize, define::allocationInternalSize,
+           (double)define::transInternalSize / define::transLeafSize,
+           define::transInternalSize < define::transLeafSize
+               ? "OK: internal < leaf"
+               : "WARNING: internal >= leaf",
+           leaves_full / 1e6, define::transLeafSize,
+           leaves_full * define::transLeafSize / define::GB,
+           idx_mb_full);
+  }
+
   tree = new Tree(dsm);
 #ifdef ENABLE_OFFLOAD
   g_offload_rate = kOffloadRate;
@@ -375,6 +417,22 @@ int main(int argc, char *argv[]) {
   for (int i = 0; i < kThreadCount; i++) th[i] = std::thread(thread_run, i);
 
   while (!ready.load()) ;
+
+  // ---- ground truth for the cache sweep -----------------------------------
+  // `ready` implies bulk load AND warmup are done, so the index cache is now as
+  // populated as this workload will ever make it. TreeCache prints
+  //   consumed cache size = cache_size - free_size
+  // Run this ONCE with a cache far larger than the index (CHIME_CACHE_MB=1024)
+  // and that number IS the true index working set -- no fill-factor guesswork.
+  // Then pick the sweep so the index falls INSIDE it: points below evict, points
+  // above fit. If free_size is ~0 / negative here, the cache is overflowing and
+  // eviction IS running (which is the regime we want at 16/32/64MB).
+  if (dsm->getMyNodeID() == 0) {
+    printf("[INDEX] --- post-bulk-load cache occupancy (cache = %d MB) ---\n",
+           g_index_cache_mb);
+    tree->statistics();
+  }
+
   timespec s, e2, t0_meas;
   uint64_t pre_tp = 0;
   int count = 0;
