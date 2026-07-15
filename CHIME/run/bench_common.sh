@@ -114,17 +114,21 @@ run_one() {
   fi
 
   # ---- extract headline numbers into a CSV row -------------------------
-  # NOTE: the trailing "|| true" is essential -- these greps legitimately match
-  # nothing on the COMPUTE node ("cluster throughput" only prints on node 0), and
-  # under `set -euo pipefail` a failing pipeline would abort the whole sequence
-  # after the first round (that's the "only ran OFFLOAD=off" bug).
-  local tput lat
-  tput="$( { grep -E 'cluster throughput' "$log" | tail -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1; } 2>/dev/null || true)"
+  # Throughput now comes from micro_test's [RESULT] line: this node's exact
+  # total ops / wall time over the whole measured phase. Each node reports its
+  # OWN rate (the old "cluster throughput" line used a dsm->sum collective that
+  # only node 0 saw and that read stale values once the nodes desynced) -- the
+  # cluster total is the SUM of the two nodes' values, done in post-processing.
+  # The trailing "|| true" keeps a non-matching grep from aborting the sweep
+  # under `set -euo pipefail`.
+  local tput lat ops
+  tput="$( { grep -E '^\[RESULT node' "$log" | tail -1 | sed -nE 's/.*throughput=([0-9.]+) Mops.*/\1/p'; } 2>/dev/null || true)"
+  ops="$( { grep -E '^\[RESULT node' "$log" | tail -1 | sed -nE 's/.*ops=([0-9]+).*/\1/p'; } 2>/dev/null || true)"
   lat="$( { awk '/^\[ALL OPS\]/{f=1} f&&/^  ALL /{print; f=0}' "$log" \
            | sed -nE 's/.*p99=[[:space:]]*([0-9.]+)us.*/\1/p' | head -1; } 2>/dev/null || true)"
   local csv="${SWEEP_CSV:-$outdir/summary_${role}.csv}"
-  [[ -f "$csv" ]] || echo "cache_mb,workload,offload,role,cluster_tput_mops,p99_us,log" > "$csv"
-  echo "${CACHE_CUR:-NA},${WORKLOAD},${mode},${role},${tput:-NA},${lat:-NA},${log}" >> "$csv"
+  [[ -f "$csv" ]] || echo "cache_mb,workload,offload,role,node_tput_mops,ops,p99_us,log" > "$csv"
+  echo "${CACHE_CUR:-NA},${WORKLOAD},${mode},${role},${tput:-NA},${ops:-NA},${lat:-NA},${log}" >> "$csv"
 }
 
 # One WORKLOADS x SEQUENCE matrix into $2.  $1 = role, $2 = outdir

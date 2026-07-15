@@ -208,6 +208,10 @@ inline int item_lat_op(uint64_t item) {
 Timer bench_timer;
 std::atomic<int64_t> warmup_cnt{0};
 std::atomic_bool ready{false};
+std::atomic<int> done_cnt{0};   // threads that finished their op quota
+// 0 = op-bounded: run exactly opM*1e6 ops per node (DEX's time_based=0).
+// 1 = time-bounded: cycle the array for TEST_EPOCH*TIME_INTERVAL seconds.
+int g_time_based = 0;
 
 
 void thread_bulk_load(int id) {
@@ -260,10 +264,15 @@ void thread_run(int id) {
 
   // 3. measured run -- time every op into 500 ns buckets, classify DIRECT vs
   //    OFFLOAD by snapshotting the offload counters (same as DEX/newbench).
+  //    OP-BOUNDED by default (like DEX's time_based=0): each thread executes
+  //    exactly thread_op_num items, so the run performs the requested opM ops
+  //    per node rather than "whatever fits in TEST_EPOCH seconds". Set
+  //    CHIME_TIME_BASED=1 to restore the old time-bounded behaviour (cycles the
+  //    array until the epoch budget runs out).
   bench::ThreadStats &my_stats = bench::g_stats[tid];
   uint64_t *my_work = workload_array + id * thread_op_num;
   uint64_t cur = 0;
-  while (!need_stop) {
+  for (uint64_t done = 0; !need_stop && (g_time_based || done < thread_op_num); ++done) {
     uint64_t item = my_work[cur];
     cur = (cur + 1) % thread_op_num;
 
@@ -289,6 +298,7 @@ void thread_run(int id) {
     my_stats.record(lat_op, cls, ns);
     tp[tid][0]++;
   }
+  done_cnt.fetch_add(1);   // op-bounded: tell main this thread finished its quota
 }
 
 
@@ -347,6 +357,7 @@ int main(int argc, char *argv[]) {
   // Runtime index-cache size (MB) for a rebuild-free cache sweep (DEX-style).
   if (const char *cm = getenv("CHIME_CACHE_MB")) g_index_cache_mb = atoi(cm);
   if (const char *ld = getenv("CHIME_LOADERS")) LOADER_NUM = atoi(ld);  // bulk-load threads
+  if (const char *tb = getenv("CHIME_TIME_BASED")) g_time_based = atoi(tb);
   if (dsm->getMyNodeID() == 0)
     printf("index cache = %d MB (CHIME_CACHE_MB)\n", g_index_cache_mb);
   tree = new Tree(dsm);
@@ -364,9 +375,10 @@ int main(int argc, char *argv[]) {
   for (int i = 0; i < kThreadCount; i++) th[i] = std::thread(thread_run, i);
 
   while (!ready.load()) ;
-  timespec s, e2;
+  timespec s, e2, t0_meas;
   uint64_t pre_tp = 0;
   int count = 0;
+  clock_gettime(CLOCK_REALTIME, &t0_meas);
   clock_gettime(CLOCK_REALTIME, &s);
   while (!need_stop) {
     // NOTE: must be usleep, not sleep(). POSIX sleep() takes an unsigned int, so
@@ -385,17 +397,36 @@ int main(int argc, char *argv[]) {
     uint64_t cap = all_tp - pre_tp;
     pre_tp = all_tp;
     double per_node_tp = cap * 1.0 / us;                          // Mops
-    uint64_t cluster_tp = dsm->sum((uint64_t)(per_node_tp * 1000));
-
+    // NOTE: no dsm->sum() here. It is a collective that only returns a real
+    // value on node 0 and reads each node's memcached key -- so once the nodes
+    // run different epoch counts (which op-bounded mode guarantees) it silently
+    // reads stale values. Each node now reports only its OWN rate, and the
+    // cluster total is summed in post-processing from the [RESULT] lines.
     printf("%d, throughput %.4f Mops\n", dsm->getMyNodeID(), per_node_tp);
-    if (dsm->getMyNodeID() == 0)
-      printf("epoch %d: cluster throughput %.3f Mops\n", ++count, cluster_tp / 1000.0);
-    else
-      ++count;
-    if (count >= TEST_EPOCH) need_stop = true;
+    ++count;
+
+    if (g_time_based) {
+      if (count >= TEST_EPOCH) need_stop = true;
+    } else if (done_cnt.load() >= kThreadCount) {
+      need_stop = true;              // every thread finished its op quota
+    }
   }
 
   for (int i = 0; i < kThreadCount; i++) th[i].join();
+
+  // Exact per-node result over the WHOLE measured phase (total ops / wall time),
+  // rather than a noisy per-epoch sample. Cluster throughput = sum of the nodes'
+  // [RESULT] lines (done in post-processing; see results/plot_offload.py).
+  clock_gettime(CLOCK_REALTIME, &e2);
+  double meas_s = (e2.tv_sec - t0_meas.tv_sec) +
+                  (double)(e2.tv_nsec - t0_meas.tv_nsec) / 1e9;
+  uint64_t total_ops = 0;
+  for (int i = 0; i < MAX_APP_THREAD; ++i) total_ops += tp[i][0];
+  printf("[RESULT node %d] ops=%lu elapsed=%.3fs throughput=%.4f Mops mode=%s\n",
+         dsm->getMyNodeID(), (unsigned long)total_ops, meas_s,
+         meas_s > 0 ? total_ops / meas_s / 1e6 : 0.0,
+         g_time_based ? "time-bounded" : "op-bounded");
+
   bench::Reporter::print(bench::g_stats, kThreadCount, dsm->getMyNodeID());
 
   // Correctness signal (compare across OFFLOAD off vs on -- must be identical on

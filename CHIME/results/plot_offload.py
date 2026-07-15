@@ -68,9 +68,15 @@ def read_summary(path):
                 except (TypeError, ValueError):
                     return None  # 'NA'
 
+            # new format: per-node exact throughput from micro_test's [RESULT].
+            # old format: cluster_tput_mops (only node 0 printed it).
+            tp = num(row.get("node_tput_mops"))
+            if tp is None:
+                tp = num(row.get("cluster_tput_mops"))
             out[(cache, row["workload"], row["offload"])] = {
-                "tput": num(row.get("cluster_tput_mops")),
+                "tput": tp,
                 "p99": num(row.get("p99_us")),
+                "per_node": "node_tput_mops" in row,
             }
     return out
 
@@ -178,9 +184,17 @@ def main():
                 vals = []
                 for c in caches:
                     if metric == "tput":
-                        # cluster total: take whichever node printed it
-                        v = (mem.get((c, wl, off), {}).get("tput")
-                             or cmpu.get((c, wl, off), {}).get("tput"))
+                        mv = mem.get((c, wl, off), {})
+                        cv = cmpu.get((c, wl, off), {})
+                        if mv.get("per_node") or cv.get("per_node"):
+                            # new format: each node reports its OWN exact rate ->
+                            # cluster total is the SUM of the two.
+                            parts = [x.get("tput") for x in (mv, cv)
+                                     if x.get("tput") is not None]
+                            v = sum(parts) if parts else None
+                        else:
+                            # old format: only node 0 printed the cluster total
+                            v = mv.get("tput") or cv.get("tput")
                     else:
                         v = lat.get((c, wl, off), {}).get(metric)
                         if v is None and metric == "p99":  # fall back to the CSV
