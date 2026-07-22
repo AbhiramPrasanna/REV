@@ -3,6 +3,7 @@
 #include <string>
 #include <iostream>
 #include <random>
+#include <cstdlib>   // getenv / atoi for CHIME_NODE_ID role pinning
 
 char *getIP();
 
@@ -77,7 +78,21 @@ void Keeper::serverEnter() {
 #ifdef STATIC_ID_FROM_IP
       myNodeID = std::atoi(ip.substr(ip.find_last_of('.') + 1).c_str()) - 1;
 #else
-      myNodeID = serverNum - 1;
+      // Deterministic role pinning: CHIME_NODE_ID fixes this process's node id
+      // regardless of memcached registration order, so the memory node is ALWAYS
+      // node 0 (MN, owns the DSM + dir-threads) and the compute node ALWAYS node
+      // 1 (CN). The atomic increment above still ran, so the serverConnect()
+      // barrier (serverNum == maxServer) is unaffected -- only the id is pinned.
+      // Without it the id falls back to registration order (serverNum - 1), a
+      // timing race that can SWAP the two roles between rounds; different-node
+      // binaries then disagree on the DSM layout and every WR flushes with a
+      // garbage completion status.
+      const char *envId = getenv("CHIME_NODE_ID");
+      if (envId && *envId) {
+        myNodeID = static_cast<uint16_t>(std::atoi(envId));
+      } else {
+        myNodeID = serverNum - 1;
+      }
 #endif
       Debug::notifyInfo("Compute server %d start up [%s]\n", myNodeID, ip.c_str());
       return;

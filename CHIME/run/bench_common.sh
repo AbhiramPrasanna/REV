@@ -106,6 +106,14 @@ run_one() {
   local cmd=("$BIN" "$NODES" "$THREADS" $args "$rate")
   needs_scan_range && cmd+=("$SCAN_RANGE")
 
+  # Deterministic role pinning (read by Keeper::serverEnter). The memory node is
+  # ALWAYS CHIME node 0 (MN); the compute node is ALWAYS node 1 (CN). Without
+  # this the id is assigned by memcached registration order, a race that can swap
+  # the two roles between rounds and corrupt every RDMA completion. MUST be 0 for
+  # memory / 1 for compute -- and both nodes must run a binary built AFTER this
+  # change (grep CHIME_NODE_ID in the source to confirm).
+  local node_id; [[ "$role" == "memory" ]] && node_id=0 || node_id=1
+
   echo; echo "############################################################"
   echo "## OFFLOAD=$mode (rate=$rate)  role=$role  WORKLOAD=$WORKLOAD"
   echo "## ${cmd[*]}"
@@ -115,10 +123,11 @@ run_one() {
   # stdbuf -oL: line-buffer through the `| tee` pipe, otherwise progress prints
   # sit in a 4KB buffer during the (slow) bulk load and the run looks hung.
   if [[ "${CACHE_CUR:-}" =~ ^[0-9]+$ ]]; then
-    ( cd "$BUILD_DIR" && CHIME_CACHE_MB="$CACHE_CUR" CHIME_DIR_THREADS="$DIR_THREADS" \
+    ( cd "$BUILD_DIR" && CHIME_NODE_ID="$node_id" CHIME_CACHE_MB="$CACHE_CUR" \
+        CHIME_DIR_THREADS="$DIR_THREADS" \
         stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "$log"
   else
-    ( cd "$BUILD_DIR" && CHIME_DIR_THREADS="$DIR_THREADS" \
+    ( cd "$BUILD_DIR" && CHIME_NODE_ID="$node_id" CHIME_DIR_THREADS="$DIR_THREADS" \
         stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "$log"
   fi
 
