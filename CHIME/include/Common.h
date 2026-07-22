@@ -229,7 +229,15 @@ constexpr uint32_t leafEntrySize = versionSize + keyLen + inlineValLen;
 // costs more RDMA round-trips -- which is exactly the regime where offloading the
 // walk to one MN RPC is supposed to pay off.
 // Set back to 64 for stock CHIME.
-constexpr uint32_t internalSpanSize = 16;
+//
+// [NODE-SIZE SWEEP] Overridable at build time so run/run_span_sweep.sh can
+// rebuild one binary per inner-node size without editing this file:
+//     cmake -DCHIME_INTERNAL_SPAN=<S> ..
+// The default (16) reproduces the committed cache-sweep geometry exactly.
+#ifndef CHIME_INTERNAL_SPAN
+#define CHIME_INTERNAL_SPAN 16
+#endif
+constexpr uint32_t internalSpanSize = CHIME_INTERNAL_SPAN;
 constexpr uint32_t internalMetadataSize = versionSize + sizeof(uint8_t) * 2 + sizeof(uint64_t) * 3 + keyLen * 2;
 constexpr uint32_t internalEntrySize    = versionSize + keyLen + sizeof(uint64_t);
 

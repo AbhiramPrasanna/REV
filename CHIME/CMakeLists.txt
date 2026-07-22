@@ -81,6 +81,14 @@ else()
     remove_definitions(-DENABLE_OFFLOAD)
 endif()
 
+# Inner-node size (internalSpanSize / fanout) override for the node-size sweep.
+# Empty string keeps the source default (16); run/run_span_sweep.sh sets it per
+# rebuilt binary. See include/Common.h.
+set(CHIME_INTERNAL_SPAN "" CACHE STRING "Override internalSpanSize (inner-node fanout); empty = source default")
+if(NOT CHIME_INTERNAL_SPAN STREQUAL "")
+    add_definitions(-DCHIME_INTERNAL_SPAN=${CHIME_INTERNAL_SPAN})
+endif()
+
 #Tree Options (compile into CHIME/baselines; these options should be set up one after one; CHIME is the B+ tree that turns on all options)
 option (HOPSCOTCH_LEAF_NODE "+ Hopscotch leaf node" ON)
 option (VACANCY_AWARE_LOCK "+ Vacancy bitmap piggybacking" ON)
