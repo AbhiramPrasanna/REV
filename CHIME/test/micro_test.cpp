@@ -57,15 +57,14 @@
 #endif
 
 // Bulk-load parallelism (setup only; the measured phase always uses kThreadCount
-// threads). DEX-style default: ONE loader thread inserting SORTED keys (see the
-// std::sort in generate_workload + the contiguous partition in thread_bulk_load).
-// Sorted single-threaded loading is append-mostly -- splits are rare and pinned
-// to the right edge, and there is no concurrent (emulated) masked-CAS -- so it
-// builds even LEAN/deep trees (small fanout) that concurrent loading corrupts,
-// and stays fast because there are almost no random splits. Raise via
-// CHIME_LOADERS only on a fabric with REAL masked atomics (MLNX experimental
-// verbs); on the rdma-core port keep it at 1. Does not affect measured numbers.
-int LOADER_NUM = 1;
+// threads). Overridable via CHIME_LOADERS. The RANGE-specific flood was NOT the
+// loader count -- point workloads build fine at 8 loaders -- it was warmup scans
+// running on a half-built tree (fixed by the bulk_finish barrier in thread_run).
+// SORTED contiguous loading (std::sort in generate_workload) makes each loader
+// append-mostly into a disjoint key range, keeping splits/lock-contention low
+// even at 8. Lower this only if you still see an intermittent insert-side
+// masked-CAS wedge on the rdma-core port. Does not affect measured numbers.
+int LOADER_NUM = 8;
 
 extern volatile bool need_stop;
 extern volatile bool need_clear[MAX_APP_THREAD];
@@ -223,6 +222,7 @@ inline int item_lat_op(uint64_t item) {
 
 
 Timer bench_timer;
+std::atomic<int64_t> bulk_cnt{0};      // bulk-load completion barrier (see thread_run)
 std::atomic<int64_t> warmup_cnt{0};
 std::atomic_bool ready{false};
 std::atomic<int> done_cnt{0};   // threads that finished their op quota
@@ -267,7 +267,23 @@ void thread_run(int id) {
   // 1. bulk load
   if (id < std::min(kThreadCount, LOADER_NUM)) thread_bulk_load(id);
 
-  // 2. warmup (untimed) -- fills the CN cache
+  // 1b. BULK-LOAD BARRIER -- the tree must be FULLY built before ANY warmup/query.
+  //     Without it the non-loader threads start warmup immediately on a half-built
+  //     tree. For POINT that only misses (harmless); for RANGE the scan follows
+  //     sibling-leaf pointers that concurrent splits are still mutating -> it
+  //     chases a half-updated pointer to a garbage address -> the "Failed status"
+  //     RDMA flood. That is the entire point-vs-range asymmetry. Mirror the warmup
+  //     barrier: every thread checks in, node 0 does a cluster barrier, then all
+  //     proceed together (both nodes' loads are now complete).
+  bulk_cnt.fetch_add(1);
+  if (id == 0) {
+    while (bulk_cnt.load() != kThreadCount) ;
+    dsm->barrier("bulk_finish");
+    bulk_cnt.store(-1);
+  }
+  while (bulk_cnt.load() != -1) ;
+
+  // 2. warmup (untimed) -- fills the CN cache. Now runs against a COMPLETE tree.
   uint64_t *my_warm = warmup_array + id * thread_warmup_num;
   for (uint64_t c = 0; c < thread_warmup_num; ++c) run_item(my_warm[c], nullptr);
 
@@ -277,11 +293,10 @@ void thread_run(int id) {
     dsm->barrier("warm_finish");
     printf("node %d warmup done in %lds\n", dsm->getMyNodeID(),
            bench_timer.end() / 1000 / 1000 / 1000);
-    // Reset boundary: exclude warmup from the measured numbers. Warmup runs
-    // while the tree is still bulk-loading (the 16 non-loader threads start it
-    // immediately), so warmup lookups legitimately miss on an incomplete tree --
-    // counting them tanks the found-ratio. Reset here so [CORRECTNESS] reflects
-    // only the measured phase, against the fully-loaded tree.
+    // Reset boundary: exclude warmup from the measured numbers. (Warmup now runs
+    // AFTER the bulk_finish barrier, i.e. against the fully-built tree, but it is
+    // still untimed cache-fill.) Reset here so [CORRECTNESS]/latency reflect only
+    // the measured phase.
     bench::clear_all();
     std::fill(g_lk_found, g_lk_found + MAX_APP_THREAD, 0);
     std::fill(g_lk_total, g_lk_total + MAX_APP_THREAD, 0);
