@@ -2130,14 +2130,11 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
     }
   }
 
-  // Coverage guard for the "assume all internal nodes cached" simplification
-  // above. The empty-cache case falls back to a robust per-key search, but the
-  // PARTIAL case (some, not all, covering level-1 nodes cached) was unguarded: on
-  // a deep/lean tree whose internal index overflows a small compute cache, the
-  // cache-derived leaf set is incomplete (and can be stale), so the batched
-  // one-sided leaf read below fails with "Failed status" RDMA errors. Detect a
-  // gap in [from, to) and fall back to the same per-key search() (the point-lookup
-  // path, which fetches misses over RDMA and is safe under an incomplete cache).
+  // Lookup-style partial handling: mirror the point path -- use the cache for the
+  // COVERED prefix of [from, to) and offload only the UNCOVERED tail. Compute how
+  // far the cached level-1 nodes contiguously cover the range starting at `from`.
+  // (Full coverage -> the batched read below serves the whole range, like a lookup
+  // full hit. Nothing covered was already handled by the empty-cache branch.)
   {
     std::vector<std::pair<Key, Key> > covers;
     for (const auto& kv : leaf_fences) covers.emplace_back(kv.second.lowest, kv.second.highest);
@@ -2147,12 +2144,24 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
       if (iv.first > covered) break;                 // gap before this leaf
       if (iv.second > covered) covered = iv.second;  // extend the covered prefix
     }
-    if (covered < to) {                              // [from, to) not fully covered
-      for (auto k = from; k < to; k = k + 1) {
-        cache_miss[dsm->getMyThreadID()] ++;
-        search(k, ret[k]);
+    if (covered < to) {                              // uncovered tail [covered, to)
+      // Handle the tail the way lookup offloads its uncached tail: if offloading is
+      // enabled, push that sub-scan to the memory node (range_query_offload walks
+      // the sibling chain locally); otherwise a robust per-key search (safe under an
+      // incomplete cache). The COVERED prefix [from, covered) is still served locally
+      // by the batched leaf read below.
+#ifdef ENABLE_OFFLOAD
+      if (should_offload(dsm->getMyThreadID())) range_query_offload(covered, to, ret);
+      else
+#endif
+        for (auto k = covered; k < to; k = k + 1) { cache_miss[dsm->getMyThreadID()] ++; search(k, ret[k]); }
+      if (!(from < covered)) return true;            // nothing covered -> tail did it all
+      // Drop leaves at/after the covered boundary so the batched read serves ONLY
+      // the covered prefix (the tail was handled above -- avoids double work).
+      for (auto it = leaf_addrs.begin(); it != leaf_addrs.end(); ) {
+        if (!(leaf_fences[*it].lowest < covered)) it = leaf_addrs.erase(it);
+        else ++it;
       }
-      return false;
     }
   }
 
