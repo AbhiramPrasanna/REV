@@ -244,8 +244,14 @@ void thread_bulk_load(int id) {
   uint64_t span = node_hi - node_lo;
   uint64_t lo = node_lo + (span * (uint64_t)id) / loaders;
   uint64_t hi = node_lo + (span * (uint64_t)(id + 1)) / loaders;
+  // Progress ping every ~10% (loader 0 only) so the single-threaded load isn't a
+  // silent multi-minute gap after the last "new root level" line.
+  uint64_t total = hi - lo, step = total / 10 + 1, done = 0;
   for (uint64_t i = lo; i < hi; ++i) {
     tree->insert(int2key(bulk_array[i]), randval(e));
+    if (id == 0 && ++done % step == 0)
+      printf("[bulk] node %d: %lu%% (%lu/%lu keys)\n",
+             (int)dsm->getMyNodeID(), done * 100 / total, done, total);
   }
 }
 
