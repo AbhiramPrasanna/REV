@@ -2118,6 +2118,32 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
     }
   }
 
+  // Coverage guard for the "assume all internal nodes cached" simplification
+  // above. The empty-cache case falls back to a robust per-key search, but the
+  // PARTIAL case (some, not all, covering level-1 nodes cached) was unguarded: on
+  // a deep/lean tree whose internal index overflows a small compute cache, the
+  // cache-derived leaf set is incomplete (and can be stale), so the batched
+  // one-sided leaf read below fails with "Failed status" RDMA errors. Detect a
+  // gap in [from, to) and fall back to the same per-key search() (the point-lookup
+  // path, which fetches misses over RDMA and is safe under an incomplete cache).
+  {
+    std::vector<std::pair<Key, Key> > covers;
+    for (const auto& kv : leaf_fences) covers.emplace_back(kv.second.lowest, kv.second.highest);
+    std::sort(covers.begin(), covers.end());
+    Key covered = from;
+    for (const auto& iv : covers) {
+      if (iv.first > covered) break;                 // gap before this leaf
+      if (iv.second > covered) covered = iv.second;  // extend the covered prefix
+    }
+    if (covered < to) {                              // [from, to) not fully covered
+      for (auto k = from; k < to; k = k + 1) {
+        cache_miss[dsm->getMyThreadID()] ++;
+        search(k, ret[k]);
+      }
+      return false;
+    }
+  }
+
   auto merge_internals = [](std::vector<std::pair<int, int> >& intervals, std::vector<std::pair<int, int> >& res){  // intervals: [l, r)
     std::sort(intervals.begin(), intervals.end(), [](const std::pair<int, int>& a, const std::pair<int, int>& b){
       return a.first < b.first;
