@@ -9,6 +9,16 @@ set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -std=c++17")
 #Link Options
 set(LINKS_FLAGS "-lnuma -lcityhash -lboost_coroutine -lboost_context -lpthread -libverbs -lmemcached -ltbb")
 
+# AddressSanitizer: pinpoints the exact out-of-bounds write behind the range
+# "unaligned tcache chunk" heap corruption. Build ONE binary with it, run a small
+# range case, and read the ASan report (file:line of the bad write + allocation).
+#   cmake -DENABLE_ASAN=ON -DENABLE_OFFLOAD=ON ..
+option(ENABLE_ASAN "Build with AddressSanitizer to locate heap/OOB corruption" OFF)
+if(ENABLE_ASAN)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fno-omit-frame-pointer -g")
+    set(LINKS_FLAGS "${LINKS_FLAGS} -fsanitize=address")
+endif()
+
 #Env Options
 option (STATIC_MN_IP "Use static MNs according the IPs of the nodes" OFF)
 option (ENABLE_CORO "Turn on the coroutine" ON)
