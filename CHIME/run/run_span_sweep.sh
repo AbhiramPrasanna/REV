@@ -37,10 +37,14 @@
 role="${1:?usage: run_span_sweep.sh <memory|compute>}"
 
 # --- sweep axes ------------------------------------------------------------
-# Inner-node fanout points. 16 is the committed geometry ("proposed"); 8..128
-# brackets it on both sides. Multiples of the hopscotch neighborSize (8) are the
-# safe, tested values.
-export SPANS="${SPANS:-8 16 32 64 128}"
+# Inner-node fanout points. 16 is the committed geometry ("proposed"); 32/64/128
+# are progressively bigger inner nodes (the "larger base" side of the story).
+# NOTE: S=8 is intentionally EXCLUDED -- fanout 8 builds a ~9-level tree for 50M
+# keys, which trips a tree-DEPTH limit in the traversal/buffer path (point runs
+# squeak through at level 8, but scans flood with "Failed status" RDMA errors at
+# level 9). S=16 and up stay <=6 levels and are safe for point AND scan. Add 8
+# back only if you first raise that depth limit.
+export SPANS="${SPANS:-16 32 64 128}"
 
 # Cache is FIXED for this sweep (node size is the only variable). Default 64MB --
 # below the ~88MB index so one-sided caching is genuinely stressed and the
