@@ -230,24 +230,22 @@ int g_time_based = 0;
 
 
 void thread_bulk_load(int id) {
-  // This node loads a contiguous slice of the SHUFFLED key universe; each loader
-  // takes a contiguous block of that (still-random) array, i.e. a random subset,
-  // so splits scatter across the tree and cross-loader contention stays low.
+  // DEX-style SINGLE-NODE construction: exactly one node (the last one -- a
+  // compute node, since node 0 is the memory node) builds the ENTIRE tree; every
+  // other node loads nothing and waits at the bulk_finish barrier. This removes
+  // ALL cross-node concurrency. On this one node we still run LOADER_NUM loader
+  // threads in parallel (traversal + leaf writes overlap); the per-word lock in
+  // DSM::cas_mask_sync serialises only same-word emulated masked-CAS, so the
+  // split/lock protocol never races even without hardware masked atomics -- fast
+  // AND correct. Keys stay SHUFFLED (CHIME's split is not sequential-insert-aware,
+  // so a sorted load builds a taller, under-filled tree).
+  if (dsm->getMyNodeID() != kNodeCount - 1) return;   // only the loader node builds
   int loaders = std::min(kThreadCount, LOADER_NUM);
-  uint64_t per_node = bulk_load_num / kNodeCount;
-  uint64_t node_lo = per_node * dsm->getMyNodeID();
-  uint64_t node_hi = (dsm->getMyNodeID() == kNodeCount - 1) ? bulk_load_num : node_lo + per_node;
-  uint64_t span = node_hi - node_lo;
-  uint64_t lo = node_lo + (span * (uint64_t)id) / loaders;
-  uint64_t hi = node_lo + (span * (uint64_t)(id + 1)) / loaders;
-  // Progress ping every ~10% (loader 0 only) so the single-threaded load isn't a
-  // silent multi-minute gap after the last "new root level" line.
-  uint64_t total = hi - lo, step = total / 10 + 1, done = 0;
-  for (uint64_t i = lo; i < hi; ++i) {
+  uint64_t total = (bulk_load_num + loaders - 1) / loaders, step = total / 10 + 1, done = 0;
+  for (uint64_t i = id; i < bulk_load_num; i += loaders) {   // strided over the whole key set
     tree->insert(int2key(bulk_array[i]), randval(e));
     if (id == 0 && ++done % step == 0)
-      printf("[bulk] node %d: %lu%% (%lu/%lu keys)\n",
-             (int)dsm->getMyNodeID(), done * 100 / total, done, total);
+      printf("[bulk] loader node: %lu%% (%lu/%lu keys)\n", done * 100 / total, done, total);
   }
 }
 

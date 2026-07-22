@@ -10,6 +10,7 @@
 #include <fstream>
 #include <sstream>
 #include <map>
+#include <mutex>
 
 thread_local int DSM::thread_id = -1;
 thread_local ThreadConnection *DSM::iCon = nullptr;
@@ -651,6 +652,17 @@ bool DSM::cas_mask_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
   // ONLY when the masked bits genuinely don't match (the lock bit is set). This
   // reproduces the hardware masked CAS stock CHIME uses (succeed iff the masked
   // bits were unset); it does not change the lock protocol or the data structure.
+  //
+  // Because the emulation is read-then-CAS (two steps), concurrent callers can
+  // interleave and corrupt the lock+bitmap word -- the construction-time flood on
+  // rdma-core. With SINGLE-NODE bulk-load (only one node inserts), every masked-CAS
+  // originates here, so a per-word process-local lock makes the emulation atomic
+  // and lets many loader threads build the tree without racing. Gate it on the
+  // non-coroutine path (bulk load); coroutine callers keep the lock-free path so a
+  // mutex is never held across a coroutine yield.
+  static std::mutex mask_cas_shard[2048];
+  std::unique_lock<std::mutex> mask_lk;
+  if (!sink) mask_lk = std::unique_lock<std::mutex>(mask_cas_shard[(gaddr.offset >> 3) & 2047]);
   for (int spin = 0; spin < (1 << 22); ++spin) {
     read_sync((char *)rdma_buffer, gaddr, sizeof(uint64_t), sink);
     uint64_t cur = *rdma_buffer;
