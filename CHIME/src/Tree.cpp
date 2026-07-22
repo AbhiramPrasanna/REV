@@ -4,6 +4,7 @@
 #include "LeafNode.h"
 #include "InternalNode.h"
 #include "Hash.h"
+#include <cstdlib>   // getenv for CHIME_RANGE_BATCHED
 #ifdef ENABLE_OFFLOAD
 #include "chime_rpc.h"
 #endif
@@ -2059,6 +2060,27 @@ re_read:
 bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret) {  // [from, to)
   assert(dsm->is_register());
   before_operation(nullptr);
+
+  // SAFE RANGE PATH (default on rdma-core). The one-sided, doorbell-batched leaf
+  // read further down is unreliable on this fabric -- it floods with "Failed
+  // status" or corrupts the heap ("unaligned tcache chunk") under the emulated
+  // verbs, whether a scan is partially or fully cache-covered. Until that path is
+  // debugged on hardware with working masked/experimental verbs, serve range
+  // WITHOUT it: offload the whole scan when offloading is enabled (miss or hit --
+  // the MN walks the sibling chain in local memory), else a per-key search that
+  // still uses the cache to descend. Set CHIME_RANGE_BATCHED=1 to re-enable the
+  // cache-local batched/hybrid path on a fabric where it works.
+  static const bool use_batched = (getenv("CHIME_RANGE_BATCHED") != nullptr);
+  if (!use_batched) {
+#ifdef ENABLE_OFFLOAD
+    if (should_offload(dsm->getMyThreadID())) { range_query_offload(from, to, ret); return true; }
+#endif
+    for (auto k = from; k < to; k = k + 1) {
+      cache_miss[dsm->getMyThreadID()] ++;
+      search(k, ret[k]);
+    }
+    return false;
+  }
 
   thread_local std::vector<InternalNode> cache_search_result;
   thread_local std::set<GlobalAddress> leaf_addrs;
