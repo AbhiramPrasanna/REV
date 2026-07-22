@@ -50,17 +50,19 @@
 # ===========================================================================
 role="${1:?usage: run_stress_sweep.sh <memory|compute>}"
 
+# An explicit CHIME_LOADERS pins the loader count for ALL spans; otherwise it
+# AUTO-SCALES per span (lean/deep trees need fewer -- see loaders_for_span).
+# Capture the override before anything else touches it.
+USER_LOADERS="${CHIME_LOADERS:-}"
+
 # PROFILE presets (optional). quick = fast 10M-key iteration; final = 50M-key
 # publication numbers. Any individual knob you set still overrides the preset.
 case "${PROFILE:-}" in
-  quick) : "${BULK:=10}"; : "${WARMUP:=2}"; : "${POINT_OP:=10}"; : "${RANGE_OP:=10}"; : "${CHIME_LOADERS:=16}" ;;
+  quick) : "${BULK:=10}"; : "${WARMUP:=2}"; : "${POINT_OP:=10}"; : "${RANGE_OP:=10}" ;;
   final) : "${BULK:=50}"; : "${WARMUP:=10}"; : "${POINT_OP:=50}"; : "${RANGE_OP:=50}" ;;
   "")    ;;
   *)     echo "unknown PROFILE=$PROFILE (use quick|final)" >&2; exit 1 ;;
 esac
-# Propagate the loader count to micro_test (only if actually set -- an empty
-# CHIME_LOADERS would be read as 0 loaders and load nothing).
-[ -n "${CHIME_LOADERS:-}" ] && export CHIME_LOADERS
 
 export SPANS="${SPANS:-8 16 32 64 128 256 512}"   # lean -> fat (rebuild per span)
 export CACHE_MB_LIST="${CACHE_MB_LIST:-16 64}"    # small & mid: index >> and ~ cache
@@ -86,6 +88,20 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench_common.sh"
 set +e +o pipefail
 
 kill_stragglers() { pkill -9 -f "micro_test" 2>/dev/null; }
+
+# Per-span bulk-load parallelism. Split masked-CAS is EMULATED (non-atomic) on the
+# rdma-core port, so many concurrent loaders wedge a lean/deep tree -- fanout 8
+# does far more internal-node splits than fanout 64+. Scale loaders UP with fanout:
+# lean = few (safe, confirmed S=8 needs 1), fat = 8 (fast). CHIME_LOADERS overrides.
+loaders_for_span() {
+  [ -n "$USER_LOADERS" ] && { echo "$USER_LOADERS"; return; }
+  local s="$1"
+  if   [ "$s" -le 8 ];  then echo 1
+  elif [ "$s" -le 16 ]; then echo 2
+  elif [ "$s" -le 32 ]; then echo 4
+  else                       echo 8
+  fi
+}
 
 wait_for_memcached() {   # compute side: block until the memory node's memcached is up
   local waited=0
@@ -154,12 +170,14 @@ run_cell() {
     sleep 2
   fi
 
-  echo; echo "#### span=$S cache=${cache}MB wl=$wl offload=$mode role=$role"
+  local ld; ld="$(loaders_for_span "$S")"
+  echo; echo "#### span=$S cache=${cache}MB wl=$wl offload=$mode loaders=$ld role=$role"
   echo "#### ${cmd[*]}"
 
   SECONDS=0
   ( cd "$CHIME_DIR/build_span_${S}" \
-      && CHIME_NODE_ID="$nid" CHIME_CACHE_MB="$cache" CHIME_DIR_THREADS="$DIR_THREADS" \
+      && CHIME_NODE_ID="$nid" CHIME_LOADERS="$ld" CHIME_CACHE_MB="$cache" \
+         CHIME_DIR_THREADS="$DIR_THREADS" \
          stdbuf -oL -eL "${cmd[@]}" ) > "$log" 2>&1 &
   local pid=$!
 
