@@ -57,10 +57,15 @@
 #endif
 
 // Bulk-load parallelism (setup only; the measured phase always uses kThreadCount
-// threads). Overridable via CHIME_LOADERS -- lowering it reduces lock contention
-// during bulk load, which sidesteps the intermittent masked-CAS-emulation wedge
-// on the rdma-core port without affecting the measured numbers.
-int LOADER_NUM = 8;
+// threads). DEX-style default: ONE loader thread inserting SORTED keys (see the
+// std::sort in generate_workload + the contiguous partition in thread_bulk_load).
+// Sorted single-threaded loading is append-mostly -- splits are rare and pinned
+// to the right edge, and there is no concurrent (emulated) masked-CAS -- so it
+// builds even LEAN/deep trees (small fanout) that concurrent loading corrupts,
+// and stays fast because there are almost no random splits. Raise via
+// CHIME_LOADERS only on a fabric with REAL masked atomics (MLNX experimental
+// verbs); on the rdma-core port keep it at 1. Does not affect measured numbers.
+int LOADER_NUM = 1;
 
 extern volatile bool need_stop;
 extern volatile bool need_clear[MAX_APP_THREAD];
@@ -137,6 +142,12 @@ void generate_workload() {
   bulk_array = new uint64_t[bulk_load_num];
   memcpy(bulk_array, space, sizeof(uint64_t) * bulk_load_num);
   delete[] space;
+  // DEX-style bulk load: insert keys in SORTED order. Sorted inserts are
+  // append-mostly (each key lands at the current rightmost leaf), so splits are
+  // rare and localized to the right edge -- fast even single-threaded, and free
+  // of the concurrent-split masked-CAS race that corrupts lean/deep trees. Same
+  // key set, just a deterministic (identical-on-every-node) insertion order.
+  std::sort(bulk_array, bulk_array + bulk_load_num);
 
   init_key_generator();
 
@@ -221,12 +232,19 @@ int g_time_based = 0;
 
 
 void thread_bulk_load(int id) {
-  // Split this node's slice of the shuffled universe across loader threads.
+  // This node loads a contiguous (now SORTED) slice of the key universe. Each
+  // loader takes a CONTIGUOUS sub-range (not strided), so with the sorted
+  // bulk_array every loader inserts in-order/append-mostly into its own region,
+  // minimizing splits and cross-loader contention. Default loaders=1 (DEX-style
+  // single-threaded); raise via CHIME_LOADERS only on a real-masked-atomics fabric.
   int loaders = std::min(kThreadCount, LOADER_NUM);
   uint64_t per_node = bulk_load_num / kNodeCount;
   uint64_t node_lo = per_node * dsm->getMyNodeID();
   uint64_t node_hi = (dsm->getMyNodeID() == kNodeCount - 1) ? bulk_load_num : node_lo + per_node;
-  for (uint64_t i = node_lo + id; i < node_hi; i += loaders) {
+  uint64_t span = node_hi - node_lo;
+  uint64_t lo = node_lo + (span * (uint64_t)id) / loaders;
+  uint64_t hi = node_lo + (span * (uint64_t)(id + 1)) / loaders;
+  for (uint64_t i = lo; i < hi; ++i) {
     tree->insert(int2key(bulk_array[i]), randval(e));
   }
 }
