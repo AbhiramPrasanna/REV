@@ -2061,26 +2061,10 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
   assert(dsm->is_register());
   before_operation(nullptr);
 
-  // SAFE RANGE PATH (default on rdma-core). The one-sided, doorbell-batched leaf
-  // read further down is unreliable on this fabric -- it floods with "Failed
-  // status" or corrupts the heap ("unaligned tcache chunk") under the emulated
-  // verbs, whether a scan is partially or fully cache-covered. Until that path is
-  // debugged on hardware with working masked/experimental verbs, serve range
-  // WITHOUT it: offload the whole scan when offloading is enabled (miss or hit --
-  // the MN walks the sibling chain in local memory), else a per-key search that
-  // still uses the cache to descend. Set CHIME_RANGE_BATCHED=1 to re-enable the
-  // cache-local batched/hybrid path on a fabric where it works.
-  static const bool use_batched = (getenv("CHIME_RANGE_BATCHED") != nullptr);
-  if (!use_batched) {
-#ifdef ENABLE_OFFLOAD
-    if (should_offload(dsm->getMyThreadID())) { range_query_offload(from, to, ret); return true; }
-#endif
-    for (auto k = from; k < to; k = k + 1) {
-      cache_miss[dsm->getMyThreadID()] ++;
-      search(k, ret[k]);
-    }
-    return false;
-  }
+  // The legacy doorbell-batched covered-leaf read is opt-in (CHIME_RANGE_BATCHED=1,
+  // for fabrics with full experimental verbs). The default serves covered leaves
+  // with lookup-grade per-leaf reads -- see the block after the coverage guard.
+  static const bool use_legacy_batched = (getenv("CHIME_RANGE_BATCHED") != nullptr);
 
   thread_local std::vector<InternalNode> cache_search_result;
   thread_local std::set<GlobalAddress> leaf_addrs;
@@ -2178,13 +2162,83 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
 #endif
         for (auto k = covered; k < to; k = k + 1) { cache_miss[dsm->getMyThreadID()] ++; search(k, ret[k]); }
       if (!(from < covered)) return true;            // nothing covered -> tail did it all
-      // Drop leaves at/after the covered boundary so the batched read serves ONLY
-      // the covered prefix (the tail was handled above -- avoids double work).
+      // Drop leaves at/after the covered boundary so the covered-leaf reads below
+      // serve ONLY the covered prefix (the tail was handled above -- no double work).
       for (auto it = leaf_addrs.begin(); it != leaf_addrs.end(); ) {
         if (!(leaf_fences[*it].lowest < covered)) it = leaf_addrs.erase(it);
         else ++it;
       }
     }
+  }
+
+  // LOOKUP-GRADE COVERED-LEAF READS (default). Range must work the way lookup
+  // works, on the primitives lookup has PROVEN on this fabric: point ops issue
+  // read_sync / tiny batches + whole-node version decode + validation + bounded
+  // retries, and never fail. The legacy machinery below is the one path only
+  // range uses, and it differs in exactly the ways that match the failures:
+  //   * its re_read loop retries UNBOUNDED -> a persistent decode failure
+  //     re-issues the whole batch forever (the "Failed status" storm);
+  //   * after a failed read it still decodes the garbage buffer and trusts the
+  //     decoded lengths/indices (heap scribble -> "unaligned tcache chunk", and
+  //     ibverbs' heap structures explain the garbage completion statuses);
+  //   * it posts one doorbell list with an entry per leaf-segment (dozens),
+  //     unlike anything the lookup path posts.
+  // So serve each covered leaf exactly like a lookup serves a leaf: one
+  // read_sync, the same decode + hopscotch check, retries BOUNDED, and a
+  // per-key fallback for a persistently inconsistent leaf instead of a storm.
+  if (!use_legacy_batched) {
+    auto range_buffer = (dsm->get_rbuf(nullptr)).get_range_buffer();
+    for (const auto& leaf_addr : leaf_addrs) {
+      const auto& fence = leaf_fences[leaf_addr];
+      const Key l_k = (fence.lowest < from) ? from : fence.lowest;   // clip to [from, to)
+      const Key r_k = (fence.highest < to) ? fence.highest : to;
+      bool done = false;
+      for (int attempt = 0; attempt < 8 && !done; ++ attempt) {
+        dsm->read_sync(range_buffer, leaf_addr, define::allocationLeafSize, nullptr);
+        auto leaf_buffer = (dsm->get_rbuf(nullptr)).get_leaf_buffer();
+        auto leaf = (LeafNode *)leaf_buffer;
+        bool ok;
+#ifdef METADATA_REPLICATION
+        auto intermediate_leaf_buffer = (dsm->get_rbuf(nullptr)).get_leaf_buffer();
+        ok = LeafVersionManager::decode_node_versions(range_buffer, intermediate_leaf_buffer);
+        if (ok) MetadataManager::decode_node_metadata(intermediate_leaf_buffer, leaf_buffer);
+#else
+        ok = VersionManager<LeafNode, LeafEntry>::decode_node_versions(range_buffer, leaf_buffer);
+#endif
+#ifdef HOPSCOTCH_LEAF_NODE
+        if (ok) {  // same hopping-consistency check as the point path
+          auto& records = leaf->records;
+          int hash_idxes[define::leafSpanSize];
+          for (int i = 0; i < (int)define::leafSpanSize; ++ i) {
+            hash_idxes[i] = (records[i].key == define::kkeyNull)
+                              ? -1 : get_hashed_leaf_entry_index(records[i].key);
+          }
+          for (int i = 0; ok && i < (int)define::leafSpanSize; ++ i) {
+            uint16_t hop_bitmap = 0;
+            for (int j = 0; j < (int)define::neighborSize; ++ j) {
+              if (hash_idxes[(i + j) % define::leafSpanSize] == i) {
+                hop_bitmap |= 1ULL << (define::neighborSize - j - 1);
+              }
+            }
+            if (hop_bitmap != records[i].hop_bitmap) ok = false;
+          }
+        }
+#endif
+        if (ok) {
+          for (const auto& e : leaf->records) {
+            if (e.key != define::kkeyNull && e.key >= l_k && e.key < r_k) ret[e.key] = e.value;
+          }
+          done = true;
+        }
+      }
+      if (!done) {  // persistently inconsistent leaf: bounded per-key fallback, never a retry storm
+        for (Key k = l_k; k < r_k; k = k + 1) {
+          cache_miss[dsm->getMyThreadID()] ++;
+          search(k, ret[k]);
+        }
+      }
+    }
+    return true;
   }
 
   auto merge_internals = [](std::vector<std::pair<int, int> >& intervals, std::vector<std::pair<int, int> >& res){  // intervals: [l, r)
