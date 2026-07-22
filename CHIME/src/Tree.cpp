@@ -2082,8 +2082,20 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
   leaf_info.clear();
   tree_cache->search_range_from_cache(from, to, cache_search_result);
 
-  // FIXME: for simplicity, we assume all innernal nodes are cached in compute node like Sherman
+  // COMPLETE cache miss: the compute cache holds NO covering internal node for
+  // this range. Miss-gated offload — if offloading is enabled (rate > 0), push the
+  // WHOLE scan to the memory node (it walks the sibling chain in local memory)
+  // instead of a per-key one-sided search from the root. On a partial/full hit
+  // (the branches below) we stay one-sided and use the cache; with offload off
+  // (should_offload == false at rate 0) we never offload. So: complete miss +
+  // offload-on -> offload; anything else -> not offloaded.
   if (cache_search_result.empty()) {
+#ifdef ENABLE_OFFLOAD
+    if (should_offload(dsm->getMyThreadID())) {
+      range_query_offload(from, to, ret);
+      return true;
+    }
+#endif
     for(auto k = from; k < to; k = k + 1) {
       cache_miss[dsm->getMyThreadID()] ++;
       search(k, ret[k]);  // load into cache

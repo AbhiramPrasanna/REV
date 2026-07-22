@@ -200,17 +200,12 @@ inline void run_item(uint64_t item, CoroPull *sink) {
   else if (op == M_UPDATE) { tree->update(k, randval(e), sink); }
   else {
     std::map<Key, Value> ret;
-#ifdef ENABLE_OFFLOAD
-    // Runtime-gated, NOT #ifdef-gated. The sweep builds ONE binary with
-    // ENABLE_OFFLOAD=ON and A/Bs via the rate, so selecting the path at compile
-    // time made the range workloads run range_query_offload in the OFF cells too
-    // -- both halves of the A/B executed identical code and every range
-    // off-vs-on comparison was meaningless. Honour the rate like lookups do.
-    if (g_offload_rate > 0) tree->range_query_offload(k, k + (uint8_t)scan_range, ret);
-    else                    tree->range_query(k, k + (uint8_t)scan_range, ret);
-#else
+    // Miss-gated range (mirrors the lookup path): always enter range_query, which
+    // decides PER SCAN — on a COMPLETE cache miss and offload enabled it pushes
+    // the whole scan down (range_query_offload); on a partial/full cache hit it
+    // stays one-sided; with offload off (rate 0) it never offloads. The rate is
+    // honoured inside range_query via should_offload, so the OFF/ON A/B is real.
     tree->range_query(k, k + (uint8_t)scan_range, ret);
-#endif
     g_scan_rows[dsm->getMyThreadID()] += ret.size();
   }
 }
