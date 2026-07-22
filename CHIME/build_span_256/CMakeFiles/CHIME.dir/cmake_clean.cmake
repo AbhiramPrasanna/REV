@@ -1,0 +1,41 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/CHIME.dir/src/AbstractMessageConnection.cpp.o"
+  "CMakeFiles/CHIME.dir/src/AbstractMessageConnection.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/Common.cpp.o"
+  "CMakeFiles/CHIME.dir/src/Common.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/DSM.cpp.o"
+  "CMakeFiles/CHIME.dir/src/DSM.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/DSMKeeper.cpp.o"
+  "CMakeFiles/CHIME.dir/src/DSMKeeper.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/Debug.cpp.o"
+  "CMakeFiles/CHIME.dir/src/Debug.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/Directory.cpp.o"
+  "CMakeFiles/CHIME.dir/src/Directory.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/DirectoryConnection.cpp.o"
+  "CMakeFiles/CHIME.dir/src/DirectoryConnection.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/Keeper.cpp.o"
+  "CMakeFiles/CHIME.dir/src/Keeper.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/RawMessageConnection.cpp.o"
+  "CMakeFiles/CHIME.dir/src/RawMessageConnection.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/RdmaCache.cpp.o"
+  "CMakeFiles/CHIME.dir/src/RdmaCache.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/ThreadConnection.cpp.o"
+  "CMakeFiles/CHIME.dir/src/ThreadConnection.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/Tree.cpp.o"
+  "CMakeFiles/CHIME.dir/src/Tree.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/rdma/Operation.cpp.o"
+  "CMakeFiles/CHIME.dir/src/rdma/Operation.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/rdma/Resource.cpp.o"
+  "CMakeFiles/CHIME.dir/src/rdma/Resource.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/rdma/StateTrans.cpp.o"
+  "CMakeFiles/CHIME.dir/src/rdma/StateTrans.cpp.o.d"
+  "CMakeFiles/CHIME.dir/src/rdma/Utility.cpp.o"
+  "CMakeFiles/CHIME.dir/src/rdma/Utility.cpp.o.d"
+  "libCHIME.a"
+  "libCHIME.pdb"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/CHIME.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()
