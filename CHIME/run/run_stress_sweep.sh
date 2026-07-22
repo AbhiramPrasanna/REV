@@ -50,6 +50,18 @@
 # ===========================================================================
 role="${1:?usage: run_stress_sweep.sh <memory|compute>}"
 
+# PROFILE presets (optional). quick = fast 10M-key iteration; final = 50M-key
+# publication numbers. Any individual knob you set still overrides the preset.
+case "${PROFILE:-}" in
+  quick) : "${BULK:=10}"; : "${WARMUP:=2}"; : "${POINT_OP:=10}"; : "${RANGE_OP:=10}"; : "${CHIME_LOADERS:=16}" ;;
+  final) : "${BULK:=50}"; : "${WARMUP:=10}"; : "${POINT_OP:=50}"; : "${RANGE_OP:=50}" ;;
+  "")    ;;
+  *)     echo "unknown PROFILE=$PROFILE (use quick|final)" >&2; exit 1 ;;
+esac
+# Propagate the loader count to micro_test (only if actually set -- an empty
+# CHIME_LOADERS would be read as 0 loaders and load nothing).
+[ -n "${CHIME_LOADERS:-}" ] && export CHIME_LOADERS
+
 export SPANS="${SPANS:-8 16 32 64 128 256 512}"   # lean -> fat (rebuild per span)
 export CACHE_MB_LIST="${CACHE_MB_LIST:-16 64}"    # small & mid: index >> and ~ cache
 export WORKLOADS="${WORKLOADS:-point-uniform point-zipf range-uniform range-zipf}"
