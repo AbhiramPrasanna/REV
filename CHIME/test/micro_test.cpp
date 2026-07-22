@@ -60,10 +60,11 @@
 // threads). Overridable via CHIME_LOADERS. The RANGE-specific flood was NOT the
 // loader count -- point workloads build fine at 8 loaders -- it was warmup scans
 // running on a half-built tree (fixed by the bulk_finish barrier in thread_run).
-// SORTED contiguous loading (std::sort in generate_workload) makes each loader
-// append-mostly into a disjoint key range, keeping splits/lock-contention low
-// even at 8. Lower this only if you still see an intermittent insert-side
-// masked-CAS wedge on the rdma-core port. Does not affect measured numbers.
+// Shuffled inserts (see generate_workload) scatter splits across the tree, so 8
+// loaders stay low-contention -- point always built fine at 8. Lower this for the
+// LEANEST spans (small fanout -> deep tree -> many splits) if you still see an
+// intermittent insert-side masked-CAS wedge on the rdma-core port. Does not
+// affect measured numbers.
 int LOADER_NUM = 8;
 
 extern volatile bool need_stop;
@@ -141,12 +142,14 @@ void generate_workload() {
   bulk_array = new uint64_t[bulk_load_num];
   memcpy(bulk_array, space, sizeof(uint64_t) * bulk_load_num);
   delete[] space;
-  // DEX-style bulk load: insert keys in SORTED order. Sorted inserts are
-  // append-mostly (each key lands at the current rightmost leaf), so splits are
-  // rare and localized to the right edge -- fast even single-threaded, and free
-  // of the concurrent-split masked-CAS race that corrupts lean/deep trees. Same
-  // key set, just a deterministic (identical-on-every-node) insertion order.
-  std::sort(bulk_array, bulk_array + bulk_load_num);
+  // KEEP THE SHUFFLED ORDER. A global std::sort here backfires: CHIME's split is
+  // not sequential-insert-aware, so sorted keys build an underfull "staircase"
+  // tree taller than optimal (level 11 vs 9 at fanout 8) -> many more splits ->
+  // many more concurrent (emulated) masked-CAS ops -> the RDMA flood at high
+  // loader counts. Shuffled inserts fill nodes ~50%, give the optimal height, and
+  // scatter splits across the tree, so 8 loaders stay low-contention (point always
+  // built fine). The range-scan flood was the missing bulk->warmup barrier
+  // (thread_run), not the insertion order.
 
   init_key_generator();
 
@@ -232,11 +235,9 @@ int g_time_based = 0;
 
 
 void thread_bulk_load(int id) {
-  // This node loads a contiguous (now SORTED) slice of the key universe. Each
-  // loader takes a CONTIGUOUS sub-range (not strided), so with the sorted
-  // bulk_array every loader inserts in-order/append-mostly into its own region,
-  // minimizing splits and cross-loader contention. Default loaders=1 (DEX-style
-  // single-threaded); raise via CHIME_LOADERS only on a real-masked-atomics fabric.
+  // This node loads a contiguous slice of the SHUFFLED key universe; each loader
+  // takes a contiguous block of that (still-random) array, i.e. a random subset,
+  // so splits scatter across the tree and cross-loader contention stays low.
   int loaders = std::min(kThreadCount, LOADER_NUM);
   uint64_t per_node = bulk_load_num / kNodeCount;
   uint64_t node_lo = per_node * dsm->getMyNodeID();
