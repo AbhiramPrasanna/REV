@@ -1,6 +1,6 @@
 #!/bin/bash
 # ===========================================================================
-# run_memory.sh  --  run this ON THE MEMORY NODE (default 10.30.1.8)
+# run_memory.sh  --  run this ON THE MEMORY NODE (default 10.30.1.7)
 #
 # Restarts memcached locally, then launches test/micro_test. Because it
 # registers first, this machine gets CHIME node id 0 and (MEMORY_NODE_NUM=1)

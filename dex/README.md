@@ -34,11 +34,11 @@ cp ../script/sweep*.sh .
 
 | Server IP   | Node ID | Role                                   | What it runs            |
 |-------------|---------|----------------------------------------|-------------------------|
-| `10.30.1.9` | node 0  | memcached host **+** compute node      | `./run.sh`              |
+| `10.30.1.7` | node 0  | memcached host **+** compute node      | `./run.sh`              |
 | `10.30.1.6` | node 1  | memory node (serves pages over RDMA)   | `./run_other.sh`        |
 
 Node IDs are handed out by memcached in **registration order**, so always start
-node 0 (`10.30.1.9`) first. With the default config (`nodenum=2`,
+node 0 (`10.30.1.7`) first. With the default config (`nodenum=2`,
 `threads=2`, `kMaxThread=36`) the cluster has **one compute node and one memory
 node**; raise the thread count past 36 to turn `10.30.1.6` into a second compute
 node too.
@@ -50,7 +50,7 @@ as `../memcached.conf` from the `build/` directory. It must be identical on both
 servers and point at the memcached host:
 
 ```
-10.30.1.9      # line 1: memcached IP  (node 0)
+10.30.1.7      # line 1: memcached IP  (node 0)
 11211          # line 2: memcached port
 ```
 
@@ -60,7 +60,7 @@ traffic — that all goes over RDMA.
 
 ### Step 1 — build on *both* servers
 
-Run these on `10.30.1.9` **and** `10.30.1.6` (each needs its own build):
+Run these on `10.30.1.7` **and** `10.30.1.6` (each needs its own build):
 
 ```bash
 git clone https://github.com/baotonglu/dex.git
@@ -84,23 +84,23 @@ cp ../script/run*.sh .                     # run.sh + run_other.sh launchers
 memcached and zero the `serverNum`/`clientNum` counters:
 
 ```bash
-ssh -p 22 10.30.1.9 "memcached -u root -l 10.30.1.9 -p 11211 -c 10000 -d -P /tmp/memcached.pid"
+ssh -p 22 10.30.1.7 "memcached -u root -l 10.30.1.7 -p 11211 -c 10000 -d -P /tmp/memcached.pid"
 ```
 
-This requires passwordless SSH to `10.30.1.9` (port 22). If that isn't set up,
-skip the script and start memcached manually on `10.30.1.9` once:
+This requires passwordless SSH to `10.30.1.7` (port 22). If that isn't set up,
+skip the script and start memcached manually on `10.30.1.7` once:
 
 ```bash
-# on 10.30.1.9, start memcached bound to its own IP:
-memcached -u root -l 10.30.1.9 -p 11211 -c 10000 -d -P /tmp/memcached.pid
+# on 10.30.1.7, start memcached bound to its own IP:
+memcached -u root -l 10.30.1.7 -p 11211 -c 10000 -d -P /tmp/memcached.pid
 # initialize the two registration counters the keeper expects:
-printf 'set serverNum 0 0 1\r\n0\r\nquit\r\n' | nc 10.30.1.9 11211
-printf 'set clientNum 0 0 1\r\n0\r\nquit\r\n' | nc 10.30.1.9 11211
+printf 'set serverNum 0 0 1\r\n0\r\nquit\r\n' | nc 10.30.1.7 11211
+printf 'set clientNum 0 0 1\r\n0\r\nquit\r\n' | nc 10.30.1.7 11211
 ```
 
 ### Step 3 — launch the run
 
-**On node 0 (`10.30.1.9`) — start this first:**
+**On node 0 (`10.30.1.7`) — start this first:**
 
 ```bash
 cd dex/build
@@ -168,7 +168,7 @@ configurations — use the sweep scripts. memcached is restarted before every
 configuration so each run is a fresh distributed registration.
 
 ```bash
-# node 0 (10.30.1.9) — start first:
+# node 0 (10.30.1.7) — start first:
 ./sweep.sh
 # node 1 (10.30.1.6) — start right after:
 ./sweep_other.sh

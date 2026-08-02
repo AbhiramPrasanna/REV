@@ -13,7 +13,7 @@
 #
 # TOPOLOGY (edit below): monitor+memory on this host; compute over SSH.
 #   10.30.1.6  ->  monitor + memory (memory node 0)   <- run this script here
-#   10.30.1.9  ->  compute (compute node 0)           <- launched via SSH
+#   10.30.1.7  ->  compute (compute node 0)           <- launched via SSH
 #
 # PREREQS:
 #   * Build on BOTH hosts (same path): ./build.sh   (binaries in ./bin)
@@ -27,7 +27,7 @@ set -u
 # ----------------------------- cluster config ------------------------------
 MONITOR_BIND="0.0.0.0:9898"     # monitor binds here (this host)
 MONITOR_DIAL="10.30.1.6:9898"   # memory/compute dial this
-COMPUTE_HOST="10.30.1.9"        # SSH target for the compute node ("" = run local)
+COMPUTE_HOST="10.30.1.7"        # SSH target for the compute node ("" = run local)
 SSH="ssh"                       # ssh command ("" with COMPUTE_HOST="" => local)
 
 MEM_NIC=0                       # memory-host RDMA device index (ibv_devices)

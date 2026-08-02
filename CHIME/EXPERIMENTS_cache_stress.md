@@ -27,7 +27,7 @@ cd CHIME && mkdir -p build && cd build && cmake -DENABLE_OFFLOAD=ON .. && make -
 
 **Run** — memory node first, then compute, identical args:
 ```bash
-# on the memory node (10.30.1.8)
+# on the memory node (10.30.1.7)
 CHIME/run/run_cache_stress.sh memory
 # on the compute node (10.30.1.6)
 CHIME/run/run_cache_stress.sh compute

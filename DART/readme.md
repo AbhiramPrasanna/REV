@@ -45,7 +45,7 @@ cmake --build build
 > 1. `--monitor_addr` — host:port every binary uses to reach the monitor.
 > 2. the `ips[]` array in [`src/main/compute.cc`](src/main/compute.cc) — the
 >    memory-node IPs the RACE skip-table dials directly on TCP `:10001`.
->    It is already set to `{"10.30.1.6", "10.30.1.9"}` (ips[0] = memory node 0).
+>    It is already set to `{"10.30.1.6", "10.30.1.7"}` (ips[0] = memory node 0).
 >    **If you edit it, rebuild `compute`.**
 
 ### Cluster layout (2 servers, 1 memory + 1 compute)
@@ -53,7 +53,7 @@ cmake --build build
 | server      | roles                                  |
 |-------------|----------------------------------------|
 | `10.30.1.6` | `monitor` + `memory` (memory node 0)   |
-| `10.30.1.9` | `compute` (compute node 0)             |
+| `10.30.1.7` | `compute` (compute node 0)             |
 
 ### 0. One-time prep on **both** servers
 
@@ -69,7 +69,7 @@ ibstat             # confirm State: ACTIVE, and the port number (--ib_port)
 ```
 
 The compute node reads the **workload files** from disk (the monitor only sends
-their *names*). Make sure `c_load` / `c_run` exist on `10.30.1.9` under
+their *names*). Make sure `c_load` / `c_run` exist on `10.30.1.7` under
 `./workload/split/` (the default `--workload_prefix`); generate them with the
 steps in *Workload Generation* above, or point `--workload_prefix` elsewhere.
 
@@ -127,7 +127,7 @@ bin/memory --monitor_addr=10.30.1.6:9898 --nic_index=0 --ib_port=1
 The memory node registers its RDMA region and also starts the RACE skip-table
 **Server** listening on TCP `:10001` (that's what compute's `ips[]` connects to).
 
-### 3. On `10.30.1.9` — start the compute node
+### 3. On `10.30.1.7` — start the compute node
 
 ```shell
 bin/compute --monitor_addr=10.30.1.6:9898 --nic_index=0 --ib_port=1 \
@@ -192,7 +192,7 @@ bin/monitor --monitor_addr=0.0.0.0:9898 --memory_num=1 --compute_num=1 \
 cache ∈ {32,64,128,256,512,1024} MiB (total, so `--th_mb = size/threads`) ×
 {uniform, zipf-0.99} × {100% lookup, 100% scan}, 30M ops each — 24 runs. It
 relaunches the one-shot monitor/memory/compute per configuration (DART's
-equivalent of "restart between tests"), launching `compute` on `10.30.1.9` over
+equivalent of "restart between tests"), launching `compute` on `10.30.1.7` over
 SSH, and writes a CSV plus per-run logs.
 
 ```shell

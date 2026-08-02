@@ -26,7 +26,7 @@ BIN="$BUILD_DIR/micro_test"
 COMMON_H="$CHIME_DIR/include/Common.h"   # holds kIndexCacheSize (cache-sweep knob)
 
 # --- cluster (edit to match your machines; memory hosts memcached) ---------
-MEM_IP="${MEM_IP:-10.30.1.8}"   # memory node  -> CHIME node 0 (MN); runs memcached
+MEM_IP="${MEM_IP:-10.30.1.7}"   # memory node  -> CHIME node 0 (MN); runs memcached
 CMP_IP="${CMP_IP:-10.30.1.6}"   # compute node -> CHIME node 1 (CN)
 MEMC_PORT="${MEMC_PORT:-11211}"
 NODES="${NODES:-2}"             # total machines (1 MN + 1 CN)

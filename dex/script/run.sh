@@ -1,6 +1,6 @@
 #!/bin/bash
 # ===========================================================================
-# run.sh  --  single DEX benchmark run, NODE 0 (memcached host: 10.30.1.9)
+# run.sh  --  single DEX benchmark run, NODE 0 (memcached host: 10.30.1.7)
 #
 # Restarts memcached, then launches one newbench configuration.  Edit the
 # variables below, run this on node 0, then run ./run_other.sh on node 1.

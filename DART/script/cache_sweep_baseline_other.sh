@@ -3,14 +3,14 @@
 # cache_sweep_baseline_other.sh — MEMORY side of the baseline DART cache sweep.
 #                                 >>> RUN THIS ON THE MEMORY HOST: 10.30.1.6 <<<
 #
-# Companion to cache_sweep_baseline.sh (which runs on the compute host 10.30.1.8
+# Companion to cache_sweep_baseline.sh (which runs on the compute host 10.30.1.7
 # and owns the monitor + all workload flags). This script just relaunches the
 # one-shot memory node once per configuration, in lockstep with the compute side.
 #
-#     10.30.1.8  ->  monitor + compute   ::  ./script/cache_sweep_baseline.sh
+#     10.30.1.7  ->  monitor + compute   ::  ./script/cache_sweep_baseline.sh
 #     10.30.1.6  ->  memory              ::  ./script/cache_sweep_baseline_other.sh  (THIS)
 #
-# bin/memory is one-shot: it dials the monitor on 10.30.1.8, connects its RDMA
+# bin/memory is one-shot: it dials the monitor on 10.30.1.7, connects its RDMA
 # QPs, runs ONE configuration, then exits when the monitor broadcasts end (999).
 # This loop relaunches it for every configuration. Between configs the compute
 # side tears the monitor down and brings up a fresh one; while the monitor is
@@ -19,10 +19,10 @@
 #
 # HOW TO RUN (either order works; the monitor barrier syncs them):
 #   1. on 10.30.1.6:  ./script/cache_sweep_baseline_other.sh   (THIS — can start first)
-#   2. on 10.30.1.8:  ./script/cache_sweep_baseline.sh
+#   2. on 10.30.1.7:  ./script/cache_sweep_baseline.sh
 #
 # PREREQS:
-#   * Build on this host (same path as 10.30.1.8): ./build.sh  (binaries in ./bin)
+#   * Build on this host (same path as 10.30.1.7): ./build.sh  (binaries in ./bin)
 #   * Hugepages: sudo sysctl -w vm.nr_hugepages=16384
 #   * Set MEM_NIC to this host's RDMA device index (see `ibv_devices`).
 #
@@ -32,7 +32,7 @@
 set -u
 
 # ----------------------------- cluster config ------------------------------
-MONITOR_DIAL="10.30.1.8:9898"   # the monitor lives on the compute host
+MONITOR_DIAL="10.30.1.7:9898"   # the monitor lives on the compute host
 
 MEM_NIC=0                       # memory-host (10.30.1.6) RDMA device index
 IB_PORT=1
@@ -66,7 +66,7 @@ teardown() { killall -9 memory 2>/dev/null; }
 
 echo "BASELINE DART cache sweep (MEMORY side, 10.30.1.6): $NUM_CONFIGS configs"
 echo "dialing monitor at $MONITOR_DIAL  (logs in $LOGDIR)"
-echo ">>> Make sure cache_sweep_baseline.sh is (or will be) running on 10.30.1.8 <<<"
+echo ">>> Make sure cache_sweep_baseline.sh is (or will be) running on 10.30.1.7 <<<"
 
 teardown
 sleep 1
@@ -96,7 +96,7 @@ for (( i = 1; i <= NUM_CONFIGS; ++i )); do
         if [ "$attempt" -ge "$MAX_RETRY" ]; then
             echo "    !! config $i: monitor never reachable / repeated failure after" \
                  "$attempt attempts. Last log: $mlog" >&2
-            echo "    !! Check the compute host (10.30.1.8) and RDMA setup, then rerun." >&2
+            echo "    !! Check the compute host (10.30.1.7) and RDMA setup, then rerun." >&2
             teardown
             exit 1
         fi
@@ -108,4 +108,4 @@ for (( i = 1; i <= NUM_CONFIGS; ++i )); do
 done
 
 echo
-echo "Memory side done: served $NUM_CONFIGS configurations. Results CSV is on 10.30.1.8."
+echo "Memory side done: served $NUM_CONFIGS configurations. Results CSV is on 10.30.1.7."

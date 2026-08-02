@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # cache_sweep_baseline.sh — BASELINE DART directory-cache sweep (no offloading).
-#                           >>> RUN THIS ON THE COMPUTE HOST: 10.30.1.8 <<<
+#                           >>> RUN THIS ON THE COMPUTE HOST: 10.30.1.7 <<<
 #
 # Pure DART, in-memory microbench (test_func=1). There is NO offloading/pushdown
 # knob in DART — that concept belongs to DEX (separate repo). This is the plain
@@ -9,7 +9,7 @@
 # compute-side directory cache.
 #
 # This is the COMPUTE side of a TWO-SCRIPT pair (DEX-style, no SSH needed):
-#     10.30.1.8  ->  monitor + compute   ::  ./script/cache_sweep_baseline.sh        (THIS)
+#     10.30.1.7  ->  monitor + compute   ::  ./script/cache_sweep_baseline.sh        (THIS)
 #     10.30.1.6  ->  memory              ::  ./script/cache_sweep_baseline_other.sh  (pair)
 #
 # The monitor (here) owns ALL workload/sizing flags and drives the matrix. For
@@ -26,7 +26,7 @@
 #
 # HOW TO RUN (either order works; the monitor barrier syncs them):
 #   1. on 10.30.1.6:  ./script/cache_sweep_baseline_other.sh
-#   2. on 10.30.1.8:  ./script/cache_sweep_baseline.sh
+#   2. on 10.30.1.7:  ./script/cache_sweep_baseline.sh
 #
 # PREREQS:
 #   * Build on BOTH hosts (same path): ./build.sh   (binaries in ./bin)
@@ -41,9 +41,9 @@
 set -u
 
 # ----------------------------- cluster config ------------------------------
-MONITOR_BIND="0.0.0.0:9898"     # monitor binds here (THIS host = 10.30.1.8)
+MONITOR_BIND="0.0.0.0:9898"     # monitor binds here (THIS host = 10.30.1.7)
 
-CMP_NIC=0                       # compute-host (10.30.1.8) RDMA device index
+CMP_NIC=0                       # compute-host (10.30.1.7) RDMA device index
 IB_PORT=1
 
 # Repo dir (this script lives in <repo>/script/).
@@ -153,7 +153,7 @@ run_one() {
 }
 
 # ------------------------------- the sweep ---------------------------------
-echo "BASELINE DART cache sweep (COMPUTE side, 10.30.1.8) -> $OUT  (logs in $LOGDIR)"
+echo "BASELINE DART cache sweep (COMPUTE side, 10.30.1.7) -> $OUT  (logs in $LOGDIR)"
 echo ">>> Make sure cache_sweep_baseline_other.sh is running on 10.30.1.6 <<<"
 for threads in "${THREADS_SET[@]}"; do
   for dist in "${DISTS[@]}"; do

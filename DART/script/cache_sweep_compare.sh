@@ -33,7 +33,7 @@ set -u
 # ----------------------------- cluster config ------------------------------
 MONITOR_BIND="${MONITOR_BIND:-0.0.0.0:9898}"
 MONITOR_DIAL="${MONITOR_DIAL:-10.30.1.6:9898}"
-COMPUTE_HOST="${COMPUTE_HOST:-10.30.1.9}"      # "" => run compute locally
+COMPUTE_HOST="${COMPUTE_HOST:-10.30.1.7}"      # "" => run compute locally
 SSH="${SSH:-ssh}"
 MEM_NIC="${MEM_NIC:-0}"
 CMP_NIC="${CMP_NIC:-0}"

@@ -38,7 +38,7 @@
 // Memory-node IPs the RACE skip-table RDMA client dials directly (TCP :10001).
 // ips[m] is memory node m, for m in [0, memory_machine_num). DART has NO
 // memcached; this list + --monitor_addr are the whole cluster config.
-const char* ips[] = {"10.30.1.6", "10.30.1.9"};
+const char* ips[] = {"10.30.1.6", "10.30.1.7"};
 
 template<typename T>
 using coro = boost::coroutines2::coroutine<T>;

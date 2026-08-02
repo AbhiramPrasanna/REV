@@ -34,7 +34,7 @@ Two servers, each with an RDMA NIC:
 | server      | roles                                | notes |
 |-------------|--------------------------------------|-------|
 | `10.30.1.6` | `monitor` + `memory` (memory node 0) | run the sweep script **here** |
-| `10.30.1.9` | `compute` (compute node 0)           | launched by the script over SSH |
+| `10.30.1.7` | `compute` (compute node 0)           | launched by the script over SSH |
 
 Two independent TCP control channels are used at startup (RDMA data itself is
 one-sided after setup):
@@ -60,8 +60,8 @@ ibv_devices
 
 You also need:
 
-- **Passwordless SSH** from `10.30.1.6` to `10.30.1.9` (the sweep script SSHes in
-  to launch `compute`). Test: `ssh 10.30.1.9 hostname`.
+- **Passwordless SSH** from `10.30.1.6` to `10.30.1.7` (the sweep script SSHes in
+  to launch `compute`). Test: `ssh 10.30.1.7 hostname`.
 - The repo checked out at the **same absolute path** on both servers (the script
   does `cd "$DART_DIR"` remotely, where `$DART_DIR` is derived from its own
   location on the local host).
@@ -208,7 +208,7 @@ Two places encode "which machine is which":
 2. **`ips[]`** in [`src/main/compute.cc`](src/main/compute.cc) (~line 33) — the
    **memory-node IPs** the RACE client dials on port `10001`. Already set:
    ```cpp
-   const char* ips[] = {"10.30.1.6", "10.30.1.9"};  // ips[0] = memory node 0
+   const char* ips[] = {"10.30.1.6", "10.30.1.7"};  // ips[0] = memory node 0
    ```
    For 1 memory node only `ips[0]` is used. **If you change this, rebuild `compute`.**
 
@@ -241,7 +241,7 @@ bin/monitor \
 # --- on 10.30.1.6, terminal 2: memory node ---
 bin/memory  --monitor_addr=10.30.1.6:9898 --nic_index=0 --ib_port=1
 
-# --- on 10.30.1.9: compute node ---
+# --- on 10.30.1.7: compute node ---
 bin/compute --monitor_addr=10.30.1.6:9898 --nic_index=0 --ib_port=1 \
             --numa_node_total_num=2 --numa_node_group=0
 ```
@@ -295,7 +295,7 @@ parses each monitor log, and appends a row to a CSV.
 ```bash
 MONITOR_BIND="0.0.0.0:9898"     # monitor binds here (this host)
 MONITOR_DIAL="10.30.1.6:9898"   # memory/compute dial this
-COMPUTE_HOST="10.30.1.9"        # SSH target for compute ("" = run compute locally)
+COMPUTE_HOST="10.30.1.7"        # SSH target for compute ("" = run compute locally)
 SSH="ssh"
 
 MEM_NIC=0; CMP_NIC=0; IB_PORT=1 # from §4 (per server)
@@ -375,7 +375,7 @@ per op than lookups, so their throughput is lower and more cache-sensitive.
 
 ```bash
 ./kill.sh                       # sudo killall -9 monitor memory compute (this host)
-ssh 10.30.1.9 './DART/kill.sh'  # and on the compute host
+ssh 10.30.1.7 './DART/kill.sh'  # and on the compute host
 ```
 
 ---

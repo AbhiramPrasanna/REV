@@ -277,7 +277,7 @@ cp ../script/{restartMemc.sh,run*.sh,sweep*.sh} .
 
 # DART (compute host / memory host):
 ./build.sh
-./script/cache_sweep_baseline.sh         # 10.30.1.8   (+ _other.sh on 10.30.1.6)
+./script/cache_sweep_baseline.sh         # 10.30.1.7   (+ _other.sh on 10.30.1.6)
 
 # Plot everything (needs matplotlib; run where the CSVs are):
 python compare_dex_dart.py

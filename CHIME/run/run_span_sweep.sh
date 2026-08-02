@@ -25,7 +25,7 @@
 #     coordination in bench_common.sh (run_one/_run_matrix), no timed rebuilds.
 #
 # RUN THE MEMORY NODE FIRST, THEN THE COMPUTE NODE WITH THE SAME ARGS:
-#   ./run_span_sweep.sh memory      # on 10.30.1.8 (hosts memcached)
+#   ./run_span_sweep.sh memory      # on 10.30.1.7 (hosts memcached)
 #   ./run_span_sweep.sh compute     # on 10.30.1.6
 # Both machines MUST pass the SAME SPANS / WORKLOADS / SEQUENCE / CACHE_MB.
 #

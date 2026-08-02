@@ -272,7 +272,7 @@ DEX-only) lives in two companion scripts, one per host. Topology:
 
 | host        | role                | script |
 |-------------|---------------------|--------|
-| `10.30.1.8` | monitor + compute   | [`script/cache_sweep_baseline.sh`](../script/cache_sweep_baseline.sh) |
+| `10.30.1.7` | monitor + compute   | [`script/cache_sweep_baseline.sh`](../script/cache_sweep_baseline.sh) |
 | `10.30.1.6` | memory (node 0)     | [`script/cache_sweep_baseline_other.sh`](../script/cache_sweep_baseline_other.sh) |
 
 The matrix is **directory cache ∈ {64,128,256,512} MiB** (total compute-side
@@ -302,13 +302,13 @@ between configs the `.8` script restarts the monitor and the `.6` loop retries
    ```bash
    # on 10.30.1.6
    ./script/cache_sweep_baseline_other.sh
-   # on 10.30.1.8
+   # on 10.30.1.7
    ./script/cache_sweep_baseline.sh
    ```
 
 ### Output
 
-Lands on **`10.30.1.8`** next to the repo root:
+Lands on **`10.30.1.7`** next to the repo root:
 - `cache_sweep_baseline_<stamp>.csv` — full per-config row
   (`dist,op,cache_total_mb,th_bytes_per_thread,threads,key_count,op_count,throughput_mops,latency_us,bandwidth_gbps`).
 - `cache_sweep_baseline_summary_<stamp>.csv` — condensed table
@@ -358,7 +358,7 @@ zipfian (hot keys fit a small cache) than uniform.
 | `test/dart_microbench/bench_stats.h` | 500 ns buckets + LOCAL/REMOTE via `rtt` |
 | `test/dart_microbench/integration.md`| exact `compute.cc` / engine edits |
 | `test/dart_microbench/README.md`     | quickstart |
-| `script/cache_sweep_baseline.sh`     | baseline cache sweep — COMPUTE side (10.30.1.8) |
+| `script/cache_sweep_baseline.sh`     | baseline cache sweep — COMPUTE side (10.30.1.7) |
 | `script/cache_sweep_baseline_other.sh`| baseline cache sweep — MEMORY side (10.30.1.6) |
 
 Source touch-points (only if you apply integration):

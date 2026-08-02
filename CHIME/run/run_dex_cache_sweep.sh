@@ -22,7 +22,7 @@
 # index_mb CSV column for every cell.
 #
 # Run the MEMORY node first, then the COMPUTE node with the SAME args:
-#   ./run_dex_cache_sweep.sh memory      # on 10.30.1.8
+#   ./run_dex_cache_sweep.sh memory      # on 10.30.1.7
 #   ./run_dex_cache_sweep.sh compute     # on 10.30.1.6
 #
 # Every knob is overridable, e.g. a faster/smaller run:
