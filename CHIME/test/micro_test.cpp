@@ -94,6 +94,10 @@ int uniform_workload = 1;
 double zipfian = 0.0;
 uint64_t bulkLoadM, warmupM, opM;
 int kOffloadRate = 100;
+// Offload rate used during the WARMUP phase only; 0 so warmup actually fills the
+// index cache (an offloaded lookup never calls cache_node -- see main()). The
+// measured phase runs at kOffloadRate. CHIME_WARMUP_OFFLOAD overrides.
+int g_warmup_offload_rate = 0;
 int scan_range = 100;               // key-span of a range scan (like fix_range_size)
 
 uint64_t kKeySpace = 0;
@@ -289,6 +293,19 @@ void thread_run(int id) {
   if (id == 0) {
     while (warmup_cnt.load() != kThreadCount) ;
     dsm->barrier("warm_finish");
+#ifdef ENABLE_OFFLOAD
+    // Cache is warm on BOTH nodes now (the barrier above guarantees it). Switch
+    // to the rate the run actually asked for -- see the long note in main().
+    //
+    // Race-free without a fence of its own: every other thread is spinning on
+    // `warmup_cnt != -1` below, and that store happens after this one, so no
+    // thread reads g_offload_rate for a measured op until the new value is
+    // visible. warmup_cnt is a seq_cst atomic, which supplies the ordering edge.
+    g_offload_rate = kOffloadRate;
+    if (dsm->getMyNodeID() == 0)
+      printf("[CONFIG] warmup finished with offload %d%%; measured phase now at %d%%\n",
+             g_warmup_offload_rate, kOffloadRate);
+#endif
     printf("node %d warmup done in %lds\n", dsm->getMyNodeID(),
            bench_timer.end() / 1000 / 1000 / 1000);
     // Reset boundary: exclude warmup from the measured numbers. (Warmup now runs
@@ -541,6 +558,38 @@ int main(int argc, char *argv[]) {
   if (leafcache::enabled() && g_offload_min_level <= 1 && dsm->getMyNodeID() == 0)
     printf("[WARN] CHIME_OFFLOAD_MIN_LEVEL=1 offloads every lookup, so the leaf"
            " cache will never be consulted on the point path.\n");
+#endif
+
+  // ---- WARM THE CACHE WITH OFFLOAD DISABLED --------------------------------
+  // Warmup exists to fill the compute-side cache. With offload on it silently
+  // fails to, because of a feedback loop: Tree::search consults the cache, and if
+  // the cache is empty it falls back to the root, so `level` is the tree height,
+  // which clears CHIME_OFFLOAD_MIN_LEVEL and the op is pushed down. But the
+  // pushdown returns BEFORE internal_node_search, and cache_node() is only called
+  // from there -- so an offloaded lookup caches nothing. Empty cache -> offload ->
+  // still empty, for the whole run.
+  //
+  // A node that bulk-loads escapes this (inserts never offload, so its cache is
+  // warm), but a node that does not is stuck cache-less forever. In a 2-node run
+  // only the last node loads, so the memory node reported
+  // skiplist_node_cnt=0 / consumed cache size = 0.000 MB and offloaded 100% of
+  // lookups while the compute node offloaded ~3%. The two nodes were running
+  // materially different systems, CHIME_CACHE_MB did nothing on one of them, and
+  // the cluster throughput was the sum of the two.
+  //
+  // So: warm up at rate 0, then switch to the requested rate for the measured
+  // phase (thread_run, right after the warm_finish barrier). Both nodes then enter
+  // the measured phase with a warm cache and offload serves the RESIDUAL misses --
+  // "offload rescues cache misses" rather than "offload replaces the cache".
+  //
+  // NOTE: this changes what the offload-on arm measures. Sweeps taken before this
+  // change are not comparable to ones taken after. Set CHIME_WARMUP_OFFLOAD=100 to
+  // reproduce the old behaviour.
+  if (const char *wo = getenv("CHIME_WARMUP_OFFLOAD")) g_warmup_offload_rate = atoi(wo);
+  g_offload_rate = g_warmup_offload_rate;   // restored after the warmup barrier
+  if (dsm->getMyNodeID() == 0)
+    printf("[CONFIG] warmup offload rate = %d%% (CHIME_WARMUP_OFFLOAD); measured"
+           " phase uses %d%%\n", g_warmup_offload_rate, kOffloadRate);
 #endif
 #endif
 
