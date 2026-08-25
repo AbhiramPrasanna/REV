@@ -309,7 +309,18 @@ re_acquire:
   // moves, and both belong HERE because this is the single choke point every leaf
   // mutation passes through (insert, update and both split paths all take the leaf
   // lock first -- see leaf_node_insert / leaf_node_update).
-  if (is_leaf) {
+  // Gated on the RUNTIME switch, not just the compile-time one: with
+  // CHIME_CACHE_LEAF=0 nobody anywhere reads stamps, so publishing them is pure
+  // overhead AND it makes the baseline arm of the A/B not-quite-stock CHIME --
+  // an extra RDMA write on every leaf lock, i.e. on all 50M bulk-load inserts.
+  // The baseline must be byte-for-byte the code path it is standing in for.
+  //
+  // CONSTRAINT this creates: every node in the cluster must run with the same
+  // CHIME_CACHE_LEAF value. If one node cached leaves while another wrote with
+  // stamps disabled, the writer would never invalidate the reader's images. The
+  // sweep sets it identically on both nodes; micro_test prints it per node so a
+  // mismatch is visible in the logs.
+  if (is_leaf && leafcache::enabled()) {
     // 1. Publish a fresh stamp so every OTHER node's cached image of this leaf
     //    fails validation from now on. Ordered before the data writes by the RC
     //    queue pair this thread uses for `node_addr.nodeID`.
