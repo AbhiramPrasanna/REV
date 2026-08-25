@@ -3,6 +3,8 @@
 
 #include "Connection.h"
 
+#include <unistd.h>   // sysconf(_SC_NPROCESSORS_ONLN) for dir-thread core pinning
+
 #ifdef ENABLE_OFFLOAD
 #include "chime_rpc.h"   // memory-node lookup/scan pushdown handlers
 #include "remote_load.h" // memory-node "remote CPU load" (dir-thread active %)
@@ -44,8 +46,32 @@ Directory::~Directory() { delete chunckAlloc; }
 
 void Directory::dirThread() {
 
-  bindCore((CPU_PHYSICAL_CORE_NUM - 1 - dirID) * 2 + 1);  // bind to the last CPU core
-  Debug::notifyInfo("dir %d launch!\n", dirID);
+  // Pin to the TOP of the machine's real core range, counting down, away from the
+  // app threads at the bottom.
+  //
+  // This used to be (CPU_PHYSICAL_CORE_NUM - 1 - dirID) * 2 + 1, which on a box
+  // whose real core count differs from the macro (72 in Common.h) produces core
+  // ids past the end; bindCore then wraps them modulo nproc and lands them ON TOP
+  // of app threads. On an 80-logical machine that is 143/141/139/137 -> 63/61/59/57
+  // -- exactly where app threads 31/30/29/28 sit (bindCore(id*2+1)). Those app
+  // threads then share a core with a thread that BUSY-POLLS a CQ, so they crawl;
+  // and because the measured phase is op-bounded, the whole node cannot finish
+  // until they do. The symptom is a memory node stuck at ~1/10th the compute
+  // node's throughput for a long tail, which drifts the two nodes out of lockstep
+  // and eventually breaks the inter-cell handshake ("transport retry counter
+  // exceeded"). It stayed hidden while THREADS was small enough (<=28) that the
+  // app range never reached the wrapped dir cores.
+  //
+  // Deriving from _SC_NPROCESSORS_ONLN instead makes it correct on any machine
+  // without a per-box macro edit. App threads occupy odd cores 1..2T-1 (main
+  // thread at 2T+1); dir threads take nproc-1, nproc-3, ... so they only ever
+  // collide if the app range genuinely runs out of cores -- which is warned below.
+  long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+  if (ncpu <= 0) ncpu = CPU_PHYSICAL_CORE_NUM * 2;
+  int dir_core = (int)(ncpu - 1 - 2 * (long)dirID);
+  if (dir_core < 0) dir_core = (int)(ncpu - 1);
+  bindCore((uint16_t)dir_core);
+  Debug::notifyInfo("dir %d launch! (core %d of %ld)\n", dirID, dir_core, ncpu);
 
 #ifdef ENABLE_OFFLOAD
   // The memory node has no explicit run boundary, so a periodic report is how

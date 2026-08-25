@@ -39,6 +39,7 @@
 #include <city.h>
 
 #include <stdlib.h>
+#include <unistd.h>   // sysconf(_SC_NPROCESSORS_ONLN) for the core-collision check
 #include <thread>
 #include <time.h>
 #include <chrono>
@@ -458,6 +459,31 @@ int main(int argc, char *argv[]) {
   printf("[CONFIG node %d] dir threads = %d (CHIME_DIR_THREADS, max %d)"
          " -- MUST match the other node\n",
          dsm->getMyNodeID(), chime::num_dir(), NR_DIRECTORY);
+
+  // ---- [CORES] core-pinning collision check --------------------------------
+  // App threads pin to odd cores 1..2T-1 (main thread at 2T+1); dir threads pin
+  // downward from the top (nproc-1, nproc-3, ...). If those ranges meet, an app
+  // thread shares a core with a dir thread that BUSY-POLLS its CQ. That app
+  // thread then crawls, and since the measured phase is op-bounded the node
+  // cannot finish until it does -- which shows up as one node running at a
+  // fraction of the other's throughput and the two drifting out of lockstep.
+  // Silent before; now it is a line you can grep.
+  {
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    int app_top = kThreadCount * 2 + 1;                      // main thread's core
+    int dir_bot = (int)(ncpu - 1 - 2 * (long)(chime::num_dir() - 1));
+    printf("[CORES node %d] %ld cpus; app threads -> 1..%d, dir threads -> %d..%ld%s\n",
+           dsm->getMyNodeID(), ncpu, app_top, dir_bot, ncpu - 1,
+           (app_top >= dir_bot) ? "   *** OVERLAP: lower THREADS or DIR_THREADS ***" : "");
+    if (app_top >= dir_bot)
+      fprintf(stderr,
+              "\n[WARN node %d] app-thread cores (<=%d) overlap dir-thread cores (>=%d).\n"
+              "               App threads sharing a core with a busy-polling dir thread\n"
+              "               will stall this node and desynchronise it from the other.\n"
+              "               Reduce THREADS to <= %ld or DIR_THREADS.\n\n",
+              dsm->getMyNodeID(), app_top, dir_bot,
+              (ncpu - 1 - 2 * (long)(chime::num_dir() - 1) - 2) / 2);
+  }
 
   // ---- [GEOMETRY] ---------------------------------------------------------
   // The cache-eviction experiment only means anything if (a) an internal node is
