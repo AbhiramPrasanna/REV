@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """
-compare_chime_dart.py — overlay CHIME (offload off & on) vs DART at 16/32/64 MB.
+compare_chime_dart.py — overlay CHIME vs DART at equal compute-side cache budget.
 
 Answers: at the SAME cache budget, SAME dataset (30M x 8B keys x 48B values) and
-SAME workload, can CHIME -- especially with offloading -- catch up to DART as the
-compute-side cache is stressed from "fits the index" (64 MB) down to 16 MB?
+SAME workload, can CHIME -- with offloading, with leaf caching, or both -- catch
+up to DART as the compute-side cache is stressed?
+
+The cache axis is a TOTAL and it is equal for every bar in a group. On the CHIME
+side a leaf-cache run SPLITS that total between its inner-node cache and its leaf
+cache (e.g. 256 MB = 128 inner + 128 leaf) rather than adding memory on top, so
+"CHIME + leaf cache" occupies exactly the same compute-side memory as "CHIME" and
+as DART at that point. Verify per cell with plot_leaf_cache.py, which prints the
+split and flags any row where inner + leaf != the point.
 
 INPUTS
-  CHIME : a sweep directory from run/run_cache_stress.sh, i.e.
+  CHIME : a sweep directory from run/run_leaf_cache.sh or run/run_cache_stress.sh,
             <dir>/summary_memory.csv, <dir>/summary_compute.csv   (throughput)
             <dir>/[cache_<MB>/]<workload>/<off|on>/compute.log    (mean latency)
           Cluster throughput per cell = memory node_tput + compute node_tput.
@@ -19,8 +26,9 @@ INPUTS
 
 OUTPUT
   compare_chime_dart.png : 2 rows (throughput, mean latency) x 4 workload cols.
-  Grouped bars: at each cache size {64,32,16}, three bars -- CHIME off, CHIME on,
-  DART. Throughput higher = better; latency lower = better. Per the project
+  Grouped bars: at each cache size, one bar per system arm -- CHIME off, CHIME on,
+  (CHIME + leaf cache off/on, when the sweep has that axis), DART. Throughput
+  higher = better; latency lower = better. Per the project
   convention every axis STARTS AT 0 and each metric row SHARES one y-scale across
   all four workloads, so panels are directly comparable.
 
@@ -40,8 +48,10 @@ WL_TITLE = {"point-uniform": "point / uniform", "point-zipf": "point / zipf-0.99
 DART_WL = {("uniform", "lookup"): "point-uniform", ("zipf99", "lookup"): "point-zipf",
            ("uniform", "scan"): "range-uniform", ("zipf99", "scan"): "range-zipf"}
 
-# series colors: CHIME off (blue), CHIME on (green), DART (amber) -- brand-neutral
+# series colors: CHIME off (blue), CHIME on (green), CHIME+leaf cache (violet /
+# magenta), DART (amber) -- brand-neutral, distinguishable under CVD
 C_CHIME_OFF, C_CHIME_ON, C_DART = "#2a78d6", "#1baf7a", "#e08a1e"
+C_LEAF_OFF, C_LEAF_ON = "#7c5cd6", "#c0439a"
 INK, GRID, MUTED = "#222222", "#dddddd", "#888888"
 MEAN_RX = re.compile(r"mean=\s*([0-9.]+)us")
 
@@ -54,7 +64,8 @@ def num(x):
 
 
 def find_newest_chime_sweep():
-    roots = ["CHIME/build/results/cache_stress", "CHIME/build/results/offload_ab"]
+    roots = ["CHIME/build/results/leaf_cache", "CHIME/build/results/cache_stress",
+             "CHIME/build/results/offload_ab"]
     cands = []
     for r in roots:
         cands += glob.glob(os.path.join(r, "sweep_*"))
@@ -64,7 +75,12 @@ def find_newest_chime_sweep():
 
 
 def load_chime(sweep_dir):
-    """-> {(cache_mb:int, workload, offload): {'tput':float|None, 'mean':float|None}}"""
+    """-> {(cache_mb:int, workload, offload, leaf): {'tput':.., 'mean':.., 'leaf_hit':..}}
+
+    `leaf` is "0"/"1" from the cache_leaf column that run/bench_common.sh writes
+    (absent in pre-leaf-cache sweeps, which default to "0"), so one loader reads
+    both a plain cache-stress sweep and a run_leaf_cache.sh sweep.
+    """
     out = {}
     # throughput: sum the two nodes' node_tput_mops for each cell
     for role in ("memory", "compute"):
@@ -76,15 +92,21 @@ def load_chime(sweep_dir):
                 c = num(row.get("cache_mb"))
                 if c is None:
                     continue
-                key = (int(c), row["workload"], row["offload"])
-                d = out.setdefault(key, {"tput": None, "mean": None})
+                leaf = str(row.get("cache_leaf") or "0").strip() or "0"
+                key = (int(c), row["workload"], row["offload"], leaf)
+                d = out.setdefault(key, {"tput": None, "mean": None, "leaf_hit": None})
                 t = num(row.get("node_tput_mops"))
                 if t is not None:
                     d["tput"] = (d["tput"] or 0.0) + t
+                h = num(row.get("leaf_hit_pct"))
+                if h is not None and role == "compute":
+                    d["leaf_hit"] = h
     # mean latency: parse the compute per-cell log
     for key in list(out.keys()):
-        c, wl, off = key
-        for cand in (os.path.join(sweep_dir, f"cache_{c}MB", wl, off, "compute.log"),
+        c, wl, off, leaf = key
+        for cand in (os.path.join(sweep_dir, f"cache_{c}MB", f"leaf_{leaf}", wl, off, "compute.log"),
+                     os.path.join(sweep_dir, f"cache_{c}MB", wl, off, "compute.log"),
+                     os.path.join(sweep_dir, f"leaf_{leaf}", wl, off, "compute.log"),
                      os.path.join(sweep_dir, wl, off, "compute.log")):
             if os.path.isfile(cand):
                 out[key]["mean"] = parse_mean(cand)
@@ -109,9 +131,17 @@ def parse_mean(path):
     return None
 
 
-def load_dart(csv_path):
-    """-> {(cache_mb:int, workload): {'tput':float|None, 'mean':float|None}}"""
-    out = {}
+def load_dart(csv_path, threads=None):
+    """-> {(cache_mb:int, workload): {'tput':float|None, 'mean':float|None}}
+
+    Accepts both DART CSV shapes: cache_sweep_compare.sh (`cache_total_mb`) and
+    cache_sweep_baseline.sh (`cache_mb`, and a `threads` column because it sweeps
+    thread counts). When the file carries several thread counts, ONE must be
+    picked -- otherwise the last row silently wins and you would be plotting a
+    thread count you did not choose. `threads=None` picks the smallest present and
+    says so.
+    """
+    rows = []
     with open(csv_path, newline="") as f:
         for row in csv.DictReader(f):
             wl = DART_WL.get((row["dist"], row["op"]))
@@ -119,9 +149,28 @@ def load_dart(csv_path):
                 continue
             c = num(row.get("cache_total_mb"))
             if c is None:
+                c = num(row.get("cache_mb"))
+            if c is None:
                 continue
-            out[(int(c), wl)] = {"tput": num(row.get("throughput_mops")),
-                                 "mean": num(row.get("latency_us"))}
+            rows.append((int(c), wl, num(row.get("threads")), row))
+
+    present = sorted({t for _, _, t, _ in rows if t is not None})
+    if len(present) > 1:
+        pick = float(threads) if threads is not None else present[0]
+        if pick not in present:
+            sys.exit("DART CSV has thread counts %s; --dart-threads %s is not one of them."
+                     % ([int(t) for t in present], threads))
+        print(f"  DART CSV holds thread counts {[int(t) for t in present]}; "
+              f"using {int(pick)}" + ("" if threads is not None else " (lowest; set --dart-threads)"))
+        rows = [r for r in rows if r[2] == pick]
+    elif threads is not None and present and float(threads) not in present:
+        sys.exit("DART CSV is threads=%d; --dart-threads %s does not match."
+                 % (int(present[0]), threads))
+
+    out = {}
+    for c, wl, _t, row in rows:
+        out[(c, wl)] = {"tput": num(row.get("throughput_mops")),
+                        "mean": num(row.get("latency_us"))}
     return out
 
 
@@ -131,7 +180,9 @@ def main():
     ap.add_argument("dart_csv", nargs="?", help="DART cache_sweep_compare CSV")
     ap.add_argument("--dart", help="DART CSV (alt to positional)")
     ap.add_argument("--out", default="compare_chime_dart.png")
-    ap.add_argument("--caches", default="64,32,16", help="cache MB points, high->low")
+    ap.add_argument("--caches", default="512,256,128,64", help="cache MB points, high->low")
+    ap.add_argument("--dart-threads", default=None,
+                    help="which thread count to take from a DART CSV that swept several")
     args = ap.parse_args()
 
     chime_dir = args.chime_dir or find_newest_chime_sweep()
@@ -143,17 +194,31 @@ def main():
 
     caches = [int(x) for x in args.caches.split(",")]
     chime = load_chime(chime_dir)
-    dart = load_dart(dart_csv)
+    dart = load_dart(dart_csv, args.dart_threads)
 
-    # assemble series[metric][workload] = {'chime_off':[...],'chime_on':[...],'dart':[...]}
+    # Does this sweep carry a leaf-cache arm (run_leaf_cache.sh)? If so it gets its
+    # own bars: the question "can leaf caching take CHIME past DART" is only
+    # readable next to the same CHIME without it.
+    has_leaf = any(k[3] == "1" for k in chime)
+    bar_defs = [("chime_off", C_CHIME_OFF, "CHIME offload off"),
+                ("chime_on", C_CHIME_ON, "CHIME offload on")]
+    if has_leaf:
+        bar_defs += [("chime_leaf_off", C_LEAF_OFF, "CHIME + leaf cache, offload off"),
+                     ("chime_leaf_on", C_LEAF_ON, "CHIME + leaf cache, offload on")]
+    bar_defs += [("dart", C_DART, "DART")]
+
+    # assemble series[metric][workload] = {series_key: [v per cache]}
     series = {}
     for metric in ("tput", "mean"):
         series[metric] = {}
         for wl in WL_ORDER:
-            g = {"chime_off": [], "chime_on": [], "dart": []}
+            g = {k: [] for k, _, _ in bar_defs}
             for c in caches:
-                g["chime_off"].append((chime.get((c, wl, "off")) or {}).get(metric))
-                g["chime_on"].append((chime.get((c, wl, "on")) or {}).get(metric))
+                g["chime_off"].append((chime.get((c, wl, "off", "0")) or {}).get(metric))
+                g["chime_on"].append((chime.get((c, wl, "on", "0")) or {}).get(metric))
+                if has_leaf:
+                    g["chime_leaf_off"].append((chime.get((c, wl, "off", "1")) or {}).get(metric))
+                    g["chime_leaf_on"].append((chime.get((c, wl, "on", "1")) or {}).get(metric))
                 g["dart"].append((dart.get((c, wl)) or {}).get(metric))
             series[metric][wl] = g
 
@@ -168,17 +233,16 @@ def main():
 
     fig, axes = plt.subplots(2, 4, figsize=(18, 8), sharex=True)
     x = range(len(caches))
-    w = 0.26
-    bar_defs = [("chime_off", C_CHIME_OFF, "CHIME offload off"),
-                ("chime_on", C_CHIME_ON, "CHIME offload on"),
-                ("dart", C_DART, "DART")]
+    n = len(bar_defs)
+    w = 0.8 / n
+    mid = (n - 1) / 2.0
 
     for r, (metric, ylab) in enumerate(row_meta):
         for col, wl in enumerate(WL_ORDER):
             ax = axes[r][col]
             g = series[metric][wl]
             for i, (k, color, _lab) in enumerate(bar_defs):
-                xs = [xi + (i - 1) * w for xi in x]
+                xs = [xi + (i - mid) * w for xi in x]
                 ys = [v if v is not None else 0.0 for v in g[k]]
                 bars = ax.bar(xs, ys, w, color=color, edgecolor="white", linewidth=0.5)
                 for xi, v in zip(xs, g[k]):
@@ -199,11 +263,13 @@ def main():
 
     handles = [plt.Rectangle((0, 0), 1, 1, color=c) for _, c, _ in bar_defs]
     fig.legend(handles, [l for _, _, l in bar_defs], loc="upper center",
-               ncol=3, frameon=False, fontsize=11, bbox_to_anchor=(0.5, 1.02))
-    fig.suptitle("CHIME vs DART — cache 64→32→16 MB (same dataset, same workload)",
+               ncol=len(bar_defs), frameon=False, fontsize=11, bbox_to_anchor=(0.5, 1.02))
+    fig.suptitle("CHIME vs DART — TOTAL compute-side cache %s MB (same dataset, same workload)"
+                 % "→".join(str(c) for c in caches),
                  y=1.06, fontsize=13, color=INK)
     fig.text(0.5, -0.01,
-             "x = compute-side cache budget (stressed left→right).  "
+             "x = TOTAL compute-side cache, equal for every bar in a group "
+             "(CHIME's leaf arm SPLITS it inner/leaf, it is not extra memory).  "
              "× = missing/failed cell.  Latency = MEAN (both systems).",
              ha="center", color=MUTED, fontsize=9)
     fig.tight_layout()

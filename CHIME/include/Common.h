@@ -134,7 +134,17 @@ constexpr uint32_t keyLen = 8;
 //       V=48 puts the inequality beyond the reach of any validation macro.
 //   (2) tree = ~3.1M leaves * 979B ~= 3.0GB, i.e. DEX-scale, while the index stays
 //       ~65-95MB so the cache sweep still straddles it.
-constexpr uint32_t simulatedValLen = 48;
+//
+// [MATCHING DART] Overridable at build time so a run can be pinned to whatever
+// --payload_byte the DART sweep it is being compared against used:
+//     cmake -DCHIME_VALUE_LEN=16 ..
+// The default (48) reproduces the committed cache-sweep geometry exactly. Check
+// the "[GEOMETRY] internal/leaf" line micro_test prints on startup after changing
+// it -- the cache experiment is only meaningful while it says "internal < leaf".
+#ifndef CHIME_VALUE_LEN
+#define CHIME_VALUE_LEN 48
+#endif
+constexpr uint32_t simulatedValLen = CHIME_VALUE_LEN;
 #ifndef ENABLE_VAR_LEN_KV
 constexpr uint32_t inlineValLen = simulatedValLen;
 #else
@@ -271,11 +281,49 @@ constexpr uint32_t transInternalSize = decodedInternalSize <= cachelineSize ? de
 
 // Allocation Size
 constexpr uint32_t allocationLockSize = 16UL;  // round up lock_addr
-constexpr uint32_t allocationLeafSize = transLeafSize + allocationLockSize;  // remain space for the lock
+
+// [LEAF CACHING] Per-leaf coherence STAMP -- an 8-byte word placed immediately
+// after the leaf's lock word. A writer publishes a fresh, globally unique stamp
+// right after it acquires the leaf lock and before it touches any data; a compute
+// node holding a cached image of the leaf validates that image with one 16-byte
+// read of [lock word, stamp]. See include/LeafCache.h for the full protocol and
+// why it is correct.
+//
+// Compiled in unconditionally (default ON) rather than behind the runtime
+// CHIME_CACHE_LEAF switch, because it changes the on-wire ALLOCATION LAYOUT: both
+// arms of a CACHE_LEAF=0/1 A/B must address identical memory, and every node in
+// the cluster must agree. Build with -DCACHE_LEAF_NODE=OFF to get the exact
+// pre-leaf-cache geometry back (8 fewer bytes per leaf allocation).
+#ifdef CACHE_LEAF_NODE
+constexpr uint32_t leafStampSize = sizeof(uint64_t);
+#else
+constexpr uint32_t leafStampSize = 0;
+#endif
+// Lock word offset within a leaf allocation. MUST agree with
+// Tree::get_lock_info(true), which is the writer's view of the same word.
+constexpr uint32_t leafLockOffset  = ROUND_UP(transLeafSize, 3);
+// The stamp sits in the LAST 8 bytes of the allocation, deliberately PAST the
+// 16-byte lock area rather than next to the lock word. Every "write the node (or
+// its last segment) AND release the lock in one RDMA op" in Tree.cpp writes
+// exactly up to transLeafSize + allocationLockSize -- so a stamp placed inside
+// that window would be silently overwritten with whatever the writer's local
+// buffer happened to hold there, which is far worse than being cleared: a stale
+// leftover could coincidentally match a stamp some reader had cached.
+constexpr uint32_t leafStampOffset = transLeafSize + allocationLockSize;
+// The validation probe is ONE read spanning [lock word .. stamp] inclusive; the
+// stamp sits leafStampInGuard bytes into it.
+constexpr uint32_t leafStampInGuard = leafStampOffset - leafLockOffset;
+constexpr uint32_t leafGuardSize    = leafStampInGuard + sizeof(uint64_t);
+
+constexpr uint32_t allocationLeafSize = transLeafSize + allocationLockSize + leafStampSize;  // remain space for the lock (+ stamp)
 constexpr uint32_t allocationInternalSize = transInternalSize + allocationLockSize;
+#ifdef CACHE_LEAF_NODE
+static_assert(leafStampOffset + sizeof(uint64_t) == allocationLeafSize);
+static_assert(leafLockOffset < leafStampOffset);
+#endif
 #ifdef SIBLING_BASED_VALIDATION
 constexpr uint32_t logicalTransLeafSize = (logicalLeafSize <= cachelineSize) ? logicalLeafSize : (cachelineSize + ADD_CACHELINE_VERSION_SIZE(logicalLeafSize - cachelineSize, versionSize));
-constexpr uint32_t rdmaBufLeafSize = logicalTransLeafSize + allocationLockSize;
+constexpr uint32_t rdmaBufLeafSize = logicalTransLeafSize + allocationLockSize + leafStampSize;
 #else
 constexpr uint32_t rdmaBufLeafSize = allocationLeafSize;
 #endif

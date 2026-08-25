@@ -6,7 +6,13 @@
 # run_cache_stress.sh uses, so the two CSVs can be overlaid by compare_chime_dart.py:
 #
 #   held equal to CHIME:
-#     cache budget   16, 32, 64 MB   (TOTAL across threads; --th_b = total/threads)
+#     cache budget   64, 128, 256, 512 MB  (TOTAL across threads;
+#                    --th_b = total/threads). These are the points CHIME's
+#                    run_leaf_cache.sh sweeps, and on the CHIME side the total is
+#                    SPLIT between its inner-node cache and its leaf cache rather
+#                    than grown -- so at every point both systems occupy the same
+#                    compute-side memory. Override with CACHE_TOTAL_MB="64 32 16"
+#                    to reproduce the older cache-STRESS overlay instead.
 #     dataset        30M distinct u64 keys, 48-byte values
 #                    -> same LOGICAL tree/data on the memory node as CHIME
 #                       (BULK=30, keyLen=8, simulatedValLen=48)
@@ -55,7 +61,7 @@ SCAN_LEN="${SCAN_LEN:-100}"         # == CHIME SCAN_RANGE
 TEST_FUNC="${TEST_FUNC:-1}"         # in-memory microbench
 
 # 64 (fits index) -> 32 -> 16 (stressed), same points as CHIME run_cache_stress.
-CACHE_TOTAL_MB=(${CACHE_TOTAL_MB:-64 32 16})
+CACHE_TOTAL_MB=(${CACHE_TOTAL_MB:-512 256 128 64})
 DISTS=(${DISTS:-uniform zipf99})
 OPS=(${OPS:-lookup scan})
 

@@ -59,6 +59,24 @@ static inline bool should_offload(int tid) {
 // the benchmark app overrides it (e.g. from CHIME_CACHE_MB) before `new Tree`.
 int g_index_cache_mb = define::kIndexCacheSize;
 
+#ifdef CACHE_LEAF_NODE
+// Leaf-cache budget (MB), carved OUT of the same total the index cache spends
+// from: g_index_cache_mb + g_leaf_cache_mb == CHIME_CACHE_MB, always. The total
+// is what the DART comparison holds equal, so caching leaves has to earn its
+// share against the inner nodes it displaces. Set by the app before `new Tree`.
+int g_leaf_cache_mb = 0;
+
+// Per-thread stamp counter. A stamp is (global_thread_id << 48) | counter, so it
+// is globally unique and never reused -- the property the validation probe rests
+// on (a cached stamp can never be re-produced by a later write).
+static thread_local uint64_t leaf_stamp_ctr = 0;
+
+uint64_t leaf_cache_hit[MAX_APP_THREAD]   = {0};  // served from a cached image
+uint64_t leaf_cache_miss[MAX_APP_THREAD]  = {0};  // not resident -> remote read
+uint64_t leaf_cache_stale[MAX_APP_THREAD] = {0};  // resident but validation failed
+uint64_t leaf_cache_fill[MAX_APP_THREAD]  = {0};  // images published
+#endif
+
 double cache_miss[MAX_APP_THREAD];
 double cache_hit[MAX_APP_THREAD];
 uint64_t lock_fail[MAX_APP_THREAD];
@@ -97,6 +115,9 @@ Tree::Tree(DSM *dsm, uint16_t tree_id, bool init_root) : dsm(dsm), tree_id(tree_
   clear_debug_info();
 
   local_lock_table = new LocalLockTable();
+#ifdef CACHE_LEAF_NODE
+  leaf_cache = nullptr;
+#endif
   if (!init_root) return;
 
 #ifdef TREE_ENABLE_CACHE
@@ -109,8 +130,22 @@ Tree::Tree(DSM *dsm, uint16_t tree_id, bool init_root) : dsm(dsm), tree_id(tree_
 #endif
 
 #ifdef SPECULATIVE_READ
-  if (g_index_cache_mb > define::kHotspotBufSize + 20) idx_cache = new IdxCache(define::kHotspotBufSize, dsm);
+  // With leaf caching on, the hotspot buffer is dead weight: it answers the same
+  // question (where does this key live) at a finer granularity, and because a
+  // speculative hit never fetches a whole leaf it would keep the leaf cache
+  // permanently cold. Its budget goes to the leaf cache instead. Stack them with
+  // CHIME_LEAF_KEEP_SPECULATIVE=1.
+  bool spec_on = true;
+#ifdef CACHE_LEAF_NODE
+  spec_on = !leafcache::enabled() || leafcache::keep_speculative();
+#endif
+  if (spec_on && g_index_cache_mb > define::kHotspotBufSize + 20) idx_cache = new IdxCache(define::kHotspotBufSize, dsm);
   else idx_cache = new IdxCache(0, dsm);
+#endif
+
+#ifdef CACHE_LEAF_NODE
+  leaf_cache = (leafcache::enabled() && g_leaf_cache_mb > 0)
+                   ? new LeafCache(g_leaf_cache_mb) : nullptr;
 #endif
 
   root_ptr_ptr = get_root_ptr_ptr();
@@ -203,6 +238,12 @@ inline void Tree::before_operation(CoroPull* sink) {
     // split_hopscotch[tid]         = 0;
     try_write_segment[tid]       = 0;
     write_two_segments[tid]      = 0;
+#ifdef CACHE_LEAF_NODE
+    leaf_cache_hit[tid]          = 0;
+    leaf_cache_miss[tid]         = 0;
+    leaf_cache_stale[tid]        = 0;
+    leaf_cache_fill[tid]         = 0;
+#endif
     need_clear[tid]              = false;
   }
 }
@@ -262,6 +303,23 @@ re_acquire:
     lock_fail[dsm->getMyThreadID()] ++;
     goto re_acquire;
   }
+
+#ifdef CACHE_LEAF_NODE
+  // A leaf is about to be modified. Two things must happen before any data byte
+  // moves, and both belong HERE because this is the single choke point every leaf
+  // mutation passes through (insert, update and both split paths all take the leaf
+  // lock first -- see leaf_node_insert / leaf_node_update).
+  if (is_leaf) {
+    // 1. Publish a fresh stamp so every OTHER node's cached image of this leaf
+    //    fails validation from now on. Ordered before the data writes by the RC
+    //    queue pair this thread uses for `node_addr.nodeID`.
+    publish_leaf_stamp(node_addr, sink);
+    // 2. Drop OUR OWN image straight away. The stamp protocol would catch it on
+    //    the next probe anyway; dropping it here saves this node a guaranteed-stale
+    //    probe on a leaf it is itself rewriting.
+    if (leaf_cache) leaf_cache->invalidate(node_addr);
+  }
+#endif
   return;
 }
 
@@ -1947,11 +2005,244 @@ bool Tree::speculative_read(const GlobalAddress& leaf_addr, std::pair<int, int> 
 #endif
 
 
+#ifdef CACHE_LEAF_NODE
+/* =========================== LEAF CACHE (compute side) =====================
+   The coherence protocol these four functions implement is written out in full
+   at the top of include/LeafCache.h. In one paragraph:
+
+     a writer publishes a fresh, never-reused STAMP into the leaf's allocation
+     immediately after it takes the leaf lock and before it writes any data (see
+     Tree::lock_node), and a reader may serve a cached image of that leaf only
+     while a 16-byte read of [lock word, stamp] still says UNLOCKED and carries
+     the stamp the image was filled at.
+
+   Both writes go down the same RC queue pair, so the memory node applies them in
+   order -- lock, stamp, data, unlock -- which is what makes the reader's probe
+   conclusive rather than a heuristic.
+   ========================================================================= */
+
+// Publish a fresh stamp for a leaf we have just locked. Unsignaled and not
+// waited on: correctness needs it ORDERED before this thread's subsequent data
+// writes to the same node, which the queue pair guarantees, not COMPLETED before
+// them. Its send-queue slot is reclaimed by the signaled write/unlock that
+// follows on the same QP.
+void Tree::publish_leaf_stamp(const GlobalAddress& leaf_addr, CoroPull* sink) {
+  // (global thread id << 48) | per-thread counter: unique for all time, so a
+  // stamp a reader cached can never be reproduced by a later writer. Counter
+  // starts at 1 so a live stamp is never 0 -- 0 means "leaf never written", which
+  // is itself a perfectly cacheable state (a fresh split sibling).
+  uint64_t stamp = (((dsm->getMyGlobalThreadID() + 1) & 0xFFFFULL) << 48) |
+                   (++leaf_stamp_ctr & ((1ULL << 48) - 1));
+  auto stamp_buffer = (dsm->get_rbuf(sink)).get_cas_buffer();
+  *stamp_buffer = stamp;
+  dsm->write_without_sink((char *)stamp_buffer, leaf_addr + define::leafStampOffset,
+                          sizeof(uint64_t), false, nullptr, nullptr);
+}
+
+
+// Decode one guard sample: the RDMA read spans [lock word .. stamp] inclusive.
+// memcpy rather than a cast because the guard scratch has no alignment guarantee
+// (it is an offset into the per-coroutine RDMA buffer).
+static inline void decode_leaf_guard(const char *g, uint64_t& lock_word, uint64_t& stamp) {
+  memcpy(&lock_word, g, sizeof(uint64_t));
+  memcpy(&stamp, g + define::leafStampInGuard, sizeof(uint64_t));
+}
+static inline bool leaf_guard_unlocked(uint64_t lock_word) {
+  return !(lock_word & (1ULL << 63));   // same busy bit Tree::lock_node CASes
+}
+
+
+// The hit-path probe: one read of [lock, stamp]. Always runs -- there is no
+// "trust the cache" mode, so a cached leaf can never be served past a write.
+bool Tree::leaf_cache_validate(const GlobalAddress& leaf_addr, uint64_t stamp, CoroPull* sink) {
+  auto guard_buffer = (dsm->get_rbuf(sink)).get_segment_buffer();
+  dsm->read_sync(guard_buffer, leaf_addr + define::leafLockOffset, define::leafGuardSize, sink);
+  uint64_t lock_word, cur_stamp;
+  decode_leaf_guard(guard_buffer, lock_word, cur_stamp);
+  return leaf_guard_unlocked(lock_word) && cur_stamp == stamp;
+}
+
+
+// Whole-leaf read with the seqlock closed around it, as ONE doorbell batch:
+//   [lock,stamp] -> leaf bytes -> [lock,stamp]
+// An RC responder executes a queue pair's requests in order, so the two guard
+// samples really do bracket the data read. `cacheable` says whether the bracket
+// closed (both samples unlocked, same stamp); when it did, the decoded image is a
+// quiescent snapshot of the leaf at stamp `stamp_out` and may be published.
+// Returns false only if the leaf would not decode after several attempts, in
+// which case the caller should fall back to the stock read path.
+bool Tree::leaf_read_full(const GlobalAddress& leaf_addr, char *raw_leaf_buffer,
+                          char *leaf_buffer, uint64_t& stamp_out, bool& cacheable,
+                          CoroPull* sink) {
+  stamp_out = 0;
+  cacheable = false;
+  auto guard_buffer = (dsm->get_rbuf(sink)).get_segment_buffer();  // 2 x leafGuardSize
+
+  for (int attempt = 0; attempt < 8; ++ attempt) {
+    std::vector<RdmaOpRegion> rs(3);
+    rs[0].source = (uint64_t)guard_buffer;
+    rs[0].dest   = (leaf_addr + define::leafLockOffset).to_uint64();
+    rs[0].size   = define::leafGuardSize;
+    rs[0].is_on_chip = false;
+
+    rs[1].source = (uint64_t)raw_leaf_buffer;
+    rs[1].dest   = leaf_addr.to_uint64();
+    rs[1].size   = define::transLeafSize;
+    rs[1].is_on_chip = false;
+
+    rs[2].source = (uint64_t)(guard_buffer + define::leafGuardSize);
+    rs[2].dest   = (leaf_addr + define::leafLockOffset).to_uint64();
+    rs[2].size   = define::leafGuardSize;
+    rs[2].is_on_chip = false;
+
+    dsm->read_batch_sync(&rs[0], 3, sink);
+
+    bool ok;
+#ifdef METADATA_REPLICATION
+    auto intermediate_leaf_buffer = (dsm->get_rbuf(sink)).get_leaf_buffer();
+    ok = LeafVersionManager::decode_node_versions(raw_leaf_buffer, intermediate_leaf_buffer);
+    if (ok) MetadataManager::decode_node_metadata(intermediate_leaf_buffer, leaf_buffer);
+#else
+    ok = VersionManager<LeafNode, LeafEntry>::decode_node_versions(raw_leaf_buffer, leaf_buffer);
+#endif
+    if (!ok) {
+      read_leaf_retry[dsm->getMyThreadID()] ++;
+      continue;
+    }
+    uint64_t lock_pre, stamp_pre, lock_post, stamp_post;
+    decode_leaf_guard(guard_buffer, lock_pre, stamp_pre);
+    decode_leaf_guard(guard_buffer + define::leafGuardSize, lock_post, stamp_post);
+    if (leaf_guard_unlocked(lock_pre) && leaf_guard_unlocked(lock_post) &&
+        stamp_pre == stamp_post) {
+      stamp_out = stamp_pre;
+      cacheable = true;
+      // No hopscotch-bitmap cross-check here on purpose: the bracket already
+      // proves no writer held this leaf's lock across the data read, which is a
+      // strictly stronger statement than "the hop bitmaps agree".
+    }
+    return true;   // decoded; usable whether or not it turned out to be cacheable
+  }
+  return false;
+}
+
+
+// Point-probe a decoded leaf image sitting in local memory. Reproduces exactly
+// the validation, turn-right and search semantics of the remote path in
+// leaf_node_search -- the image is the same logical LeafNode, it just did not
+// cost a round trip. Returns false iff the INTERNAL-node cache entry that
+// produced `node_addr` is stale, which is the caller's signal to invalidate it
+// and restart the descent.
+bool Tree::leaf_probe_local(const LeafNode* leaf, const GlobalAddress& node_addr,
+                            const GlobalAddress& sibling_addr, const Key &k, Value &v,
+                            bool from_cache, CoroPull* sink) {
+  UNUSED(node_addr);
+#ifdef SIBLING_BASED_VALIDATION
+  const GlobalAddress sibling_ptr = (leaf->metadata.sibling_ptr == GlobalAddress::Widest()
+                                        ? GlobalAddress::Null()
+                                        : (GlobalAddress)leaf->metadata.sibling_ptr);
+  if (from_cache && (!leaf->metadata.valid || sibling_addr != sibling_ptr)) {
+    leaf_cache_invalid[dsm->getMyThreadID()] ++;
+    return false;
+  }
+#else
+  UNUSED(sibling_addr);
+  const auto& fence_keys = leaf->metadata.fence_keys;
+  if (from_cache && (!leaf->metadata.valid || k < fence_keys.lowest || k >= fence_keys.highest)) {
+    leaf_cache_invalid[dsm->getMyThreadID()] ++;
+    return false;
+  }
+  if (k >= fence_keys.highest) {  // should turn right
+    assert(leaf->metadata.sibling_ptr != GlobalAddress::Null());
+    leaf_read_sibling[dsm->getMyThreadID()] ++;
+    leaf_node_search(leaf->metadata.sibling_ptr, GlobalAddress::Null(), k, v, false, sink);
+    return true;
+  }
+#endif
+
+  // Scan every slot rather than the hop neighbourhood. Hopscotch exists to keep
+  // the REMOTE read small; against a local image the whole leaf is already here,
+  // so a linear scan of leafSpanSize entries is both cheaper than recomputing the
+  // hash window and immune to a mid-flight rehop.
+  for (int i = 0; i < (int)define::leafSpanSize; ++ i) {
+    const auto& e = leaf->records[i];
+    if (e.key != define::kkeyNull && e.key == k) {
+      v = e.value;
+      return true;
+    }
+  }
+
+#ifdef SIBLING_BASED_VALIDATION
+  if (v == define::kValueNull && sibling_addr != sibling_ptr) {  // search sibling node
+    assert(sibling_ptr != GlobalAddress::Null());
+    leaf_read_sibling[dsm->getMyThreadID()] ++;
+    leaf_node_search(sibling_ptr, sibling_addr, k, v, false, sink);
+    return true;
+  }
+#endif
+  return true;  // key is not present
+}
+
+
+void Tree::leaf_harvest_range(const LeafNode* leaf, const Key& l_k, const Key& r_k,
+                              std::map<Key, Value>& ret) {
+  for (int i = 0; i < (int)define::leafSpanSize; ++ i) {
+    const auto& e = leaf->records[i];
+    if (e.key != define::kkeyNull && !(e.key < l_k) && e.key < r_k) ret[e.key] = e.value;
+  }
+}
+#endif // CACHE_LEAF_NODE
+
+
 bool Tree::leaf_node_search(const GlobalAddress& node_addr, const GlobalAddress& sibling_addr, const Key &k, Value &v, bool from_cache, CoroPull* sink) {
   try_read_leaf[dsm->getMyThreadID()] ++;
   auto raw_leaf_buffer = (dsm->get_rbuf(sink)).get_leaf_buffer();
   auto leaf_buffer = (dsm->get_rbuf(sink)).get_leaf_buffer();
   auto leaf = (LeafNode *)leaf_buffer;
+
+#ifdef CACHE_LEAF_NODE
+  // ---- leaf cache: the last round trip, removed --------------------------
+  // Everything below this block is stock CHIME, which always pays one remote read
+  // for the leaf even when the index cache resolved the entire descent. With leaf
+  // caching on we try to answer from a local image first, and a miss reads the
+  // WHOLE leaf (not just a hop segment) so the image can be published.
+  if (leaf_cache) {
+    const int tid = dsm->getMyThreadID();
+#if (defined SPECULATIVE_READ && defined HOPSCOTCH_LEAF_NODE)
+    if (leafcache::keep_speculative()) {  // stacked mode: hotspot buffer first
+      int hash_idx = get_hashed_leaf_entry_index(k);
+      int speculative_idx;
+      if (speculative_read(node_addr, std::make_pair(hash_idx, (hash_idx + define::neighborSize) % define::leafSpanSize),
+                           raw_leaf_buffer, leaf_buffer, k, v, speculative_idx, sink)) {
+        UNUSED(speculative_idx);
+        return true;
+      }
+    }
+#endif
+    const LeafCacheEntry *ce = leaf_cache->get(node_addr);
+    if (ce) {
+      const uint64_t cached_stamp = ce->stamp;
+      if (leaf_cache_validate(node_addr, cached_stamp, sink)) {
+        leaf_cache_hit[tid] ++;
+        return leaf_probe_local(&ce->leaf, node_addr, sibling_addr, k, v, from_cache, sink);
+      }
+      leaf_cache_stale[tid] ++;
+      leaf_cache->invalidate(node_addr);
+    }
+    leaf_cache_miss[tid] ++;
+    uint64_t stamp = 0;
+    bool cacheable = false;
+    if (leaf_read_full(node_addr, raw_leaf_buffer, leaf_buffer, stamp, cacheable, sink)) {
+      if (cacheable) {
+        leaf_cache->put(node_addr, leaf, stamp);
+        leaf_cache_fill[tid] ++;
+      }
+      return leaf_probe_local(leaf, node_addr, sibling_addr, k, v, from_cache, sink);
+    }
+    // Persistently undecodable: fall through to the stock path, which has its own
+    // unbounded retry and is the behaviour a non-leaf-caching build would show.
+  }
+#endif
+
 #ifdef HOPSCOTCH_LEAF_NODE
   int hash_idx = get_hashed_leaf_entry_index(k);
 #ifdef SPECULATIVE_READ
@@ -2193,6 +2484,44 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
       const Key l_k = (fence.lowest < from) ? from : fence.lowest;   // clip to [from, to)
       const Key r_k = (fence.highest < to) ? fence.highest : to;
       bool done = false;
+
+#ifdef CACHE_LEAF_NODE
+      // Scans are where a leaf cache pays most. Stock CHIME serves a covered leaf
+      // with its own read_sync, so a 100-key scan over 16-entry leaves costs a
+      // dozen-plus SERIAL round trips; each one this cache answers disappears
+      // entirely (static) or shrinks to a 16-byte probe (validated).
+      if (leaf_cache) {
+        const int tid = dsm->getMyThreadID();
+        const LeafCacheEntry *ce = leaf_cache->get(leaf_addr);
+        if (ce) {
+          const uint64_t cached_stamp = ce->stamp;
+          if (leaf_cache_validate(leaf_addr, cached_stamp, nullptr)) {
+            leaf_cache_hit[tid] ++;
+            leaf_harvest_range(&ce->leaf, l_k, r_k, ret);
+            continue;                      // next covered leaf; no data read at all
+          }
+          leaf_cache_stale[tid] ++;
+          leaf_cache->invalidate(leaf_addr);
+        }
+        leaf_cache_miss[tid] ++;
+        // Miss: the seqlock-bracketed whole-leaf read both serves this scan and
+        // populates the cache, in the same single round trip the stock path used.
+        auto leaf_buffer = (dsm->get_rbuf(nullptr)).get_leaf_buffer();
+        auto leaf = (LeafNode *)leaf_buffer;
+        uint64_t stamp = 0;
+        bool cacheable = false;
+        if (leaf_read_full(leaf_addr, range_buffer, leaf_buffer, stamp, cacheable, nullptr)) {
+          if (cacheable) {
+            leaf_cache->put(leaf_addr, leaf, stamp);
+            leaf_cache_fill[tid] ++;
+          }
+          leaf_harvest_range(leaf, l_k, r_k, ret);
+          continue;
+        }
+        // Undecodable after several attempts -> fall through to the stock loop.
+      }
+#endif
+
       for (int attempt = 0; attempt < 8 && !done; ++ attempt) {
         dsm->read_sync(range_buffer, leaf_addr, define::allocationLeafSize, nullptr);
         auto leaf_buffer = (dsm->get_rbuf(nullptr)).get_leaf_buffer();
@@ -2622,9 +2951,34 @@ void Tree::statistics() {
 #ifdef SPECULATIVE_READ
   idx_cache->statistics();
 #endif
+  leaf_cache_statistics();
+}
+
+
+void Tree::leaf_cache_statistics() {
+#ifdef CACHE_LEAF_NODE
+  if (leaf_cache) {
+    uint64_t hit = 0, miss = 0, stale = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++ i) {
+      hit += leaf_cache_hit[i]; miss += leaf_cache_miss[i]; stale += leaf_cache_stale[i];
+    }
+    leaf_cache->statistics(hit, miss, stale);
+  } else if (leafcache::enabled()) {
+    printf("[LEAFCACHE] hit=0 miss=0 stale=0 hit_pct=0.000 resident=0 capacity=0"
+           " budget_mb=0   (enabled but budget is 0 MB)\n");
+  } else {
+    printf("[LEAFCACHE] off\n");
+  }
+#endif
 }
 
 void Tree::clear_debug_info() {
+#ifdef CACHE_LEAF_NODE
+  memset(leaf_cache_hit, 0, sizeof(uint64_t) * MAX_APP_THREAD);
+  memset(leaf_cache_miss, 0, sizeof(uint64_t) * MAX_APP_THREAD);
+  memset(leaf_cache_stale, 0, sizeof(uint64_t) * MAX_APP_THREAD);
+  memset(leaf_cache_fill, 0, sizeof(uint64_t) * MAX_APP_THREAD);
+#endif
   memset(cache_miss, 0, sizeof(double) * MAX_APP_THREAD);
   memset(cache_hit, 0, sizeof(double) * MAX_APP_THREAD);
   memset(lock_fail, 0, sizeof(uint64_t) * MAX_APP_THREAD);

@@ -27,7 +27,7 @@ cd CHIME && mkdir -p build && cd build && cmake -DENABLE_OFFLOAD=ON .. && make -
 
 **Run** — memory node first, then compute, identical args:
 ```bash
-# on the memory node (10.30.1.7)
+# on the memory node (10.30.1.8)
 CHIME/run/run_cache_stress.sh memory
 # on the compute node (10.30.1.6)
 CHIME/run/run_cache_stress.sh compute
@@ -105,8 +105,39 @@ That number is the real index MB (recorded per-cell in the `index_mb` CSV column
 too). If it isn't ~55 MB in your build, re-pick the cache points so one sits
 above the index and the rest below it.
 
+---
+
+## Experiment C — does caching LEAF nodes let CHIME pass DART?
+
+Experiments A and B both hit the same wall: CHIME's cache holds **internal nodes
+only**, so even a perfect index-cache hit ends in one remote read of the leaf.
+Experiment C lets the compute node cache **both** node types and asks whether that
+is a better use of the same memory.
+
+**The budget is split, not grown.** `CHIME_CACHE_MB` is the TOTAL, and at each
+point the baseline arm is *all inner* while the leaf arm is *half inner / half
+leaf* — so both CHIME arms and DART occupy identical compute-side memory. The
+sweep runs at **64 / 128 / 256 / 512 / 1024 MB**, the same points
+`DART/script/cache_sweep_compare.sh` now defaults to.
+
+```bash
+CHIME/run/run_leaf_cache.sh memory      # then: ... compute
+DART/script/cache_sweep_compare.sh      # same totals, on the DART host
+python3 CHIME/results/plot_leaf_cache.py
+```
+
+`plot_leaf_cache.py` prints the inner/leaf split it read out of every cell and
+flags any row where `inner + leaf` is not the sweep point — if it flags anything,
+the arms were not on equal memory and the overlay means nothing.
+
+Design, coherence protocol, knobs and what to expect: **[LEAFCACHE.md](LEAFCACHE.md)**.
+`compare_chime_dart.py` picks the leaf arm up automatically from the sweep's
+`cache_leaf` column.
+
 ## Files
 - `CHIME/run/run_cache_stress.sh` — Experiment A runner (wraps `bench_common.sh`).
+- `CHIME/run/run_leaf_cache.sh` — Experiment C runner (leaf-cache axis).
+- `CHIME/results/plot_leaf_cache.py` — Experiment C plot.
 - `CHIME/results/plot_offload.py` — Experiment A plot (existing).
 - `DART/script/cache_sweep_compare.sh` — DART sweep matched to the contract above.
 - `compare_chime_dart.py` — Experiment B overlay plot.

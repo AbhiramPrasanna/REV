@@ -30,6 +30,12 @@ option (ENABLE_CACHE_EVICTION "Turn on cache-eviction" OFF)
 option (READ_DELEGATION "Turn on read delegation technique" ON)
 option (WRITE_COMBINING "Turn on write combining technique" ON)
 option (ENABLE_OFFLOAD "Turn on RPC offloading of lookups/scans to the memory node" OFF)
+# Compute-side LEAF caching (include/LeafCache.h). ON compiles in the per-leaf
+# coherence stamp (+8 B per leaf allocation) and the cache itself; whether a given
+# RUN uses the cache is the runtime knob CHIME_CACHE_LEAF=0|1, so one binary
+# serves both arms of the A/B. OFF restores the exact pre-leaf-cache geometry.
+# Must match on every node in the cluster (it changes the allocation layout).
+option (CACHE_LEAF_NODE "Compute-side leaf-node cache + per-leaf coherence stamp" ON)
 
 if(STATIC_MN_IP)
     add_definitions(-DSTATIC_ID_FROM_IP)
@@ -91,12 +97,26 @@ else()
     remove_definitions(-DENABLE_OFFLOAD)
 endif()
 
+if(CACHE_LEAF_NODE)
+    add_definitions(-DCACHE_LEAF_NODE)
+else()
+    remove_definitions(-DCACHE_LEAF_NODE)
+endif()
+
 # Inner-node size (internalSpanSize / fanout) override for the node-size sweep.
 # Empty string keeps the source default (16); run/run_span_sweep.sh sets it per
 # rebuilt binary. See include/Common.h.
 set(CHIME_INTERNAL_SPAN "" CACHE STRING "Override internalSpanSize (inner-node fanout); empty = source default")
 if(NOT CHIME_INTERNAL_SPAN STREQUAL "")
     add_definitions(-DCHIME_INTERNAL_SPAN=${CHIME_INTERNAL_SPAN})
+endif()
+
+# Value size in bytes (simulatedValLen). Set it to whatever --payload_byte the
+# DART sweep being compared against used, so both systems store the same logical
+# dataset. Empty = source default (48). See include/Common.h.
+set(CHIME_VALUE_LEN "" CACHE STRING "Override simulatedValLen (value bytes); empty = source default")
+if(NOT CHIME_VALUE_LEN STREQUAL "")
+    add_definitions(-DCHIME_VALUE_LEN=${CHIME_VALUE_LEN})
 endif()
 
 #Tree Options (compile into CHIME/baselines; these options should be set up one after one; CHIME is the B+ tree that turns on all options)

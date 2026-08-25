@@ -26,7 +26,7 @@ BIN="$BUILD_DIR/micro_test"
 COMMON_H="$CHIME_DIR/include/Common.h"   # holds kIndexCacheSize (cache-sweep knob)
 
 # --- cluster (edit to match your machines; memory hosts memcached) ---------
-MEM_IP="${MEM_IP:-10.30.1.7}"   # memory node  -> CHIME node 0 (MN); runs memcached
+MEM_IP="${MEM_IP:-10.30.1.8}"   # memory node  -> CHIME node 0 (MN); runs memcached
 CMP_IP="${CMP_IP:-10.30.1.6}"   # compute node -> CHIME node 1 (CN)
 MEMC_PORT="${MEMC_PORT:-11211}"
 NODES="${NODES:-2}"             # total machines (1 MN + 1 CN)
@@ -55,6 +55,36 @@ if [[ -z "${OFFLOAD_RATE:-}" ]]; then
     *) echo "OFFLOAD must be on|off (got '$OFFLOAD')" >&2; exit 1 ;;
   esac
 fi
+
+# --- leaf-node caching A/B (CACHE_LEAF=0|1) ---------------------------------
+# Stock CHIME caches INTERNAL nodes only, so every point lookup pays one remote
+# read for the leaf even on a full index-cache hit. CACHE_LEAF=1 turns on the
+# compute-side LEAF cache (include/LeafCache.h) so the compute node caches BOTH
+# node types: a cached leaf answers a lookup with one 16-byte validation read
+# instead of a segment read, and a range scan validates the leaves it holds
+# instead of reading each covered leaf in full.
+#
+# !! CHIME_CACHE_MB IS THE TOTAL !!  index + leaf ALWAYS sums to the sweep point,
+# in both arms. DART is compared at a fixed total compute-side budget, so the leaf
+# cache must NOT be extra memory on top -- otherwise a win only says "CHIME was
+# given more RAM". At 256 MB: CACHE_LEAF=0 is 256 index / 0 leaf, CACHE_LEAF=1 is
+# 128 / 128. Caching leaves has to earn its share against the inner nodes it
+# displaces, and that trade-off is the experiment.
+#
+#   CACHE_LEAF      0|1   runtime switch -- ONE binary serves both arms, exactly
+#                         like OFFLOAD. Must match on both machines.
+#   LEAF_CACHE_PCT  50    leaf share of the TOTAL, in percent (rest -> inner nodes).
+#                         Sweep it at a fixed total to find where memory pays best.
+#   LEAF_CACHE_MB   -     absolute leaf budget; overrides LEAF_CACHE_PCT if set.
+#   LEAF_SET        -     if set (e.g. "0 1"), CACHE_LEAF becomes a swept axis and
+#                         a leaf_<v>/ level is added to the results tree. Unset =>
+#                         single CACHE_LEAF value and the original layout.
+#
+# Coherence is not a knob: a cached leaf is ALWAYS validated with a [lock, stamp]
+# probe before it is served, so the cache is correct under concurrent writers.
+CACHE_LEAF="${CACHE_LEAF:-0}"
+LEAF_CACHE_PCT="${LEAF_CACHE_PCT:-50}"
+LEAF_CACHE_MB="${LEAF_CACHE_MB:-}"
 
 LOG_DIR="${LOG_DIR:-$CHIME_DIR/build/results/offload_ab}"
 
@@ -114,22 +144,25 @@ run_one() {
   # change (grep CHIME_NODE_ID in the source to confirm).
   local node_id; [[ "$role" == "memory" ]] && node_id=0 || node_id=1
 
+  # All runtime knobs travel as env, so one build covers every cell of the sweep.
+  local envs=(CHIME_NODE_ID="$node_id" CHIME_DIR_THREADS="$DIR_THREADS")
+  [[ "${CACHE_CUR:-}" =~ ^[0-9]+$ ]] && envs+=(CHIME_CACHE_MB="$CACHE_CUR")
+  local leaf="${LEAF_CUR:-$CACHE_LEAF}"
+  envs+=(CHIME_CACHE_LEAF="$leaf")
+  if [[ "$leaf" != "0" ]]; then
+    envs+=(CHIME_LEAF_CACHE_PCT="$LEAF_CACHE_PCT")
+    [[ -n "$LEAF_CACHE_MB" ]] && envs+=(CHIME_LEAF_CACHE_MB="$LEAF_CACHE_MB")
+  fi
+
   echo; echo "############################################################"
   echo "## OFFLOAD=$mode (rate=$rate)  role=$role  WORKLOAD=$WORKLOAD"
+  echo "## TOTAL cache=${CACHE_CUR:-build}MB  CACHE_LEAF=$leaf  leaf share=${LEAF_CACHE_MB:-${LEAF_CACHE_PCT}%}"
   echo "## ${cmd[*]}"
   echo "## log: $log"
   echo "############################################################"; echo
-  # Runtime index-cache size (MB) via env -> no rebuild between cache points.
   # stdbuf -oL: line-buffer through the `| tee` pipe, otherwise progress prints
   # sit in a 4KB buffer during the (slow) bulk load and the run looks hung.
-  if [[ "${CACHE_CUR:-}" =~ ^[0-9]+$ ]]; then
-    ( cd "$BUILD_DIR" && CHIME_NODE_ID="$node_id" CHIME_CACHE_MB="$CACHE_CUR" \
-        CHIME_DIR_THREADS="$DIR_THREADS" \
-        stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "$log"
-  else
-    ( cd "$BUILD_DIR" && CHIME_NODE_ID="$node_id" CHIME_DIR_THREADS="$DIR_THREADS" \
-        stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "$log"
-  fi
+  ( cd "$BUILD_DIR" && env "${envs[@]}" stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "$log"
 
   # ---- extract headline numbers into a CSV row -------------------------
   # Throughput now comes from micro_test's [RESULT] line: this node's exact
@@ -150,13 +183,29 @@ run_one() {
   local idx
   idx="$( { grep -E '^consumed cache size' "$log" | tail -1 \
            | sed -nE 's/.*= ([0-9.]+) MB.*/\1/p'; } 2>/dev/null || true)"
+  # The ACTUAL split this cell ran, from micro_test's [CACHE node N] line, and the
+  # leaf hit rate from the last [LEAFCACHE] line (printed after the measured
+  # phase). Recording the split rather than the knob is the point: every row can
+  # be checked for inner_mb + leaf_mb == total_mb, so a mis-set env var shows up as
+  # a number instead of an unexplained result. hit_pct says whether leaf caching
+  # had anything to work with -- expect near 0 under a uniform distribution and
+  # high under zipf, since a leaf is only worth caching when its keys are re-read.
+  local ltotal linner lleaf lhit
+  ltotal="$( { grep -E '^\[CACHE node' "$log" | tail -1 \
+              | sed -nE 's/.*total=([0-9]+) MB.*/\1/p'; } 2>/dev/null || true)"
+  linner="$( { grep -E '^\[CACHE node' "$log" | tail -1 \
+              | sed -nE 's/.*index=([0-9]+) MB.*/\1/p'; } 2>/dev/null || true)"
+  lleaf="$( { grep -E '^\[CACHE node' "$log" | tail -1 \
+             | sed -nE 's/.*leaf=([0-9]+) MB.*/\1/p'; } 2>/dev/null || true)"
+  lhit="$( { grep -E '^\[LEAFCACHE\] hit=' "$log" | tail -1 \
+            | sed -nE 's/.*hit_pct=([0-9.]+).*/\1/p'; } 2>/dev/null || true)"
   local csv="${SWEEP_CSV:-$outdir/summary_${role}.csv}"
-  [[ -f "$csv" ]] || echo "cache_mb,dir_threads,workload,offload,role,node_tput_mops,ops,p99_us,index_mb,log" > "$csv"
-  echo "${CACHE_CUR:-NA},${DIR_THREADS},${WORKLOAD},${mode},${role},${tput:-NA},${ops:-NA},${lat:-NA},${idx:-NA},${log}" >> "$csv"
+  [[ -f "$csv" ]] || echo "cache_mb,dir_threads,workload,offload,role,node_tput_mops,ops,p99_us,index_mb,cache_leaf,total_cache_mb,inner_cache_mb,leaf_cache_mb,leaf_hit_pct,log" > "$csv"
+  echo "${CACHE_CUR:-NA},${DIR_THREADS},${WORKLOAD},${mode},${role},${tput:-NA},${ops:-NA},${lat:-NA},${idx:-NA},${leaf},${ltotal:-NA},${linner:-NA},${lleaf:-NA},${lhit:-NA},${log}" >> "$csv"
 }
 
 # One WORKLOADS x SEQUENCE matrix into $2.  $1 = role, $2 = outdir
-_run_matrix() {
+_run_cells() {
   local role="$1" outdir="$2"
   local wls=(${WORKLOADS:-point-uniform point-zipf range-uniform range-zipf})
   local seq=(${SEQUENCE:-off on})
@@ -167,6 +216,25 @@ _run_matrix() {
       sleep 3           # let memcached / QPs settle before the next round
     done
   done
+}
+
+# [LEAF_SET x] WORKLOADS x SEQUENCE.  $1 = role, $2 = outdir
+# LEAF_SET unset keeps the historical layout byte-for-byte (<wl>/<off|on>/), so
+# the existing plotters and committed sweeps still parse. Set it (e.g. "0 1") and
+# a leaf_<v>/ level appears above it, giving a 3-way axis: cache x offload x leaf.
+_run_matrix() {
+  local role="$1" outdir="$2"
+  local leaves=(${LEAF_SET:-})
+  local l
+  if [[ ${#leaves[@]} -eq 0 ]]; then
+    LEAF_CUR="$CACHE_LEAF"
+    _run_cells "$role" "$outdir"
+  else
+    for l in "${leaves[@]}"; do
+      LEAF_CUR="$l"                      # read by run_one (env + CSV column)
+      _run_cells "$role" "$outdir/leaf_${l}"
+    done
+  fi
 }
 
 # Run the full matrix, DEX/DART-style, optionally sweeping the cache size:
@@ -194,6 +262,11 @@ run_sequence() {
 
   echo ">> SWEEP: workloads=[${WORKLOADS:-point-uniform point-zipf range-uniform range-zipf}]  offload=[${SEQUENCE:-off on}]  role=$role"
   echo ">>        point op=${POINT_OP}M  range op=${RANGE_OP}M scan_range=${SCAN_RANGE}  zipf theta=${ZIPF_THETA}"
+  if [[ -n "${LEAF_SET:-}" ]]; then
+    echo ">>        LEAF CACHE axis CACHE_LEAF=[${LEAF_SET}], leaf share=${LEAF_CACHE_MB:-${LEAF_CACHE_PCT}%} of the TOTAL cache (inner+leaf = the sweep point)"
+  else
+    echo ">>        leaf cache: CACHE_LEAF=${CACHE_LEAF}, leaf share=${LEAF_CACHE_MB:-${LEAF_CACHE_PCT}%} of the TOTAL"
+  fi
   echo ">>        results -> $base"
 
   if [[ ${#caches[@]} -eq 0 ]]; then
@@ -213,6 +286,6 @@ run_sequence() {
   cat "$SWEEP_CSV" 2>/dev/null || true
   echo
   echo "all logs + summary CSV under: $base"
-  echo "  layout: $base/[cache_<MB>/]<workload>/<off|on>/${role}.log"
+  echo "  layout: $base/[cache_<MB>/][leaf_<0|1>/]<workload>/<off|on>/${role}.log"
   echo "=============================================================="
 }

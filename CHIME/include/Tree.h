@@ -3,6 +3,7 @@
 
 #include "TreeCache.h"
 #include "IdxCache.h"
+#include "LeafCache.h"
 #include "DSM.h"
 #include "Common.h"
 #include "LocalLockTable.h"
@@ -33,6 +34,14 @@ enum RequestType : int {
 // node instead of a one-sided leaf read. Set by the benchmark app; default 100.
 extern int g_offload_rate;
 extern int g_offload_min_level;  // cache-boundary level below which we DON'T offload
+#endif
+
+#ifdef CACHE_LEAF_NODE
+// Compute-side LEAF-cache budget (MB), carved OUT of the same total the
+// internal-node cache spends from: g_index_cache_mb + g_leaf_cache_mb always
+// equals CHIME_CACHE_MB. The total is the axis the DART comparison holds equal,
+// so the leaf cache has to earn its share against the inner nodes it displaces.
+extern int g_leaf_cache_mb;
 #endif
 
 struct Request {
@@ -93,6 +102,10 @@ public:
 #endif
 
   void statistics();
+  // Leaf-cache counters only. Separate from statistics() so it can be called at
+  // the END of the measured phase without re-printing (and re-dating) the index
+  // cache's post-bulk-load occupancy line, which the sweep scripts parse.
+  void leaf_cache_statistics();
   void clear_debug_info();
 
 private:
@@ -109,6 +122,33 @@ private:
   static uint64_t get_lock_info(bool is_leaf);
   void lock_node(const GlobalAddress &node_addr, uint64_t* lock_buffer, bool is_leaf, CoroPull* sink);
   void unlock_node(const GlobalAddress &node_addr, uint64_t* lock_buffer, bool is_leaf, CoroPull* sink, bool async = false);
+
+  // leaf cache (see LeafCache.h for the coherence protocol)
+#ifdef CACHE_LEAF_NODE
+  // Publish a fresh, globally unique stamp for `leaf_addr`. Called right after a
+  // leaf lock is acquired and before any data is written, so an RC queue pair
+  // orders it lock -> stamp -> data -> unlock.
+  void publish_leaf_stamp(const GlobalAddress& leaf_addr, CoroPull* sink);
+  // One 16-byte [lock, stamp] probe. True iff the leaf is unlocked AND still
+  // carries `stamp`, i.e. the cached image may be served.
+  bool leaf_cache_validate(const GlobalAddress& leaf_addr, uint64_t stamp, CoroPull* sink);
+  // Read + decode a WHOLE leaf with the seqlock closed around it (one doorbell
+  // batch of three reads). On success `leaf_buffer` holds the decoded image; if
+  // `stamp_out` comes back non-zero the seqlock closed and the image is cacheable.
+  bool leaf_read_full(const GlobalAddress& leaf_addr, char *raw_leaf_buffer,
+                      char *leaf_buffer, uint64_t& stamp_out, bool& cacheable,
+                      CoroPull* sink);
+  // Point-probe a decoded leaf image held in local memory (cached or freshly
+  // read). Returns false iff the internal-node cache entry that produced
+  // `node_addr` is stale and the caller must invalidate + retry -- the same
+  // contract as leaf_node_search.
+  bool leaf_probe_local(const LeafNode* leaf, const GlobalAddress& node_addr,
+                        const GlobalAddress& sibling_addr, const Key &k, Value &v,
+                        bool from_cache, CoroPull* sink);
+  // Harvest [l_k, r_k) out of a decoded leaf image into a range-query result.
+  static void leaf_harvest_range(const LeafNode* leaf, const Key& l_k, const Key& r_k,
+                                 std::map<Key, Value>& ret);
+#endif
 
   // search
   bool leaf_node_search(const GlobalAddress& node_addr, const GlobalAddress& sibling_addr, const Key &k, Value &v, bool from_cache, CoroPull* sink);
@@ -160,6 +200,9 @@ private:
   TreeCache *tree_cache;
 #ifdef SPECULATIVE_READ
   IdxCache *idx_cache;
+#endif
+#ifdef CACHE_LEAF_NODE
+  LeafCache *leaf_cache;   // nullptr unless CHIME_CACHE_LEAF=1
 #endif
   uint64_t tree_id;
   std::atomic<uint16_t> rough_height;

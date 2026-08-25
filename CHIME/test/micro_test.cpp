@@ -70,6 +70,9 @@ int LOADER_NUM = 8;
 extern volatile bool need_stop;
 extern volatile bool need_clear[MAX_APP_THREAD];
 extern int g_index_cache_mb;   // runtime index-cache size (MB); see Tree.cpp
+#ifdef CACHE_LEAF_NODE
+extern int g_leaf_cache_mb;    // runtime leaf-cache size (MB); see LeafCache.h
+#endif
 
 #ifdef ENABLE_OFFLOAD
 extern uint64_t offload_lookup_cnt[MAX_APP_THREAD];
@@ -397,8 +400,55 @@ int main(int argc, char *argv[]) {
   if (const char *cm = getenv("CHIME_CACHE_MB")) g_index_cache_mb = atoi(cm);
   if (const char *ld = getenv("CHIME_LOADERS")) LOADER_NUM = atoi(ld);  // bulk-load threads
   if (const char *tb = getenv("CHIME_TIME_BASED")) g_time_based = atoi(tb);
+
+  // CHIME_CACHE_MB is the TOTAL compute-side cache budget. Without leaf caching it
+  // is all internal nodes; with it, part goes to leaves. The total is the axis the
+  // DART comparison holds equal, so it must NOT grow when leaf caching turns on.
+  const int total_cache_mb = g_index_cache_mb;
+
+#ifdef CACHE_LEAF_NODE
+  // ---- split the total between inner nodes and leaves ----------------------
+  //   CHIME_LEAF_CACHE_MB   absolute leaf budget (wins if set)
+  //   CHIME_LEAF_CACHE_PCT  else, percent of the total (default 50)
+  // index + leaf == total, always. Sweeping the percentage at a fixed total is
+  // how you find where the memory is best spent.
+  if (leafcache::enabled()) {
+    int leaf_mb;
+    if (const char *lm = getenv("CHIME_LEAF_CACHE_MB")) leaf_mb = atoi(lm);
+    else {
+      int pct = 50;
+      if (const char *lp = getenv("CHIME_LEAF_CACHE_PCT")) pct = atoi(lp);
+      if (pct < 0) pct = 0;
+      if (pct > 90) pct = 90;   // the descent still has to resolve locally
+      leaf_mb = total_cache_mb * pct / 100;
+    }
+    if (leaf_mb < 0) leaf_mb = 0;
+    if (leaf_mb > total_cache_mb - 1) leaf_mb = total_cache_mb - 1;
+    g_leaf_cache_mb = leaf_mb;
+    g_index_cache_mb = total_cache_mb - leaf_mb;
+  }
+#endif
+
+  // One machine-readable line, on EVERY node (the index-cache line below is node-0
+  // only). The sweep parses this into the summary CSV, so a cell always records the
+  // split it actually ran -- a mis-set env var shows up as a number, not as an
+  // unexplained result. index + leaf MUST equal total.
+#ifdef CACHE_LEAF_NODE
+  const int leaf_mb_report = g_leaf_cache_mb;
+#else
+  const int leaf_mb_report = 0;
+#endif
+  printf("[CACHE node %d] total=%d MB index=%d MB leaf=%d MB\n",
+         dsm->getMyNodeID(), total_cache_mb, g_index_cache_mb, leaf_mb_report);
   if (dsm->getMyNodeID() == 0)
     printf("index cache = %d MB (CHIME_CACHE_MB)\n", g_index_cache_mb);
+#ifdef CACHE_LEAF_NODE
+  if (dsm->getMyNodeID() == 0)
+    printf("[CONFIG] leaf cache = %s%s  (CHIME_CACHE_LEAF / CHIME_LEAF_CACHE_PCT)\n",
+           leafcache::enabled() ? "ON" : "OFF",
+           (leafcache::enabled() && leafcache::keep_speculative())
+               ? ", stacked on the hotspot buffer" : "");
+#endif
 
   // Printed on BOTH nodes on purpose: the memory node spawns this many dir
   // threads and the compute node shards RPCs over this many, so a mismatch makes
@@ -455,6 +505,17 @@ int main(int argc, char *argv[]) {
            g_offload_rate, g_offload_min_level,
            g_offload_min_level <= 1 ? "offload EVERY lookup, incl. cache hits"
                                     : "offload cache MISSES only");
+#ifdef CACHE_LEAF_NODE
+  // The two features are complementary and compose by construction at the default
+  // min level: offload serves the index MISSES (the memory node walks the
+  // remaining internals), the leaf cache serves the index HITS (level==1, where
+  // the only remaining work was the leaf read). At min level 1 offload takes every
+  // lookup and the leaf cache is never consulted -- say so rather than letting a
+  // flat leaf hit-rate look like a broken cache.
+  if (leafcache::enabled() && g_offload_min_level <= 1 && dsm->getMyNodeID() == 0)
+    printf("[WARN] CHIME_OFFLOAD_MIN_LEVEL=1 offloads every lookup, so the leaf"
+           " cache will never be consulted on the point path.\n");
+#endif
 #endif
 
   generate_workload();
@@ -545,6 +606,11 @@ int main(int argc, char *argv[]) {
                  dsm->getMyNodeID(), (unsigned long)lf, (unsigned long)lt, 100.0 * lf / lt);
   if (sr) printf("[CORRECTNESS node %d] scan rows returned = %lu\n",
                  dsm->getMyNodeID(), (unsigned long)sr);
+
+  // Leaf-cache counters for the MEASURED phase only (the tree->statistics() call
+  // above ran right after warmup, so its numbers describe the cache fill, not the
+  // run). This is the [LEAFCACHE] line the sweep scripts parse.
+  tree->leaf_cache_statistics();
 
   printf("[END]\n");
   dsm->barrier("fin");

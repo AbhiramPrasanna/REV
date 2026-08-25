@@ -21,7 +21,7 @@
 #   Cache size is applied at RUNTIME (CHIME_CACHE_MB) -- ONE build, no rebuilds.
 #
 # RUN THE MEMORY NODE FIRST, THEN THE COMPUTE NODE, SAME ARGS:
-#     ./run_cache_stress.sh memory      # on 10.30.1.7 (hosts memcached)
+#     ./run_cache_stress.sh memory      # on 10.30.1.8 (hosts memcached)
 #     ./run_cache_stress.sh compute     # on 10.30.1.6
 #   Both machines MUST pass identical CACHE_MB / WORKLOADS / SEQUENCE (lockstep).
 #

@@ -31,7 +31,7 @@
 # build-failed and skipped -- that is itself a data point.
 #
 # RUN THE MEMORY NODE FIRST, THEN THE COMPUTE NODE WITH THE SAME ARGS:
-#   ./run_stress_sweep.sh memory      # on 10.30.1.7 (hosts memcached)
+#   ./run_stress_sweep.sh memory      # on 10.30.1.8 (hosts memcached)
 #   ./run_stress_sweep.sh compute     # on 10.30.1.6
 # Both machines MUST pass the SAME SPANS / CACHE_MB_LIST / WORKLOADS / SEQUENCE.
 #
