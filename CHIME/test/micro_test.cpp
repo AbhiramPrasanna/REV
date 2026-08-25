@@ -590,8 +590,7 @@ int main(int argc, char *argv[]) {
   if (dsm->getMyNodeID() == 0)
     printf("[CONFIG] warmup offload rate = %d%% (CHIME_WARMUP_OFFLOAD); measured"
            " phase uses %d%%\n", g_warmup_offload_rate, kOffloadRate);
-#endif
-#endif
+#endif  // ENABLE_OFFLOAD
 
   generate_workload();
   // Give the tree cache a random-key pool (bulk keys) for eviction victim
