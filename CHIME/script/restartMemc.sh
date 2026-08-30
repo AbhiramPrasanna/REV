@@ -1,103 +1,112 @@
 #!/bin/bash
 # ===========================================================================
-# restartMemc.sh -- restart the memcached that coordinates a CHIME run, and
-#                   reset the node counters.
+# restartMemc.sh -- (re)start the coordination memcached and zero the
+# registration counters.
 #
-# Runnable from EITHER node and from ANY directory. The host and port come from
-# CHIME/memcached.conf (line 1 = address, line 2 = port), which run/bench_common.sh
-# rewrites before every cell. If that address is one of this machine's own, the
-# restart happens locally; otherwise it goes over ssh.
+# RUN ON THE MEMORY NODE, which IS the memcached host: this starts memcached
+# LOCALLY (no ssh) and talks to it through bash /dev/tcp (no `nc`). Modelled on
+# dex/script/restartMemc.sh, which is the version proven on this cluster.
 #
-#   ./restartMemc.sh              # restart + reset
-#   ./restartMemc.sh --check      # don't restart; just report what is there
+#   ./restartMemc.sh            # restart + zero the counters
+#   ./restartMemc.sh --check    # report what is there, change nothing
 #
-# WHY THIS MATTERS. memcached holds serverNum/clientNum and every barrier key. A
-# stale instance -- left by a previous run, or owned by another user so it cannot
-# be killed -- hands out node ids from a counter that never got reset. The two
-# nodes then build queue pairs against the wrong peers and the run dies with
-# "transport retry counter exceeded", which reads as an RDMA fault and is nothing
-# of the sort. So every failure here is LOUD and non-zero: the old version hid the
-# kill behind 2>/dev/null, never checked that memcached actually started, and
-# never verified the reset stuck.
+# Two dependencies this deliberately does NOT have, because both have bitten us:
+#   * ssh -- the old CHIME version ssh'd to the address in memcached.conf even
+#     when that address is this very machine, which needs passwordless ssh to
+#     your own IP and otherwise dies with "Permission denied (publickey)".
+#   * nc  -- not reliably present, and its variants differ over whether they
+#     close on stdin EOF. /dev/tcp is pure bash.
+#
+# Keeper::serverEnter does memcached_increment() on serverNum/clientNum, which
+# requires the keys to ALREADY EXIST -- hence pre-setting them to "0". A stale
+# memcached whose counters were never zeroed hands out the wrong node ids, the
+# two nodes build queue pairs against the wrong peers, and the run dies with
+# "transport retry counter exceeded" -- which reads as an RDMA fault and is
+# nothing of the sort. So failures here are loud and non-zero: callers abort
+# instead of hanging at the DSMKeeper barrier.
 # ===========================================================================
-set -uo pipefail
+set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF="${MEMC_CONF:-$SCRIPT_DIR/../memcached.conf}"
-[[ -f "$CONF" ]] || { echo "ERROR: no memcached.conf at $CONF" >&2; exit 1; }
+[ -f "$CONF" ] || { echo "restartMemc: ERROR - no memcached.conf at $CONF" >&2; exit 1; }
 
-ADDR="$(head -1 "$CONF" | tr -d '[:space:]')"
-PORT="$(awk 'NR==2{print}' "$CONF" | tr -d '[:space:]')"
+ADDR="$(head -1 "$CONF" | tr -d '\r[:space:]')"
+PORT="$(awk 'NR==2{print}' "$CONF" | tr -d '\r[:space:]')"
 : "${PORT:=11211}"
-[[ -n "$ADDR" ]] || { echo "ERROR: no address on line 1 of $CONF" >&2; exit 1; }
+[ -n "$ADDR" ] || { echo "restartMemc: ERROR - no address on line 1 of $CONF" >&2; exit 1; }
 
-# Per-user pidfile: a shared /tmp/memcached.pid owned by root (from a sudo run)
-# can be neither killed nor removed by an ordinary user, and the old script's
-# `xargs kill` failed silently when that happened.
 PIDF="${MEMC_PID:-/tmp/memcached-$(id -un).pid}"
 
-# Is ADDR one of ours? If so skip ssh -- requiring passwordless ssh to your own
-# IP is a needless dependency, and it is the usual reason this script "hangs".
-is_local() {
-  local ip
-  for ip in $(hostname -I 2>/dev/null) 127.0.0.1 localhost; do
-    [[ "$ip" == "$ADDR" ]] && return 0
+# --- memcached over /dev/tcp ------------------------------------------------
+memc_set_zero() {   # memc_set_zero <key>
+  local key=$1 _reply
+  exec 3<>"/dev/tcp/${ADDR}/${PORT}" 2>/dev/null || return 1
+  printf 'set %s 0 0 1\r\n0\r\n' "$key" >&3
+  IFS= read -r -t 3 _reply <&3        # consume STORED
+  exec 3>&- 3<&-
+  return 0
+}
+
+memc_get() {        # memc_get <key> -> value on stdout ("" if absent/unreachable)
+  local key=$1 line val=""
+  exec 3<>"/dev/tcp/${ADDR}/${PORT}" 2>/dev/null || return 1
+  printf 'get %s\r\nquit\r\n' "$key" >&3
+  while IFS= read -r -t 3 line <&3; do
+    line="${line%$'\r'}"
+    case "$line" in
+      VALUE*) IFS= read -r -t 3 val <&3; val="${val%$'\r'}" ;;
+      END|ERROR*) break ;;
+    esac
   done
-  return 1
-}
-if is_local; then RUN=(bash -c); else RUN=(ssh "$ADDR" -o StrictHostKeyChecking=no); fi
-run_there() { "${RUN[@]}" "$1"; }
-
-memc_get() {  # memc_get <key> -> value on stdout, empty if absent
-  printf 'get %s\r\nquit\r\n' "$1" | nc -w 3 "$ADDR" "$PORT" 2>/dev/null \
-    | tr -d '\r' | sed -n '2p'
+  exec 3>&- 3<&-
+  printf '%s' "$val"
+  return 0
 }
 
-report() {
-  local s c
-  s="$(memc_get serverNum)"; c="$(memc_get clientNum)"
-  echo "   memcached ${ADDR}:${PORT} -> serverNum='${s:-<none>}' clientNum='${c:-<none>}'"
-}
-
-if [[ "${1:-}" == "--check" ]]; then
-  echo ">> checking memcached at ${ADDR}:${PORT} ($(is_local && echo local || echo "via ssh"))"
-  report
+if [ "${1:-}" = "--check" ]; then
+  echo ">> memcached ${ADDR}:${PORT}"
+  if s="$(memc_get serverNum)"; then
+    echo "   reachable: serverNum='${s:-<unset>}' clientNum='$(memc_get clientNum)'"
+  else
+    echo "   NOT reachable"
+    exit 1
+  fi
   exit 0
 fi
 
-echo ">> restarting memcached at ${ADDR}:${PORT} ($(is_local && echo local || echo "via ssh"), pidfile $PIDF)"
+echo ">> restarting memcached locally on ${ADDR}:${PORT} (pidfile $PIDF)"
 
-# 1. kill the old one
-run_there "[ -f '$PIDF' ] && xargs kill < '$PIDF' 2>/dev/null; pkill -u \$(id -u) -x memcached 2>/dev/null; true"
+# --- kill any previous instance --------------------------------------------
+[ -f "$PIDF" ] && kill "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null
+kill "$(cat /tmp/memcached.pid 2>/dev/null)" 2>/dev/null   # legacy shared pidfile
+pkill -f "memcached.*-p[ ]*${PORT}" 2>/dev/null
 sleep 1
 
-# 2. start a fresh one. -u is only usable, and only needed, as root.
-run_there "if [ \"\$(id -u)\" = 0 ]; then \
-             memcached -u root -l '$ADDR' -p '$PORT' -c 10000 -d -P '$PIDF'; \
-           else \
-             memcached -l '$ADDR' -p '$PORT' -c 10000 -d -P '$PIDF'; fi"
-rc=$?
-if [[ $rc -ne 0 ]]; then
-  echo "ERROR: memcached did not start on ${ADDR}:${PORT} (exit $rc)." >&2
-  echo "       Something else is probably bound there:" >&2
-  echo "         ss -lntp | grep ${PORT}" >&2
-  echo "       If it belongs to another user, kill it with sudo, or use a port of" >&2
-  echo "       your own on BOTH nodes:  MEMC_PORT=11311 MEMC_PID=\$HOME/memcached.pid" >&2
+# --- launch a fresh one -----------------------------------------------------
+# memcached refuses to run as root unless -u is given; -u is unusable otherwise.
+if [ "$(id -u)" = "0" ]; then UOPT="-u root"; else UOPT=""; fi
+memcached $UOPT -l "${ADDR}" -p "${PORT}" -c 10000 -d -P "$PIDF"
+sleep 1
+
+# --- zero the counters the keeper increments --------------------------------
+if ! memc_set_zero serverNum; then
+  echo "restartMemc: ERROR - cannot reach memcached at ${ADDR}:${PORT}" >&2
+  echo "  Is memcached installed?  Is ${ADDR} an IP of THIS host?" >&2
+  echo "  Is something else holding the port:  ss -lntp | grep ${PORT}" >&2
+  echo "  A port of your own works too, on BOTH nodes: MEMC_PORT=11311" >&2
   exit 1
 fi
-sleep 1
+memc_set_zero clientNum
 
-# 3. reset the node counters
-printf 'set serverNum 0 0 1\r\n0\r\nquit\r\n' | nc -w 3 "$ADDR" "$PORT" >/dev/null 2>&1
-printf 'set clientNum 0 0 1\r\n0\r\nquit\r\n' | nc -w 3 "$ADDR" "$PORT" >/dev/null 2>&1
-
-# 4. prove the instance answering us is the one we just started, with fresh
-#    state. Without this the whole point of the restart is unverified.
+# --- prove the reset stuck --------------------------------------------------
 check="$(memc_get serverNum)"
-if [[ "$check" != "0" ]]; then
-  echo "ERROR: ${ADDR}:${PORT} did not accept the counter reset (serverNum='${check:-<none>}')." >&2
-  echo "       That is a STALE memcached -- see the port check above." >&2
+if [ "$check" != "0" ]; then
+  echo "restartMemc: ERROR - ${ADDR}:${PORT} did not accept the reset" \
+       "(serverNum='${check:-<unset>}')." >&2
+  echo "  That is a STALE memcached this user could not kill." >&2
   exit 1
 fi
-echo "   ok: serverNum=0 clientNum=0"
+
+echo "restartMemc: memcached up on ${ADDR}:${PORT}, counters zeroed."
 exit 0

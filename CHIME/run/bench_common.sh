@@ -159,37 +159,75 @@ start_memcached_local() {
     }
 }
 
+# Read one memcached key over bash /dev/tcp. No `nc`: it is not reliably present,
+# and its variants disagree about closing on stdin EOF. This is the same
+# mechanism dex/script/restartMemc.sh uses, which is what works on this cluster.
+# Prints the value, empty if absent; returns non-zero if memcached is unreachable.
+memc_get_key() {   # memc_get_key <key>
+  local key=$1 line val=""
+  { exec 3<>"/dev/tcp/${MEM_IP}/${MEMC_PORT}"; } 2>/dev/null || return 1
+  printf 'get %s\r\nquit\r\n' "$key" >&3
+  while IFS= read -r -t 3 line <&3; do
+    line="${line%$'\r'}"
+    case "$line" in
+      VALUE*) IFS= read -r -t 3 val <&3; val="${val%$'\r'}" ;;
+      END|ERROR*) break ;;
+    esac
+  done
+  exec 3>&- 3<&-
+  printf '%s' "$val"
+  return 0
+}
+
 # Compute side: wait for the memory node to have registered, instead of guessing.
 #
-# The old `sleep 4` was a blind race, and losing it is how cells died. Keeper's
-# serverEnter INCREMENTS serverNum, and the memory node's freshly restarted
-# memcached starts it at 0 -- so serverNum becomes exactly 1 when node 0 has
-# registered and nobody else has. Waiting for that value is precise:
-#   <no answer>  memcached not up yet (memory node still restarting it)
-#   0            memcached fresh, memory node's micro_test not registered yet
-#   1            READY -- this is our cue
-#   >=2          a STALE instance from a previous cell that was never reset; the
-#                memory node is about to restart it, so keep waiting rather than
-#                registering into it and being handed the wrong node id.
+# DEX's run_other.sh just sleeps 8s. That works when you launch one run by hand;
+# it does not when a script walks 16 cells back to back and the memory node is
+# still restarting memcached for cell N+1. Losing that race is how cells died.
+#
+# Keeper::serverEnter INCREMENTS serverNum, and a freshly restarted memcached
+# starts it at 0 -- so serverNum == 1 means exactly "node 0 registered, nobody
+# else". Waiting for that distinguishes all four states:
+#   unreachable  memcached not up yet (memory node still restarting it)
+#   0            fresh, memory node's micro_test not registered yet
+#   1            READY
+#   >=2          a STALE instance from a previous cell; the memory node is about
+#                to restart it, so keep waiting rather than registering into it
+#                and being handed the wrong node id.
+#
+# If /dev/tcp is unavailable we fall back to DEX's fixed sleep, so this can never
+# be worse than what it replaced.
 wait_for_memory_node() {
-  local deadline=$(( $(date +%s) + ${MEMC_WAIT:-600} ))
-  local v last=""
+  local waited=0 limit="${MEMC_WAIT:-600}" v last=""
+
+  # Escape hatch: MEMC_WAIT=0 skips the handshake entirely and does what DEX's
+  # run_other.sh does -- a fixed sleep. Use it if /dev/tcp is unavailable in your
+  # shell, or if you just want the old behaviour back.
+  if [[ "$limit" == "0" ]]; then
+    echo ">> [compute] MEMC_WAIT=0: fixed ${MEMC_SLEEP:-8}s wait instead of the handshake"
+    sleep "${MEMC_SLEEP:-8}"
+    return 0
+  fi
+
   echo ">> [compute] waiting for the memory node to register (serverNum -> 1)"
   while :; do
-    v="$( { printf 'get serverNum\r\nquit\r\n' | nc -w 3 "$MEM_IP" "$MEMC_PORT" 2>/dev/null \
-            | tr -d '\r' | sed -n '2p'; } || true)"
-    [[ "$v" == "1" ]] && { echo ">> [compute] memory node is up (serverNum=1)"; sleep 1; return 0; }
+    v="$(memc_get_key serverNum)" || v="<unreachable>"
+    if [[ "$v" == "1" ]]; then
+      echo ">> [compute] memory node is up (serverNum=1)"
+      sleep 1; return 0
+    fi
     if [[ "$v" != "$last" ]]; then
-      echo ">> [compute]   serverNum='${v:-<no answer>}' ..."
+      echo ">> [compute]   serverNum='${v:-<unset>}' ..."
       last="$v"
     fi
-    if (( $(date +%s) > deadline )); then
-      echo "ERROR: memory node never registered within ${MEMC_WAIT:-600}s." >&2
-      echo "       Last serverNum='${v:-<no answer>}' at ${MEM_IP}:${MEMC_PORT}." >&2
-      echo "       Check that the memory node is running this same cell." >&2
+    if (( waited >= limit )); then
+      echo "ERROR: memory node never registered within ${limit}s." >&2
+      echo "       Last serverNum='${v:-<unset>}' at ${MEM_IP}:${MEMC_PORT}." >&2
+      echo "       Check the memory node is running this same cell, and that its" >&2
+      echo "       memcached is up:  CHIME/script/restartMemc.sh --check" >&2
       exit 1
     fi
-    sleep 1
+    sleep 1; waited=$(( waited + 1 ))
   done
 }
 
