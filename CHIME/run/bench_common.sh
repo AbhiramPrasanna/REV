@@ -149,38 +149,48 @@ kill_stale_local() {
 # the run dies with "transport retry counter exceeded" -- a failure that looks
 # like an RDMA problem and is nothing of the sort. Fail loudly instead.
 start_memcached_local() {
-  echo ">> [memory] (re)starting memcached on ${MEM_IP}:${MEMC_PORT} (pidfile $MEMC_PID)"
-  [[ -f "$MEMC_PID" ]] && xargs kill < "$MEMC_PID" 2>/dev/null || true
-  sleep 1
+  # One implementation, in script/restartMemc.sh, so the thing you can run by
+  # hand to unstick a machine is the same thing the sweep runs per cell.
+  MEMC_PID="$MEMC_PID" MEMC_CONF="$CHIME_DIR/memcached.conf" \
+    bash "$CHIME_DIR/script/restartMemc.sh" || {
+      echo "ERROR: could not restart memcached -- see above. Aborting the sweep" >&2
+      echo "       rather than running cells against stale coordination state." >&2
+      exit 1
+    }
+}
 
-  # -u is only usable (and only needed) when we are root; as an ordinary user
-  # `-u root` makes memcached refuse to start.
-  local as_user=()
-  [[ "$(id -u)" == "0" ]] && as_user=(-u root)
-
-  if ! memcached "${as_user[@]}" -l "$MEM_IP" -p "$MEMC_PORT" -c 10000 -d -P "$MEMC_PID"; then
-    echo "ERROR: memcached failed to start on ${MEM_IP}:${MEMC_PORT}." >&2
-    echo "       Usually something is already bound there. Check with:" >&2
-    echo "         ss -lntp | grep ${MEMC_PORT}" >&2
-    echo "       If it belongs to another user, either kill it with sudo or run" >&2
-    echo "       this sweep on a port of your own, on BOTH nodes:" >&2
-    echo "         MEMC_PORT=11311 MEMC_PID=\$HOME/memcached.pid $0 <role>" >&2
-    exit 1
-  fi
-  sleep 1
-
-  # Prove the instance answering us is the one we just started with FRESH state:
-  # set the counters, read one back, and refuse to proceed if it does not stick.
-  printf 'set serverNum 0 0 1\r\n0\r\nquit\r\n' | nc "$MEM_IP" "$MEMC_PORT" >/dev/null || true
-  printf 'set clientNum 0 0 1\r\n0\r\nquit\r\n' | nc "$MEM_IP" "$MEMC_PORT" >/dev/null || true
-  local check
-  check="$( { printf 'get serverNum\r\nquit\r\n' | nc "$MEM_IP" "$MEMC_PORT" | tr -d '\r'; } 2>/dev/null || true)"
-  if ! echo "$check" | grep -q '^0$'; then
-    echo "ERROR: memcached at ${MEM_IP}:${MEMC_PORT} did not accept the counter reset." >&2
-    echo "       It is probably a STALE instance from an earlier run (see above)." >&2
-    echo "       Got: $(echo "$check" | tr '\n' ' ')" >&2
-    exit 1
-  fi
+# Compute side: wait for the memory node to have registered, instead of guessing.
+#
+# The old `sleep 4` was a blind race, and losing it is how cells died. Keeper's
+# serverEnter INCREMENTS serverNum, and the memory node's freshly restarted
+# memcached starts it at 0 -- so serverNum becomes exactly 1 when node 0 has
+# registered and nobody else has. Waiting for that value is precise:
+#   <no answer>  memcached not up yet (memory node still restarting it)
+#   0            memcached fresh, memory node's micro_test not registered yet
+#   1            READY -- this is our cue
+#   >=2          a STALE instance from a previous cell that was never reset; the
+#                memory node is about to restart it, so keep waiting rather than
+#                registering into it and being handed the wrong node id.
+wait_for_memory_node() {
+  local deadline=$(( $(date +%s) + ${MEMC_WAIT:-600} ))
+  local v last=""
+  echo ">> [compute] waiting for the memory node to register (serverNum -> 1)"
+  while :; do
+    v="$( { printf 'get serverNum\r\nquit\r\n' | nc -w 3 "$MEM_IP" "$MEMC_PORT" 2>/dev/null \
+            | tr -d '\r' | sed -n '2p'; } || true)"
+    [[ "$v" == "1" ]] && { echo ">> [compute] memory node is up (serverNum=1)"; sleep 1; return 0; }
+    if [[ "$v" != "$last" ]]; then
+      echo ">> [compute]   serverNum='${v:-<no answer>}' ..."
+      last="$v"
+    fi
+    if (( $(date +%s) > deadline )); then
+      echo "ERROR: memory node never registered within ${MEMC_WAIT:-600}s." >&2
+      echo "       Last serverNum='${v:-<no answer>}' at ${MEM_IP}:${MEMC_PORT}." >&2
+      echo "       Check that the memory node is running this same cell." >&2
+      exit 1
+    fi
+    sleep 1
+  done
 }
 
 mode_to_rate() { case "$1" in on) echo 100 ;; off) echo 0 ;; *) echo "$1" ;; esac; }
@@ -192,7 +202,8 @@ run_one() {
   local role="$1" mode="$2" outdir="$3"
   local rate; rate="$(mode_to_rate "$mode")"
 
-  # keep the on-disk memcached.conf in sync so the binary dials the right host
+  # keep the on-disk memcached.conf in sync so the binary dials the right host.
+  # Also read by script/restartMemc.sh below, so it must precede the restart.
   printf '%s\n%s\n' "$MEM_IP" "$MEMC_PORT" > "$CHIME_DIR/memcached.conf"
 
   kill_stale_local "$role"         # clear survivors of a previous cell FIRST
@@ -200,8 +211,7 @@ run_one() {
   if [[ "$role" == "memory" ]]; then
     start_memcached_local          # fresh node-id counters for THIS round
   else
-    echo ">> [compute] waiting 4s so the memory node registers as node 0 first"
-    sleep 4
+    wait_for_memory_node           # handshake, not a blind sleep
   fi
 
   local dir="$outdir/$WORKLOAD/$mode"; mkdir -p "$dir"
