@@ -40,6 +40,12 @@
 #   Both machines MUST pass identical knobs (lockstep) -- CACHE_LEAF changes only
 #   compute-node behaviour, but the run structure has to line up cell for cell.
 #
+# ONE CELL AT A TIME (preferred for a long study -- no tmux, nothing to babysit):
+#     export SEQ_TS=full1 ; export CACHE_MB=512
+#     ./run_leaf_cache.sh memory  point-zipf on 1      # then the same on compute
+#   Cells sharing SEQ_TS accumulate into one sweep dir + one summary CSV.
+#   See SINGLE-CELL MODE below for the argument form and the full 16-cell list.
+#
 # BUILD FIRST (leaf caching is ON by default; it adds an 8-byte coherence stamp
 # per leaf allocation, so BOTH nodes must run a binary built the same way):
 #     cd .. && mkdir -p build && cd build \
@@ -64,11 +70,49 @@
 #   (repeat for 50 / 75; each run's summary CSV records inner_cache_mb and
 #    leaf_cache_mb, which must sum to total_cache_mb.)
 # ===========================================================================
-role="${1:?usage: run_leaf_cache.sh <memory|compute>}"
+role="${1:?usage: run_leaf_cache.sh <memory|compute> [workload] [off|on] [0|1]}"
 
+# ---- SINGLE-CELL MODE ------------------------------------------------------
+# No extra args  -> run the whole matrix (LEAF_SET x WORKLOADS x SEQUENCE).
+# Extra args     -> run EXACTLY ONE cell:
+#       ./run_leaf_cache.sh <role> <workload> <off|on> <0|1>
+#
+# This is the way to drive the study by hand. Every invocation that shares a
+# SEQ_TS appends to the SAME sweep directory and the SAME summary CSV, so cells
+# can be run one at a time, in any order, over as many sessions as you like, and
+# the plotters still see one coherent sweep. The 16 cells of the study are:
+#
+#   for W in point-uniform point-zipf range-uniform range-zipf; do
+#     for O in off on; do for L in 0 1; do  ./run_leaf_cache.sh <role> $W $O $L
+#
+# Run the memory node first for each cell, then the compute node.
+if [ $# -ge 2 ]; then
+  case "$2" in
+    point-uniform|point-zipf|range-uniform|range-zipf) WORKLOADS="$2" ;;
+    *) echo "workload must be point-uniform|point-zipf|range-uniform|range-zipf (got '$2')" >&2; exit 1 ;;
+  esac
+fi
+if [ $# -ge 3 ]; then
+  case "$3" in
+    off|on) SEQUENCE="$3" ;;
+    *) echo "offload must be off|on (got '$3')" >&2; exit 1 ;;
+  esac
+fi
+if [ $# -ge 4 ]; then
+  case "$4" in
+    0|1) LEAF_SET="$4" ;;
+    *) echo "leaf must be 0|1 (got '$4')" >&2; exit 1 ;;
+  esac
+fi
+
+# Op counts default to the DART comparison contract: 50M keys loaded, 30M
+# measured ops -- the same KEY_COUNT/OP_COUNT the committed DART baseline used
+# (DART/cache_sweep_baseline_*.csv records them per row). Override per run if a
+# scan cell is taking too long; throughput is a rate, so a shorter measured
+# phase is still valid, just noisier -- keep it identical across compared cells.
 case "${PROFILE:-}" in
   quick) : "${BULK:=10}"; : "${WARMUP:=2}"; : "${POINT_OP:=10}"; : "${RANGE_OP:=10}" ;;
-  final|"") : "${BULK:=50}"; : "${WARMUP:=10}"; : "${POINT_OP:=50}"; : "${RANGE_OP:=50}" ;;
+  final|"") : "${BULK:=50}"; : "${WARMUP:=10}"; : "${POINT_OP:=30}"; : "${RANGE_OP:=30}" ;;
   *) echo "unknown PROFILE=$PROFILE (use quick|final)" >&2; exit 1 ;;
 esac
 

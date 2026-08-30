@@ -29,6 +29,10 @@ COMMON_H="$CHIME_DIR/include/Common.h"   # holds kIndexCacheSize (cache-sweep kn
 MEM_IP="${MEM_IP:-10.30.1.8}"   # memory node  -> CHIME node 0 (MN); runs memcached
 CMP_IP="${CMP_IP:-10.30.1.6}"   # compute node -> CHIME node 1 (CN)
 MEMC_PORT="${MEMC_PORT:-11211}"
+# Pid file for the memcached this script manages. Per-user by default: a shared
+# /tmp/memcached.pid owned by root (from a sudo run) cannot be removed or its pid
+# killed by an ordinary user, and the failure used to pass unnoticed.
+MEMC_PID="${MEMC_PID:-/tmp/memcached-$(id -un).pid}"
 NODES="${NODES:-2}"             # total machines (1 MN + 1 CN)
 
 # --- workload knobs (MUST match on both machines) --------------------------
@@ -100,15 +104,83 @@ workload_args() {
 }
 needs_scan_range() { [[ "$WORKLOAD" == range-* ]]; }
 
+# Kill anything this user left running from a previous cell, on THIS node.
+#
+# A micro_test can outlive its cell: dsm->barrier() is a memcached spin with no
+# timeout, so if the peer crashes the survivor waits forever, holding its queue
+# pairs and its memcached registration. The next cell then registers behind it,
+# is handed the wrong node id, builds queue pairs against a process that is not
+# its peer, and dies with "transport retry counter exceeded" -- which reads as an
+# RDMA fault and is nothing of the sort. One stale process poisons every cell
+# after it, so clear the ground before each one.
+#
+# Safe to do unconditionally: run_one is sequential, so by the time it is called
+# the previous cell's process has already exited normally. Anything still alive
+# IS stale. Scoped to this uid so a co-tenant's run on a shared machine is never
+# touched. Set NO_KILL_STALE=1 to skip (e.g. if you are deliberately running a
+# second CHIME experiment side by side).
+kill_stale_local() {
+  local role="$1"
+  [[ -n "${NO_KILL_STALE:-}" ]] && return 0
+  local stale
+  stale="$(pgrep -u "$(id -u)" -f micro_test 2>/dev/null | tr '\n' ' ' || true)"
+  [[ -z "${stale// /}" ]] && return 0
+  echo ">> [$role] killing stale micro_test from a previous cell: $stale"
+  pkill -u "$(id -u)" -f micro_test 2>/dev/null || true
+  sleep 2
+  pkill -9 -u "$(id -u)" -f micro_test 2>/dev/null || true
+  sleep 1
+  stale="$(pgrep -u "$(id -u)" -f micro_test 2>/dev/null | tr '\n' ' ' || true)"
+  if [[ -n "${stale// /}" ]]; then
+    echo "ERROR: could not kill stale micro_test ($stale) -- another user's?" >&2
+    echo "       Clear it before continuing; leaving it running corrupts this cell." >&2
+    exit 1
+  fi
+}
+
 # start memcached locally on the memory node and reset the node counters
+#
+# EVERY failure here used to be silent -- the kill was `2>/dev/null || true`, the
+# start was unchecked, and the counter resets were `|| true`. If a memcached from
+# an earlier run (possibly owned by ANOTHER USER, e.g. one started under sudo) was
+# still bound to the port, the kill no-opped, the restart failed, and the whole
+# sweep then ran against a stale instance carrying leftover serverNum / barrier
+# keys. That hands out wrong node ids, so the two nodes build mismatched QPs and
+# the run dies with "transport retry counter exceeded" -- a failure that looks
+# like an RDMA problem and is nothing of the sort. Fail loudly instead.
 start_memcached_local() {
-  echo ">> [memory] (re)starting memcached on ${MEM_IP}:${MEMC_PORT}"
-  [[ -f /tmp/memcached.pid ]] && xargs kill < /tmp/memcached.pid 2>/dev/null || true
+  echo ">> [memory] (re)starting memcached on ${MEM_IP}:${MEMC_PORT} (pidfile $MEMC_PID)"
+  [[ -f "$MEMC_PID" ]] && xargs kill < "$MEMC_PID" 2>/dev/null || true
   sleep 1
-  memcached -u root -l "$MEM_IP" -p "$MEMC_PORT" -c 10000 -d -P /tmp/memcached.pid
+
+  # -u is only usable (and only needed) when we are root; as an ordinary user
+  # `-u root` makes memcached refuse to start.
+  local as_user=()
+  [[ "$(id -u)" == "0" ]] && as_user=(-u root)
+
+  if ! memcached "${as_user[@]}" -l "$MEM_IP" -p "$MEMC_PORT" -c 10000 -d -P "$MEMC_PID"; then
+    echo "ERROR: memcached failed to start on ${MEM_IP}:${MEMC_PORT}." >&2
+    echo "       Usually something is already bound there. Check with:" >&2
+    echo "         ss -lntp | grep ${MEMC_PORT}" >&2
+    echo "       If it belongs to another user, either kill it with sudo or run" >&2
+    echo "       this sweep on a port of your own, on BOTH nodes:" >&2
+    echo "         MEMC_PORT=11311 MEMC_PID=\$HOME/memcached.pid $0 <role>" >&2
+    exit 1
+  fi
   sleep 1
+
+  # Prove the instance answering us is the one we just started with FRESH state:
+  # set the counters, read one back, and refuse to proceed if it does not stick.
   printf 'set serverNum 0 0 1\r\n0\r\nquit\r\n' | nc "$MEM_IP" "$MEMC_PORT" >/dev/null || true
   printf 'set clientNum 0 0 1\r\n0\r\nquit\r\n' | nc "$MEM_IP" "$MEMC_PORT" >/dev/null || true
+  local check
+  check="$( { printf 'get serverNum\r\nquit\r\n' | nc "$MEM_IP" "$MEMC_PORT" | tr -d '\r'; } 2>/dev/null || true)"
+  if ! echo "$check" | grep -q '^0$'; then
+    echo "ERROR: memcached at ${MEM_IP}:${MEMC_PORT} did not accept the counter reset." >&2
+    echo "       It is probably a STALE instance from an earlier run (see above)." >&2
+    echo "       Got: $(echo "$check" | tr '\n' ' ')" >&2
+    exit 1
+  fi
 }
 
 mode_to_rate() { case "$1" in on) echo 100 ;; off) echo 0 ;; *) echo "$1" ;; esac; }
@@ -122,6 +194,8 @@ run_one() {
 
   # keep the on-disk memcached.conf in sync so the binary dials the right host
   printf '%s\n%s\n' "$MEM_IP" "$MEMC_PORT" > "$CHIME_DIR/memcached.conf"
+
+  kill_stale_local "$role"         # clear survivors of a previous cell FIRST
 
   if [[ "$role" == "memory" ]]; then
     start_memcached_local          # fresh node-id counters for THIS round
