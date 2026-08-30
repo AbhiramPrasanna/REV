@@ -115,6 +115,19 @@ else
 fi
 echo "=============================================================="
 
+# Restart memcached and zero the counters -- memory node only; the compute node
+# has no business restarting the coordination service the other node owns.
+# Non-fatal: the next cell restarts it again anyway and aborts loudly if it
+# cannot, so a hiccup here should not end the study.
+restart_memc_if_memory() {
+  [[ "$ROLE" == "memory" ]] || return 0
+  if bash "$CHIME_DIR/script/restartMemc.sh" >/dev/null 2>&1; then
+    echo ">>> memcached restarted + counters zeroed ($1)"
+  else
+    echo ">>> warning: memcached restart failed ($1) -- the next cell will retry" >&2
+  fi
+}
+
 n=0; ran=0; skipped=0; failed=0
 FAILED_LIST=""
 STARTED=$(date +%s)
@@ -152,9 +165,23 @@ for cache in "${CACHES[@]}"; do
     else
       ran=$(( ran + 1 ))
     fi
+
     sleep "$SETTLE"
+    # Leave memcached clean AFTER every cell too, not only before the next one.
+    # A cell that died leaves serverNum and barrier keys behind, and the next
+    # cell's own restart is the only thing that clears them -- which is no help
+    # if you stop here, or inspect state in between.
+    #
+    # Deliberately after the settle sleep, never before: both nodes must clear
+    # dsm->barrier("fin") before either exits, and wiping memcached while the
+    # peer is still polling that barrier would strand it forever. SETTLE seconds
+    # is the peer's margin to finish exiting.
+    restart_memc_if_memory "after cell $n"
   done <<< "$CELLS"
 done
+
+# Leave the machine in a clean state whether we finished or bailed out.
+restart_memc_if_memory "end of study"
 
 echo
 echo "=============================================================="
