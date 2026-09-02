@@ -73,9 +73,16 @@
 //   hit, so the cache is correct under arbitrary concurrent writers from any node
 //   -- no read-only assumption, no configuration that can silently produce wrong
 //   numbers. What it buys: a point lookup still costs one round trip, but a
-//   16-byte one instead of a segment; a range scan validates all its covered
-//   leaves instead of reading each one in full. So expect a LARGE win on scans and
-//   a modest one on point lookups.
+//   16-byte one instead of a segment.
+//
+//   MEASURED (sweep_leafstudy): point-zipf +40%, point-uniform +13%, and range
+//   scans -15% to -44%. The scan regression was structural: serving each covered
+//   leaf on its own kept the stock path's ROUND-TRIP COUNT (one per leaf) and only
+//   shrank the bytes, while adding a ~480 B insert per miss. Tree::range_query now
+//   BATCHES -- one doorbell of probes for every resident leaf, one of
+//   seqlock-bracketed reads for the rest, so a 12-leaf scan costs 2 round trips
+//   instead of 12 -- and admission (below) stops single-use scan leaves paying for
+//   an insert. See results/RANGE_SCANS.md.
 //
 // STRUCTURE
 //   Fixed-capacity, set-associative (8-way), LFU-with-aging replacement. Capacity
@@ -111,6 +118,54 @@ inline bool enabled() {
     return e && atoi(e) != 0;
   }();
   return v;
+}
+
+// ---- admission ------------------------------------------------------------
+// Fraction of eligible fills that are actually inserted, per path. DEX has the
+// same knob (`ADMIT`, cold_to_hot_with_admission / ..._for_scan): with
+// probability 1-rate it reads the page, hands it to the application, and does
+// NOT cache it.
+//
+// It exists because a range scan STREAMS: it touches a dozen leaves it will
+// never look at again, and inserting each one costs a ~480-byte LeafCacheEntry
+// allocation plus a memcpy plus LFU bookkeeping -- pure loss, and measured at
+// -41% on range-uniform. A point lookup is the opposite: its fills are exactly
+// what produced the +40% on point-zipf.
+//
+// Hence SEPARATE rates for the two paths, so throttling scans cannot damage the
+// thing that works.
+//
+// BOTH DEFAULT TO 1.0 = admit everything = the behaviour measured so far, on
+// purpose: the batched-probe change lands at the same time, and two knobs moving
+// at once cannot be attributed. Measure batching alone first, then sweep
+// CHIME_LEAF_ADMIT_SCAN (0.1 is DEX's value).
+inline double admit_point_rate() {
+  static const double v = [] {
+    const char *e = getenv("CHIME_LEAF_ADMIT_POINT");
+    double d = e ? atof(e) : 1.0;
+    return d < 0.0 ? 0.0 : (d > 1.0 ? 1.0 : d);
+  }();
+  return v;
+}
+
+inline double admit_scan_rate() {
+  static const double v = [] {
+    const char *e = getenv("CHIME_LEAF_ADMIT_SCAN");
+    double d = e ? atof(e) : 1.0;
+    return d < 0.0 ? 0.0 : (d > 1.0 ? 1.0 : d);
+  }();
+  return v;
+}
+
+// Deterministic per-thread counter rather than an RNG: a rate of r admits ~r of
+// every 100 candidates on each thread, and the run is reproducible. (Same idiom
+// as should_offload() in Tree.cpp; DEX uses a real mt19937, which makes its
+// results depend on thread scheduling.)
+inline bool admit(double rate) {
+  if (rate >= 1.0) return true;
+  if (rate <= 0.0) return false;
+  static thread_local uint32_t ctr = 0;
+  return (ctr++ % 100u) < (uint32_t)(rate * 100.0);
 }
 
 // Keep SPECULATIVE_READ's hotspot buffer alive alongside the leaf cache?
@@ -164,7 +219,7 @@ public:
   // the leaf itself).
   void invalidate(const GlobalAddress &leaf_addr);
 
-  void statistics(uint64_t hit, uint64_t miss, uint64_t stale) const;
+  void statistics(uint64_t hit, uint64_t miss, uint64_t stale, uint64_t fill) const;
 
   uint64_t capacity_entries() const { return (uint64_t)nsets * kWays; }
   uint64_t budget_bytes() const { return capacity_entries() * sizeof(LeafCacheEntry); }
@@ -303,7 +358,7 @@ inline void LeafCache::retire(LeafCacheEntry *e) {
 }
 
 
-inline void LeafCache::statistics(uint64_t hit, uint64_t miss, uint64_t stale) const {
+inline void LeafCache::statistics(uint64_t hit, uint64_t miss, uint64_t stale, uint64_t fill) const {
   uint64_t resident = 0;
   for (uint64_t i = 0; i < nsets * kWays; ++i) if (table[i]) ++resident;
   uint64_t total = hit + miss;
@@ -313,10 +368,14 @@ inline void LeafCache::statistics(uint64_t hit, uint64_t miss, uint64_t stale) c
          capacity_entries() ? 100.0 * resident / capacity_entries() : 0.0,
          (double)resident * sizeof(LeafCacheEntry) / define::MB);
   // Machine-readable line: the sweep scripts grep this into the summary CSV.
-  printf("[LEAFCACHE] hit=%lu miss=%lu stale=%lu hit_pct=%.3f resident=%lu"
-         " capacity=%lu budget_mb=%d\n",
+  // `fill` against `miss` is the admission ratio actually achieved -- with
+  // CHIME_LEAF_ADMIT_SCAN < 1 a scan miss serves the application WITHOUT
+  // inserting, so fill < miss and the ~480 B per-insert cost disappears.
+  printf("[LEAFCACHE] hit=%lu miss=%lu stale=%lu fill=%lu hit_pct=%.3f"
+         " admit_pct=%.3f resident=%lu capacity=%lu budget_mb=%d\n",
          (unsigned long)hit, (unsigned long)miss, (unsigned long)stale,
-         total ? 100.0 * hit / total : 0.0, (unsigned long)resident,
+         (unsigned long)fill, total ? 100.0 * hit / total : 0.0,
+         miss ? 100.0 * fill / miss : 0.0, (unsigned long)resident,
          (unsigned long)capacity_entries(), cache_size_mb);
 }
 

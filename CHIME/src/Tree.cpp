@@ -2243,7 +2243,10 @@ bool Tree::leaf_node_search(const GlobalAddress& node_addr, const GlobalAddress&
     uint64_t stamp = 0;
     bool cacheable = false;
     if (leaf_read_full(node_addr, raw_leaf_buffer, leaf_buffer, stamp, cacheable, sink)) {
-      if (cacheable) {
+      // Point-path admission is a SEPARATE rate from the scan path's, and
+      // defaults to 1.0. These fills are what produced the +40% on point-zipf,
+      // so throttling scans must not touch them.
+      if (cacheable && leafcache::admit(leafcache::admit_point_rate())) {
         leaf_cache->put(node_addr, leaf, stamp);
         leaf_cache_fill[tid] ++;
       }
@@ -2490,48 +2493,178 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
   // per-key fallback for a persistently inconsistent leaf instead of a storm.
   if (!use_legacy_batched) {
     auto range_buffer = (dsm->get_rbuf(nullptr)).get_range_buffer();
+
+#ifdef CACHE_LEAF_NODE
+    // ================= BATCHED COVERED-LEAF PATH ==========================
+    // The first cut of this served each covered leaf on its own: one guard probe
+    // per resident leaf, one seqlock-bracketed read per missing leaf. That kept
+    // the ROUND-TRIP COUNT of the stock path (one per leaf) and only shrank the
+    // bytes -- so it measured -41% on range-uniform and -15% on range-zipf,
+    // losing even at a 59% hit rate. Round trips are the cost here, not bytes.
+    //
+    // The whole covered set is known before any I/O (`leaf_addrs` is complete),
+    // so the trips can collapse into two doorbells regardless of leaf count:
+    //   phase 1: ONE batch of [lock,stamp] probes for every resident leaf
+    //   phase 2: ONE batch of seqlock-bracketed reads for every leaf that was
+    //            not resident or whose probe failed
+    // A 12-leaf scan goes from 12 round trips to 2.
+    //
+    // RISK, stated because it has bitten this file before: the comment ABOVE
+    // blames "one doorbell list with an entry per leaf-segment (dozens)" for a
+    // historical completion-status storm. This reintroduces multi-WR doorbells on
+    // the range path. Mitigations: chunked at kLeafBatch so a doorbell is at most
+    // 3*32 = 96 work requests against a 4096-deep send queue (the legacy path
+    // posted more, unchunked); every read is still version-decoded before it is
+    // trusted; and any leaf that will not decode falls back to the per-leaf path
+    // and then to per-key search, so a bad leaf can never become a retry storm.
+    if (leaf_cache) {
+      const int tid = dsm->getMyThreadID();
+      static const int kLeafBatch = 32;
+
+      thread_local std::vector<GlobalAddress> probe_addr, fetch_addr;
+      thread_local std::vector<const LeafCacheEntry *> probe_ce;
+      thread_local std::vector<RdmaOpRegion> brs;
+      probe_addr.clear(); fetch_addr.clear(); probe_ce.clear();
+
+      auto clip_lo = [&](const GlobalAddress& a) {
+        const auto& f = leaf_fences[a]; return (f.lowest < from) ? from : f.lowest;
+      };
+      auto clip_hi = [&](const GlobalAddress& a) {
+        const auto& f = leaf_fences[a]; return (f.highest < to) ? f.highest : to;
+      };
+
+      // ---- phase 0: split the covered set into resident / not-resident ----
+      // NOTE: the LeafCacheEntry* is held across the batched read below, a longer
+      // window than the per-leaf version had. It stays safe for the same reason:
+      // entries are immutable once published and are only freed through the
+      // deferred-free queue after safely_free_epoch further retirements. The
+      // stamp is captured with the pointer, so even a concurrent refill of the
+      // same leaf just means we validate the older image and demote it.
+      for (const auto& a : leaf_addrs) {
+        const LeafCacheEntry *ce = leaf_cache->get(a);
+        if (ce) { probe_addr.push_back(a); probe_ce.push_back(ce); }
+        else      fetch_addr.push_back(a);
+      }
+
+      // ---- phase 1: one doorbell per chunk of guard probes ----------------
+      for (size_t base = 0; base < probe_addr.size(); base += kLeafBatch) {
+        const size_t n = std::min((size_t)kLeafBatch, probe_addr.size() - base);
+        char *gbuf = range_buffer;
+        assert((dsm->get_rbuf(nullptr)).is_safe(gbuf + n * define::leafGuardSize));
+        brs.clear(); brs.resize(n);
+        for (size_t i = 0; i < n; ++ i) {
+          brs[i].source = (uint64_t)(gbuf + i * define::leafGuardSize);
+          brs[i].dest   = (probe_addr[base + i] + define::leafLockOffset).to_uint64();
+          brs[i].size   = define::leafGuardSize;
+          brs[i].is_on_chip = false;
+        }
+        dsm->read_batch_sync(&brs[0], (int)n, nullptr);      // ONE round trip
+        for (size_t i = 0; i < n; ++ i) {
+          uint64_t lock_word, cur_stamp;
+          decode_leaf_guard(gbuf + i * define::leafGuardSize, lock_word, cur_stamp);
+          const auto& a = probe_addr[base + i];
+          if (leaf_guard_unlocked(lock_word) && cur_stamp == probe_ce[base + i]->stamp) {
+            leaf_cache_hit[tid] ++;
+            leaf_harvest_range(&probe_ce[base + i]->leaf, clip_lo(a), clip_hi(a), ret);
+          } else {
+            leaf_cache_stale[tid] ++;
+            leaf_cache->invalidate(a);
+            fetch_addr.push_back(a);      // demote into the fetch batch below
+          }
+        }
+      }
+
+      // ---- phase 2: one doorbell per chunk of full-leaf reads -------------
+      // Each leaf contributes the same 3 work requests leaf_read_full posts --
+      // [lock,stamp] / leaf bytes / [lock,stamp] -- and RC keeps a queue pair's
+      // requests in order, so the seqlock bracket still holds per leaf even with
+      // several leaves interleaved in one doorbell.
+      for (size_t base = 0; base < fetch_addr.size(); base += kLeafBatch) {
+        const size_t n = std::min((size_t)kLeafBatch, fetch_addr.size() - base);
+        leaf_cache_miss[tid] += n;
+        char *gbuf = range_buffer;                                  // 2n guards
+        char *raws = range_buffer + 2 * n * define::leafGuardSize;   // n raw leaves
+        assert((dsm->get_rbuf(nullptr)).is_safe(raws + n * define::allocationLeafSize));
+        brs.clear(); brs.resize(3 * n);
+        for (size_t i = 0; i < n; ++ i) {
+          const auto guard_at = [&](size_t slot) { return (uint64_t)(gbuf + slot * define::leafGuardSize); };
+          brs[3*i + 0].source = guard_at(2*i);
+          brs[3*i + 0].dest   = (fetch_addr[base + i] + define::leafLockOffset).to_uint64();
+          brs[3*i + 0].size   = define::leafGuardSize;
+          brs[3*i + 0].is_on_chip = false;
+
+          brs[3*i + 1].source = (uint64_t)(raws + i * define::allocationLeafSize);
+          brs[3*i + 1].dest   = fetch_addr[base + i].to_uint64();
+          brs[3*i + 1].size   = define::transLeafSize;
+          brs[3*i + 1].is_on_chip = false;
+
+          brs[3*i + 2].source = guard_at(2*i + 1);
+          brs[3*i + 2].dest   = (fetch_addr[base + i] + define::leafLockOffset).to_uint64();
+          brs[3*i + 2].size   = define::leafGuardSize;
+          brs[3*i + 2].is_on_chip = false;
+        }
+        dsm->read_batch_sync(&brs[0], (int)(3 * n), nullptr);   // ONE round trip
+
+        for (size_t i = 0; i < n; ++ i) {
+          const auto& a = fetch_addr[base + i];
+          char *raw = raws + i * define::allocationLeafSize;
+          auto leaf_buffer = (dsm->get_rbuf(nullptr)).get_leaf_buffer();
+          auto leaf = (LeafNode *)leaf_buffer;
+          bool ok;
+#ifdef METADATA_REPLICATION
+          auto inter = (dsm->get_rbuf(nullptr)).get_leaf_buffer();
+          ok = LeafVersionManager::decode_node_versions(raw, inter);
+          if (ok) MetadataManager::decode_node_metadata(inter, leaf_buffer);
+#else
+          ok = VersionManager<LeafNode, LeafEntry>::decode_node_versions(raw, leaf_buffer);
+#endif
+          if (!ok) {
+            // Torn read (a concurrent writer). Retry THIS leaf on the per-leaf
+            // path, and if that will not decode either, per-key search. Never a
+            // re-issue of the whole batch -- that is the storm this file warns of.
+            read_leaf_retry[tid] ++;
+            uint64_t s2 = 0; bool c2 = false;
+            if (leaf_read_full(a, raw, leaf_buffer, s2, c2, nullptr)) {
+              if (c2 && leafcache::admit(leafcache::admit_scan_rate())) {
+                leaf_cache->put(a, leaf, s2);
+                leaf_cache_fill[tid] ++;
+              }
+              leaf_harvest_range(leaf, clip_lo(a), clip_hi(a), ret);
+            } else {
+              for (Key k = clip_lo(a); k < clip_hi(a); k = k + 1) {
+                cache_miss[tid] ++;
+                search(k, ret[k]);
+              }
+            }
+            continue;
+          }
+
+          uint64_t lock_pre, stamp_pre, lock_post, stamp_post;
+          decode_leaf_guard(gbuf + (2*i) * define::leafGuardSize, lock_pre, stamp_pre);
+          decode_leaf_guard(gbuf + (2*i + 1) * define::leafGuardSize, lock_post, stamp_post);
+          const bool cacheable = leaf_guard_unlocked(lock_pre) &&
+                                 leaf_guard_unlocked(lock_post) &&
+                                 stamp_pre == stamp_post;
+          // ADMISSION. A scan streams through leaves it never revisits, and each
+          // insert costs a ~480 B entry allocation + memcpy + LFU bookkeeping.
+          // Default rate is 1.0 (admit everything = previous behaviour); lower
+          // CHIME_LEAF_ADMIT_SCAN to stop paying for single-use leaves.
+          if (cacheable && leafcache::admit(leafcache::admit_scan_rate())) {
+            leaf_cache->put(a, leaf, stamp_pre);
+            leaf_cache_fill[tid] ++;
+          }
+          leaf_harvest_range(leaf, clip_lo(a), clip_hi(a), ret);
+        }
+      }
+      return true;
+    }
+#endif
+
     for (const auto& leaf_addr : leaf_addrs) {
       const auto& fence = leaf_fences[leaf_addr];
       const Key l_k = (fence.lowest < from) ? from : fence.lowest;   // clip to [from, to)
       const Key r_k = (fence.highest < to) ? fence.highest : to;
       bool done = false;
-
-#ifdef CACHE_LEAF_NODE
-      // Scans are where a leaf cache pays most. Stock CHIME serves a covered leaf
-      // with its own read_sync, so a 100-key scan over 16-entry leaves costs a
-      // dozen-plus SERIAL round trips; each one this cache answers disappears
-      // entirely (static) or shrinks to a 16-byte probe (validated).
-      if (leaf_cache) {
-        const int tid = dsm->getMyThreadID();
-        const LeafCacheEntry *ce = leaf_cache->get(leaf_addr);
-        if (ce) {
-          const uint64_t cached_stamp = ce->stamp;
-          if (leaf_cache_validate(leaf_addr, cached_stamp, nullptr)) {
-            leaf_cache_hit[tid] ++;
-            leaf_harvest_range(&ce->leaf, l_k, r_k, ret);
-            continue;                      // next covered leaf; no data read at all
-          }
-          leaf_cache_stale[tid] ++;
-          leaf_cache->invalidate(leaf_addr);
-        }
-        leaf_cache_miss[tid] ++;
-        // Miss: the seqlock-bracketed whole-leaf read both serves this scan and
-        // populates the cache, in the same single round trip the stock path used.
-        auto leaf_buffer = (dsm->get_rbuf(nullptr)).get_leaf_buffer();
-        auto leaf = (LeafNode *)leaf_buffer;
-        uint64_t stamp = 0;
-        bool cacheable = false;
-        if (leaf_read_full(leaf_addr, range_buffer, leaf_buffer, stamp, cacheable, nullptr)) {
-          if (cacheable) {
-            leaf_cache->put(leaf_addr, leaf, stamp);
-            leaf_cache_fill[tid] ++;
-          }
-          leaf_harvest_range(leaf, l_k, r_k, ret);
-          continue;
-        }
-        // Undecodable after several attempts -> fall through to the stock loop.
-      }
-#endif
 
       for (int attempt = 0; attempt < 8 && !done; ++ attempt) {
         dsm->read_sync(range_buffer, leaf_addr, define::allocationLeafSize, nullptr);
@@ -2969,11 +3102,12 @@ void Tree::statistics() {
 void Tree::leaf_cache_statistics() {
 #ifdef CACHE_LEAF_NODE
   if (leaf_cache) {
-    uint64_t hit = 0, miss = 0, stale = 0;
+    uint64_t hit = 0, miss = 0, stale = 0, fill = 0;
     for (int i = 0; i < MAX_APP_THREAD; ++ i) {
-      hit += leaf_cache_hit[i]; miss += leaf_cache_miss[i]; stale += leaf_cache_stale[i];
+      hit += leaf_cache_hit[i]; miss += leaf_cache_miss[i];
+      stale += leaf_cache_stale[i]; fill += leaf_cache_fill[i];
     }
-    leaf_cache->statistics(hit, miss, stale);
+    leaf_cache->statistics(hit, miss, stale, fill);
   } else if (leafcache::enabled()) {
     printf("[LEAFCACHE] hit=0 miss=0 stale=0 hit_pct=0.000 resident=0 capacity=0"
            " budget_mb=0   (enabled but budget is 0 MB)\n");

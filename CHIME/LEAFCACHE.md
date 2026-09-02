@@ -337,29 +337,42 @@ by the scripts:
 
 ---
 
-## 5. What to expect, and how to read it
+## 5. What it actually does — MEASURED
 
-**Read the hit-rate row of the plot first.** A leaf is only worth caching when its
-keys are re-read, and this benchmark maps every workload key through
-`CityHash64`, so a Zipf *rank* becomes a pseudorandom *key*. Hot keys are therefore
-scattered across millions of leaves, and each cached leaf earns its ~1 KB mostly
-for a single hot key.
+Full data: **[results/LEAF_CACHE_RESULTS.md](results/LEAF_CACHE_RESULTS.md)**
+(sweep `leafstudy`, 64 cells, 50 M keys, 16 B values, 34 threads/node).
 
-- **uniform**: ~3 M leaves at 50 M keys; a 128 MB leaf cache holds ~130 K of them,
-  so the hit rate is a few percent at best. Expect **no win, possibly a loss** —
-  the halved inner-node cache costs something and the leaf cache returns nothing.
-  That is a result, not a bug: it is the honest statement that leaf caching is a
-  *skew* optimisation, and it is exactly why the split has to be charged for.
-- **zipf-0.99**: cumulative Zipf mass over the hottest `R` of `N` ranks goes roughly
-  as `ln R / ln N`, so ~130 K resident leaves ≈ **60–70% hit rate**. This is where
-  a win can exist.
-- **point**: modest at best. The round trip is still there, it just got small.
-- **range**: the largest win, because one 16-byte probe replaces a whole serial
-  leaf read, a dozen-plus times per scan.
-- **big totals help the leaf arm**: at 64 MB the inner cache is halved to 32 MB,
-  well under the ~55 MB index, so the leaf arm pays for extra descent misses. At
-  512–1024 MB both halves are comfortable and the leaf cache is close to free.
-  If there is a crossover, expect it in the middle of the range.
+| workload | best case | outcome |
+|---|---|---|
+| **point / zipf-0.99** | 512–256 MB, 64–70% hit | **+40%** (2.86 → 4.00 Mops), p99 21 → 17 µs |
+| point / uniform | 512 MB, 12% hit | +13% |
+| **range / uniform** | 512 MB, 12% hit | **−41%** |
+| **range / zipf-0.99** | 512 MB, 59% hit | **−15%** |
+
+**Leaf caching is a point-lookup optimisation and a scan regression.** The scan
+result is structural, not tuning — the validated design removes bytes from the
+scan path but not round trips, and adds a per-miss fill cost. It loses even at a
+59% hit rate. Mechanism and the fix (batch the probes, add an admission policy):
+**[results/RANGE_SCANS.md](results/RANGE_SCANS.md)**. Until that lands, run range
+workloads with `CACHE_LEAF=0`.
+
+An earlier draft of this section predicted scans would be the *largest* win. That
+was wrong, for the reason above.
+
+Two further things the sweep established:
+
+- **The split has to be paid for.** At 128 MB total the leaf arm's inner cache is
+  64 MB, below the index working set, and the descent thrashes: point-uniform
+  2.31 → 0.62, point-zipf 2.86 → 1.11. The baseline's 128 MB inner cache still
+  fits. The leaf arm crosses out of "index fits" one cache point earlier.
+- **Offload rescues exactly that.** point-zipf at 128 MB: 1.11 with offload off,
+  **3.16** with it on; same at 64 MB. Offload serves the index misses that
+  halving the inner cache created, which is the composition the design intended.
+
+Why skew matters so much: the benchmark maps every workload key through
+`CityHash64`, so a Zipf *rank* becomes a pseudorandom *key* and hot keys scatter
+across ~4.5 M leaves. Under uniform a 256 MB leaf cache covers ~12% of them;
+under Zipf the same cache captures the hot set (~64–70%).
 
 Two sanity checks before believing any of it:
 

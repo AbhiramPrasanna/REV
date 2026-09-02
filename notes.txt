@@ -1,0 +1,146 @@
+The setup
+CHIME stores leaves with a version byte in every cacheline. With cachelineSize = 64 and versionSize = 1, each 64-byte line is 63 bytes of payload plus 1 version byte:
+
+
+leaf at 0x1000, all consistent at version 7
+
+  line0            line1            line2            line3
+[ data.....|v=7 ][ data.....|v=7 ][ data.....|v=7 ][ data.....|v=7 ]
+   63B     1B       63B     1B       63B     1B       63B     1B
+
+logical contents: keys {10, 20, 30, 40}
+All four version bytes agreeing is the signal that these 252 payload bytes were written by the same update.
+
+The race
+Compute node A inserts key 25. It issues one RDMA WRITE of the updated leaf at version 8. An RDMA WRITE is not atomic across cachelines; it lands in pieces.
+Compute node B looks up key 40, misses its cache at level 2, and sends a pushdown RPC to the memory node.
+
+t0   [ ...|v=7 ][ ...|v=7 ][ ...|v=7 ][ ...|v=7 ]   keys {10,20,30,40}
+t1   A's WRITE lands on line0 only:
+     [ NEW|v=8 ][ ...|v=7 ][ ...|v=7 ][ ...|v=7 ]   ← half old, half new
+t2   memory node wakes up to serve B's request
+t3   A's WRITE completes:
+     [ NEW|v=8 ][ NEW|v=8 ][ NEW|v=8 ][ NEW|v=8 ]   keys {10,20,25,30,40}
+At t2 the leaf in memory is a mixture of two generations. The memory node was never told any of this happened. There is no lock, no message, no interrupt. A is writing straight through the NIC.
+
+What a cast would do (DEX-style)
+
+leaf = (LeafNode *)(dsm_base + 0x1000);   // point at it and search
+The memory node now searches a record array whose first 63 bytes came from the post-insert layout and whose remaining 189 bytes came from the pre-insert layout. Key 25 may appear while the entry count still says 4. A slot may hold half of an old key and half of a new one. Key 40 may have shifted position during the insert and be missed entirely.
+
+The reply is wrong, and nothing flags it. No crash, no retry, no error. The compute node gets a confident wrong answer.
+
+What REV does
+read_leaf_local(), at t2:
+
+
+memcpy(s.raw, dsm_base + 0x1000, transLeafSize);   // 1
+LeafVersionManager::decode_node_versions(s.raw, s.inter);  // 2 -> false
+1. Snapshot. Copy all four lines into private scratch. The snapshot is itself torn: it captured v = 8,7,7,7. That's expected and fine.
+
+2. Validate the snapshot. The decoder pulls the version byte out of each line and compares. 8 ≠ 7 → returns false, meaning "a writer caught me."
+
+3. Retry. The caller spins:
+
+
+for (int spin = 0; !read_leaf_local(dsm_base, addr, s, leaf); ++spin)
+    if (spin > (1 << 22)) break;
+4. Second attempt, at t3. Snapshot again. Versions are 8,8,8,8. The decoder strips the version bytes and concatenates the four 63-byte payloads into s.inter.
+
+5. Un-scatter. MetadataManager::decode_node_metadata(s.inter, s.dec) reassembles the metadata (fence keys, sibling pointer, level), which METADATA_REPLICATION keeps in scattered groups rather than one header.
+
+6. s.dec is now a real LeafNode. Search it, find key 40, reply.
+
+Why the memcpy is the load-bearing line
+You cannot decode in place. If you compared version bytes directly in DSM, A could land another line between the comparison and the read, and you'd validate bytes you didn't end up using.
+
+Snapshot first, then check whether the snapshot is internally consistent. If it is, everything in it came from one writer's generation.
+
+Where "portable" comes in
+range_scan and lookup_from are identical in both ports. Only the decode call differs:
+
+decode step
+DEX	(LeafNode*)(dsm_base + offset)
+CHIME	memcpy → version check → un-scatter → retry on mismatch
+Same engine, different decoder. That's the portability claim, and it's also why the CHIME port cost far more to write than the DEX one.
+
+Abstract
+
+RDMA has made disaggregated memory practical for ordered indexes, and nearly all designs accelerate them in the same way, by caching part of the index on the compute node while the memory node stays idle because its CPU is scarce. However, relying on caching alone introduces a fundamental limitation. A cache changes how often an operation crosses the network but never what a crossing costs, so a miss still pays a full remote descent. Range scans suffer most, because every leaf a scan reads is a separate round trip. Where index work is pushed down to the memory node at all, it covers only point lookups and is written for one tree's memory layout.
+
+In this work, we revisit the role of memory node CPU in disaggregated memory indexing. We present REV, which addresses the conventional limitation of pushdown, namely the scarcity of memory node CPU, with three techniques: (1) execution gated on cache misses, so the memory node never repeats work the compute node could have done in one read, (2) batched leaf traversal, which returns an entire run of leaves in a single reply, and (3) decoding nodes in the index's own format, so the memory node can read leaves that were encoded for safe one-sided access rather than assuming a plain struct. REV demonstrates that memory node CPU, spent only after caching has failed, can remove the remote cost that caching cannot. Our study across DEX, CHIME, and DART shows that the benefit of pushdown is predictable from the round trips remaining after the cache runs out, that it is largest on range scans, and that it trades tail predictability for throughput.
+
+
+
+Abstract
+
+RDMA has made disaggregated memory practical for ordered indexes, and nearly all designs accelerate them in the same way, by caching part of the index on the compute node while the memory node stays idle because its CPU is scarce. However, relying on caching alone introduces a fundamental limitation. A cache changes how often an operation crosses the network but never what a crossing costs, so a miss still pays a full remote descent. Range scans suffer most, because every leaf a scan reads is a separate round trip. Where index work is pushed down to the memory node at all, it covers only point lookups and is written for one tree's memory layout.
+
+In this work, we revisit the role of memory node CPU in disaggregated memory indexing. We present LIFELINE, which addresses the conventional limitation of pushdown, namely the scarcity of memory node CPU, with three techniques: (1) execution gated on cache misses, so the memory node never repeats work the compute node could have done in one read, (2) batched leaf traversal, which returns an entire run of leaves in a single reply, and (3) decoding nodes in the index's own format, so the memory node can read leaves that were encoded for safe one-sided access rather than assuming a plain struct. LIFELINE demonstrates that memory node CPU, spent only after caching has failed, can remove the remote cost that caching cannot. Our study across DEX, CHIME, and DART shows that the benefit of pushdown is predictable from the round trips remaining after the cache runs out, that it is largest on range scans, and that it trades tail predictability for throughput.
+
+The name fits the mechanism well, incidentally: a lifeline is thrown only when someone is already in trouble, which is exactly what miss-gating does.
+
+Only one place in the paper carries the old name, dex_vs_dart.tex:66 in the title. The three other REV hits are just absolute paths in \graphicspath pointing at your repo directory, so those stay. Want me to update the title and drop this abstract in?
+
+
+
+================================================================================
+LEAF CACHE — RANGE SCANS GET SLOWER, AND WHY            (added 2026-08-31)
+Full results: CHIME/results/LEAF_CACHE_RESULTS.md
+Full analysis: CHIME/results/RANGE_SCANS.md
+================================================================================
+
+Measured (sweep leafstudy, 50M keys, 16B values, 34 thr/node, compute-node Mops):
+
+  workload        cache   leaf hit   baseline   +leaf cache   delta
+  point-zipf      512MB     69.9%      2.857       3.999      +40%   <- the win
+  point-zipf      256MB     63.5%      2.857       3.999      +40%
+  point-uniform   512MB     12.3%      2.307       2.608      +13%
+  range-uniform   512MB     12.2%      0.496       0.293      -41%   <- the loss
+  range-uniform   256MB      6.1%      0.496       0.279      -44%
+  range-zipf      512MB     59.0%      0.496       0.423      -15%
+  range-zipf      256MB     52.0%      0.500       0.408      -18%
+
+It loses on scans EVEN AT A 59% HIT RATE, so it is not "cache too small".
+
+WHY. The prediction was that caching leaves collapses the dozen-plus serial
+per-leaf reads a 100-key scan does. Only half of that is right. Per covered leaf,
+in Tree::range_query:
+
+    baseline        1 round trip, ~1 KB read, decode
+    leaf HIT        1 round trip, ~24 B [lock,stamp] probe, local scan
+    leaf MISS       1 round trip (3-WR batch), decode, + ~480 B LeafCacheEntry
+                    alloc/memcpy + LFU bookkeeping + deferred-free push
+
+leaf_cache_validate() is issued PER COVERED LEAF. So the ROUND TRIP COUNT IS
+UNCHANGED. The cache only shrinks the bytes on a hit and adds fill cost on a
+miss. Round trips are the cost on this fabric, not bytes. Under uniform 88-94% of
+covered leaves are misses, so the fill overhead dominates outright.
+
+WHY POINT LOOKUPS WIN ANYWAY (hypothesis, needs confirming from the logs):
+the point BASELINE's per-leaf cost is variable and often > 1 round trip --
+speculative read can mis-guess and fall back to a full hopscotch search,
+read_leaf_retry on version mismatch, read_two_segments when the hop window wraps.
+A leaf-cache hit replaces all of that with exactly one small probe. The range
+baseline is already exactly 1 round trip per leaf, so there is nothing to remove.
+Confirm by comparing try_speculative_read vs correct_speculative_read,
+read_leaf_retry, read_two_segments across the arms.
+
+THE FIX (not implemented):
+  1. Batch the probes. range_query knows ALL covered leaves up front (leaf_addrs
+     is fully built before the read loop), so issue one doorbell batch of
+     [lock,stamp] reads for all of them -> 1 RTT per scan instead of 1 per leaf,
+     then a second batch for the ones that failed validation. 12 RTT -> 2.
+  2. Admission policy on LeafCache::put. A scan streams through leaves it never
+     revisits; paying a 480 B copy for each is pure loss. DEX has ADMIT for this.
+Both are contained to Tree::range_query and LeafCache::put.
+
+UNTIL THEN: run range workloads with CACHE_LEAF=0.
+
+TRAP — high leaf hit rate on a scan can mean the scan DEGENERATED:
+range-uniform 128MB leaf-on offload-off = 86.2% hit but 0.066 Mops, the worst
+cell in the sweep. With a 64 MB inner cache there is no covering level-1 node, so
+range_query falls back to a per-key search() over the whole span: 100 point
+lookups per scan instead of ~12 leaf reads. Those lookups hit the leaf cache
+(hence 86%); the throughput is the fallback. Always read hit rate and throughput
+together on the range path.

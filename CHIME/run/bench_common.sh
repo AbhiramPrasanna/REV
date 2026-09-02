@@ -89,6 +89,14 @@ fi
 CACHE_LEAF="${CACHE_LEAF:-0}"
 LEAF_CACHE_PCT="${LEAF_CACHE_PCT:-50}"
 LEAF_CACHE_MB="${LEAF_CACHE_MB:-}"
+# Admission: fraction of eligible fills actually inserted, per path (DEX's ADMIT).
+# A scan streams through leaves it never revisits and each insert costs a ~480 B
+# entry + memcpy + LFU bookkeeping. Point fills are the opposite -- they are what
+# produced the +40% on point-zipf -- hence separate rates. BOTH DEFAULT TO 1.0
+# (admit everything = the behaviour measured in sweep_leafstudy) so the batched-
+# probe change can be attributed on its own; sweep LEAF_ADMIT_SCAN afterwards.
+LEAF_ADMIT_SCAN="${LEAF_ADMIT_SCAN:-1.0}"
+LEAF_ADMIT_POINT="${LEAF_ADMIT_POINT:-1.0}"
 
 LOG_DIR="${LOG_DIR:-$CHIME_DIR/build/results/offload_ab}"
 
@@ -273,6 +281,7 @@ run_one() {
   envs+=(CHIME_CACHE_LEAF="$leaf")
   if [[ "$leaf" != "0" ]]; then
     envs+=(CHIME_LEAF_CACHE_PCT="$LEAF_CACHE_PCT")
+    envs+=(CHIME_LEAF_ADMIT_SCAN="$LEAF_ADMIT_SCAN" CHIME_LEAF_ADMIT_POINT="$LEAF_ADMIT_POINT")
     [[ -n "$LEAF_CACHE_MB" ]] && envs+=(CHIME_LEAF_CACHE_MB="$LEAF_CACHE_MB")
   fi
 
