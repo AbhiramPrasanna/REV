@@ -66,30 +66,42 @@ compute node and leaves the memory node idle, because memory side CPU is assumed
 too scarce to be a participant.
 
 We show by measurement, on two state of the art disaggregated B$^+$ trees, that
-this leaves a structural gap. A cache changes how \emph{often} an operation
-crosses the network and never what a crossing \emph{costs}, so performance is
-governed by whether the working set fits, and range scans, which stream through
-leaves they never revisit, cannot be helped by cache budget at all. In DEX an
-eightfold cache increase buys uniform scans a factor of 1.32 in throughput, and
-the rate at which its leaf path misses does not fall across that sweep by any
-amount we can measure. In CHIME, whose compute cache holds internal nodes only,
-throughput falls by 3.7 times in a single step when the internal index stops
-fitting.
+this leaves capacity on the table, and that in one case the mechanism to claim it
+was already present and unused. DEX possesses both levers, but builds its identity
+around the cache and exposes memory side execution as a switch beside it, so cache
+size and cache policy are asked to carry all of the work. They cannot, because a
+B$^+$ tree presents the cache with two populations whose residency economics have
+nothing in common: inner nodes are few and hot and scale with the index, while
+leaves are many and scale with the data. Under a uniform access pattern the second
+population is not cacheable at any budget, and we measure the consequence
+directly. The rate at which DEX's leaf path fails holds at one call per lookup
+across a fourfold cache increase and at 1.3748 calls per scan to four decimal
+places across an eightfold one. The leaf half of the cache is not returning a
+diminishing amount. It is returning nothing, while occupying frames the inner path
+could have used.
 
-We then make the execution venue a runtime decision, gated so that the memory
-node is engaged only after the compute side cache has already failed, and we
-measure each system against itself. Thirteen of sixteen DEX workload cells then
-exceed, simultaneously on throughput and tail, the best that design reaches
-anywhere in an eightfold cache sweep. On scans the gated configuration at one
-eighth of the memory beats the cached configuration at full memory on both axes
-at once. In CHIME the two levers separate cleanly: compute side caching raises
-the plateau where the index fits and does almost nothing below it, while memory
-side execution removes the cliff where it does not and is exactly inert above it.
-Used together they exceed what either reaches alone. Finally we report a
-deliberate falsification: an optimisation that shrank the bytes per covered leaf
-roughly fortyfold while leaving the number of crossings unchanged lost 41\% of
-throughput, and lost 15\% even at a 59\% cache hit rate. Given a path that
-removes crossings instead, the same mechanism gains 19\%.
+We then assign each population to the lever that can hold it: cache the inner
+path, and serve the leaf from the memory node, gated so that the memory node is
+engaged only after the cache has already failed. Both levers stay; each is pointed
+at the population it can win. Measured against DEX's own ceiling, thirteen of
+sixteen workload cells then exceed, simultaneously on throughput and tail, the
+best that design reaches anywhere in an eightfold cache sweep, and on scans the
+gated configuration at one eighth of the memory beats the cached configuration at
+full memory. The caching lever is not weakened by this but freed: one sided read
+traffic on point lookups falls to 0.02\% of what caching alone required, and each
+megabyte of cache buys between 1.8 and 4.1 times more throughput, with the largest
+correction landing on exactly the workloads where the misallocation was worst.
+
+CHIME, whose compute cache holds internal nodes only, separates the two levers
+even more cleanly, because its sweep crosses the point at which its internal index
+stops fitting and throughput falls by 3.7 times in a single step. Caching raises
+the plateau above that boundary and does almost nothing below it; memory side
+execution removes the cliff below it and is exactly inert above it. Used together
+they exceed what either reaches alone. Finally we report a deliberate
+falsification: an optimisation that shrank the bytes per covered leaf roughly
+fortyfold while leaving the number of crossings unchanged lost 41\% of throughput,
+and lost 15\% even at a 59\% cache hit rate. Given a path that removes crossings
+instead, the same mechanism gains 19\%.
 \end{abstract}
 
 \maketitle
@@ -324,31 +336,53 @@ earn its share against the inner nodes it displaces.
 \section{DEX}
 \label{sec:dex}
 
-\subsection{The design as built}
+\subsection{A design that had both levers and leaned on one}
 
 DEX pulls the caching lever hard and well. Its compute side cache holds both
-inner and leaf pages under a path aware policy, so that the resident portion of
-a root to leaf path is contiguous and a traversal degenerates into local pointer
+inner and leaf pages under a path aware policy, so that the resident portion of a
+root to leaf path is contiguous and a traversal degenerates into local pointer
 chasing for as long as the path stays resident. Replacement avoids the
 centralised structures that would serialise under the replacement rate a
-disaggregated setting produces. Admission is probabilistic and asymmetric:
-inner nodes are always admitted, leaves only one time in ten, because leaf
-residency scales with the dataset rather than with the index and admitting a leaf
-usually evicts something hotter.
+disaggregated setting produces. Admission is probabilistic and asymmetric: inner
+nodes are always admitted, leaves only one time in ten.
 
-DEX also has the second lever, and this is what makes it the more instructive
-subject. It offloads point operations at the cache boundary when a runtime cost
-model judges a remote procedure call cheaper than the remaining descent. What it
-does not do is treat the two levers as covering different regimes. Both decisions
-are evaluated locally, at a single node miss, and nothing in the design observes
-whether the caching lever is succeeding for an operation class as a whole.
+\emph{DEX also has the second lever.} It can offload an operation at the cache
+boundary when a runtime cost model judges a remote call cheaper than the
+remaining descent. That is what makes it the instructive subject rather than a
+foil: the mechanism is present, and the design does not build its identity around
+it. The cache is the system. Offloading is a switch beside it.
 
-Range scans are the sharpest case. DEX maintains no leaf links, a simplification
-that keeps its pointer management uniform, and a scan spanning several leaves is
-therefore decomposed into repeated single key lookups. Every covered leaf pays its
-own descent, its own cache probe and its own offload decision.
+The consequence is that cache \emph{size} and cache \emph{policy} are asked to
+carry all of the work, and the design's own policy shows the strain. Refusing
+nine leaves in ten is not a tuning constant arrived at arbitrarily; it is the
+design reporting that caching leaves usually does not pay, and then hedging the
+report with a probability rather than acting on it.
 
-\subsection{The caching lever saturates, and says so}
+\subsection{Two node classes, one lever}
+\label{sec:dex:classes}
+
+The hedge is necessary because a B$^+$ tree presents the cache with two
+populations whose residency economics have nothing in common.
+
+\textbf{Inner nodes} are few, and their count scales with the \emph{index}. Every
+operation touches the same handful near the root, so they are hot by
+construction, and a modest budget holds the whole upper path. This is the ideal
+case for a cache, and DEX admits them unconditionally for exactly that reason.
+
+\textbf{Leaves} are many, and their count scales with the \emph{data}. Fifty
+million keys produce millions of leaves. Whether they are cacheable at all
+depends entirely on the access pattern: under skew a hot subset exists and a
+cache can capture it, and under a uniform pattern every leaf is equally likely
+and there is no subset to capture at any budget.
+
+DEX applies one lever to both populations and manages the mismatch with a
+constant. That works while the second population happens to be cacheable. Where
+it is not, the budget spent trying is not merely unproductive, it is
+\emph{contested}: leaf frames and inner frames come from the same pool, so a
+megabyte spent on a leaf that will not be revisited is a megabyte unavailable to
+the path that would have been.
+
+\subsection{Under uniform access, the leaf half of the cache returns nothing}
 \label{sec:dex:sat}
 
 The first measurement is the cache sweep with memory side execution absent.
@@ -402,16 +436,15 @@ Under uniform access every lookup misses its leaf at 64, 128 and 256 megabytes,
 and 99.7\% still do at 512. Uniform scans are flatter still: the rate holds at
 1.3748 to four decimal places across the entire sweep. Under Zipfian access the
 same measurement declines as it should, from 0.82 to 0.54 on lookups, because
-skew produces a hot set and the lever can capture it. The uniform rows are not a
-small effect that more budget would grow. They are a lever reporting that it is
-disconnected from the outcome.
+skew produces a hot set and the lever can capture it.
 
-The arithmetic behind this is simple. Fifty million keys produce millions of
-leaves, and under uniform access every one is equally likely, so there is no hot
-core for budget to convert into hit rate. DEX's own admission policy, which
-refuses nine leaves in ten, is the design reaching the same conclusion
-empirically and responding by tuning the failing lever rather than reaching for
-the other one.
+This is the prediction of Section~\ref{sec:dex:classes} confirmed at the sharpest
+possible resolution. The leaf half of the cache is not returning a diminishing
+amount under uniform access. It is returning \emph{nothing}, and it is doing so
+while holding frames that the inner path could have used. DEX's admission
+constant is the design detecting this and choosing to spend one tenth as much on
+a lever that is disconnected, rather than spending the budget on the population
+that is cacheable and serving the other population a different way.
 
 \paragraph{The same story in crossings.}
 Figure~\ref{fig:dexcrossings} puts it in the unit the fabric charges for.
@@ -430,14 +463,22 @@ Caching alone takes uniform scans from 22.3 crossings per operation to 16.9, a
   \label{fig:dexcrossings}
 \end{figure*}
 
-\subsection{Making the venue a runtime decision}
+\subsection{Assigning each population to the lever that can hold it}
 \label{sec:dex:add}
 
-The change is small and it converts one event. In the design as built a leaf
-level miss pulls a page across the network, installs it, and reads eight bytes
-out of it. We make that same miss dispatch a request that the memory node answers.
-The descent above the leaf, the cache, the admission policy and the binary are
-otherwise unchanged.
+The response is not to abandon caching. It is to stop asking one lever to serve
+two populations with incompatible economics, and to divide them by which lever
+can actually hold each. \textbf{Cache the inner path}, whose residency scales with
+the index and which is hot by construction. \textbf{Serve the leaf from the memory
+node}, whose residency scales with the data and which under uniform access cannot
+be made resident at any budget. Both levers stay, and each is pointed at the
+population it can win.
+
+Mechanically the change is small and it converts one event. In the design as
+built a leaf level miss pulls a page across the network, installs it, and reads
+eight bytes out of it. We make that same miss dispatch a request that the memory
+node answers. The descent above the leaf, the cache, the admission policy and the
+binary are otherwise unchanged.
 
 For a point lookup the memory node searches the leaf in place and returns the
 value, so one request replaces one page transfer and the page is never
@@ -492,6 +533,47 @@ $1.95\times$ and $1.71\times$ on lookups and $2.62\times$ and $2.50\times$ on
 scans, and every one of the sixteen cells improves its tail, by 31\% to 59\%.
 Both axes move favourably everywhere, so this is a relocation rather than a
 trade.
+
+\paragraph{The cache is not weakened by this. It is freed.}
+The most direct evidence that the division of labour is the right one is what
+happens to the caching lever once it stops competing with the leaf population.
+At the largest cache, one sided read traffic on point lookups falls to
+\textbf{0.02\%} of what caching alone required: 3.34 reads per operation become
+0.0008, with a single request carrying the leaf. The inner path is now entirely
+resident. The cache did not become less important; it became able to hold the
+thing it was always good at holding.
+
+Table~\ref{tab:productivity} states the same effect as a return on budget. Each
+megabyte added over the sweep buys between 1.8 and 4.1 times more throughput once
+the leaf level is served elsewhere.
+
+\begin{table}[t]
+\centering
+\small
+\caption{What a megabyte of cache buys, in thousands of operations per second
+gained per megabyte added over the 448\,MB from 64 to 512. The ordering is the
+point: the workloads where caching alone did worst gain the most from being
+relieved of the leaf population.}
+\label{tab:productivity}
+\begin{tabular}{llrrr}
+\toprule
+ & & caching & both & \\
+op & dist & alone & levers & ratio \\
+\midrule
+scan   & uniform & 0.30 & 1.24 & $\mathbf{4.12\times}$ \\
+scan   & zipf    & 0.79 & 2.41 & $3.06\times$ \\
+lookup & uniform & 2.76 & 6.16 & $2.24\times$ \\
+lookup & zipf    & 6.72 & 11.97 & $1.78\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ordering in that table is the argument of this section in one column. Uniform
+scans, the workload where caching alone returned least, gain the most from the
+division; Zipfian lookups, the workload where caching alone worked best, gain the
+least. The correction is largest exactly where the misallocation was largest,
+which is what should happen if the diagnosis in Section~\ref{sec:dex:classes} is
+right and would not happen if the second lever were simply a faster path.
 
 \paragraph{Against the design's own ceiling.}
 The strict test is to take the best throughput the unmodified design reaches at
@@ -549,23 +631,39 @@ offloaded traversal itself rather than in queueing for a service thread.
 \subsection{What DEX should have done}
 \label{sec:dex:should}
 
-Three critiques follow from the measurements, and each is a design decision
-rather than an implementation defect.
+Nothing in this section asks for a mechanism DEX did not have. It asks for the
+mechanism it had to be treated as part of the design rather than as a switch
+beside it.
 
-\paragraph{The venue decision should have been regime aware.}
-DEX's cost model fires at a node miss and compares one request against one
-descent. It never asks whether the caching lever is succeeding for an operation
-class at all, so when leaf caching degrades the design keeps making locally
-reasonable per miss decisions while the aggregate regime has changed underneath
-it. The signal it would need is not subtle and the design already produces it:
-a leaf failure rate that does not move as the cache grows
+\paragraph{The two node populations should have been assigned to different
+levers, not managed with one constant.}
+This is the whole of it. Inner residency scales with the index and is cacheable;
+leaf residency scales with the data and, under a uniform pattern, is not
+cacheable at any budget. A design that recognises the split points each lever at
+the population it can win and spends the entire compute side budget on the one
+that responds to it. DEX instead applies caching to both and reconciles the
+mismatch with a probability. That is a smaller version of the right answer, and
+it leaves the design dependent on cache size and cache policy for outcomes that
+neither can deliver: it is exactly the workloads where the mismatch is worst,
+uniform scans and uniform lookups, that the correction improves most
+(Table~\ref{tab:productivity}).
+
+\paragraph{The admission constant should have been read as a diagnosis, not a
+setting.}
+Refusing nine leaves in ten is a correct empirical finding about leaves. What
+follows from it is not a smaller number, it is a different venue for that
+population, and the design already contained one. The finding and the mechanism
+that answers it sit in adjacent parts of the same system and are never connected.
+
+\paragraph{The venue decision should have been evaluated per operation class, not
+per node miss.}
+DEX's cost model fires at a single miss and compares one request against one
+descent. It never asks whether the caching lever is succeeding for a class of
+operation as a whole, so when leaf caching degrades the design keeps making
+locally reasonable decisions while the aggregate regime has changed underneath
+it. The signal it would need is not subtle and the design already produces it: a
+leaf failure rate that does not move as the cache grows
 (Section~\ref{sec:dex:sat}).
-
-\paragraph{The admission constant should have been read as a diagnosis.}
-Refusing nine leaves in ten is the correct empirical response to leaves not being
-worth caching. But it is a symptom, and the same observation argues that those
-accesses should be served by the other lever, which the design already possessed.
-The two findings sit in adjacent parts of the design and are never connected.
 
 \paragraph{The scan path should not have been traded for pointer simplicity.}
 Dropping leaf links keeps pointer management uniform, at the price of turning
@@ -574,6 +672,14 @@ on the one operation class where the caching lever is structurally unavailable,
 because a scan streams through leaves it will never revisit. A leaf run mechanism
 used only on the offload path, never in the cached structure, keeps the
 simplification and still allows one reply to carry a run.
+
+\paragraph{What this would have bought.}
+Not a different index. The same index, operating at between 1.7 and 2.6 times the
+throughput at the same memory, reaching a better point on scans with an eighth of
+it, and getting between 1.8 and 4.1 times more out of every megabyte it does
+spend. The capacity was available inside the design as published. It was not
+taken because one of the two levers was treated as an option rather than as half
+of the structure.
 
 % ===========================================================================
 \section{CHIME}
