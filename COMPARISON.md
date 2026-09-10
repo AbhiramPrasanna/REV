@@ -44,16 +44,24 @@ cache ∈ {64, 128, 256, 512} MB  (compute-side directory cache)
 
 Two things to equalize for a *fair* comparison, both now wired into the harness:
 
-1. **Thread count — matched at 32 compute + 4 memory.** Both DEX sweep scripts
-   now use `THREADS=32`/`KMAX=32` with `MEMTHREADS=4`; DART uses `THREADS_SET=(32)`
-   compute threads. (DART has **no** memory-side service threads to match DEX's
-   `MEMTHREADS=4` — its MN does no CPU work, §3 — so "4 mem threads" is a
-   DEX-only knob.) Thread count is now a **swept dimension on both sides**: edit
-   `MEMTHREAD_SET` / `THREADS` in DEX and `THREADS_SET` in DART
-   (e.g. `THREADS_SET=(8 16 24 32)`) to study scaling. In DART, `--th_b` is
-   recomputed per thread count so the *total* cache stays fixed, and the memory
-   script counts the same iterations (the monitor pushes thread counts to it).
-   Keep `DEX THREADS ≤ KMAX` (=32) so the topology stays 1-compute/1-memory.
+1. **Thread count — the scripts say 32, the runs say 36.** ⚠ **Corrected
+   2026-09-10.** This section described the intent; it does not describe the
+   committed data. Every DEX run log in `dex/build/results/` reads
+   `totalThreadCount 36, memThreadCount 4`, so **36 is what was run**, and the
+   table row above is stale in the same way. Worse, the DART file this document
+   pairs against, `cache_sweep_baseline_20260615_125117.csv`, was run at **56**
+   threads. A defensible pairing does exist — `20260622_071147.csv` carries
+   36-thread rows — but it is not the one used here.
+
+   Because of this and three other equalisation problems (a per-thread cache
+   versus a shared one, differing latency statistics, and differing client
+   topologies), **`paper/paper.tex` reports no cross-system number at all**; see
+   its *On the Absence of a Cross System Comparison* section. Treat everything
+   below as a working note rather than as a result, and re-derive it from a sweep
+   run for the purpose before quoting any ratio.
+
+   (DART has **no** memory-side service threads to match DEX's `MEMTHREADS=4` —
+   its MN does no CPU work, §3 — so "4 mem threads" is a DEX-only knob.)
 2. **Latency percentile.** Compare **p99-to-p99** (now available on both) rather
    than DEX-p99 vs DART-avg.
 

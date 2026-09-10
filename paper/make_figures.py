@@ -276,9 +276,110 @@ def fig_scan_repair():
     print("wrote fig_scan_repair.pdf")
 
 
+# ===========================================================================
+# Figure 5 -- DEX against itself: throughput and tail, one lever versus two.
+# This replaces the earlier DART-overlay figures. The comparison is an ablation
+# on one binary one setting apart, so it needs no external baseline and carries
+# no thread-matching caveat.
+# ===========================================================================
+def fig_dex_self():
+    rows = list(csv.DictReader(open(os.path.join(ROOT, "dex/build/results/summary.csv"))))
+    caches = [64, 128, 256, 512]
+    spec = [("lookup", "uniform"), ("lookup", "zipfian"),
+            ("range", "uniform"), ("range", "zipfian")]
+    titles = ["Point, uniform", "Point, zipf 0.99", "Range, uniform", "Range, zipf 0.99"]
+
+    def get(w, d, off, c, field):
+        r = [x for x in rows if x["workload"] == w and x["dist"] == d
+             and x["offload"] == off and int(x["cache_mb"]) == c][0]
+        return float(r[field])
+
+    fig, axes = plt.subplots(2, 4, figsize=(7.0, 3.5))
+    for col, ((w, d), t) in enumerate(zip(spec, titles)):
+        for row, (field, ylab) in enumerate([("throughput_mops", "Throughput (Mops)"),
+                                             ("p99_us", r"p99 ($\mu$s)")]):
+            ax = axes[row, col]
+            tidy(ax)
+            for off, colour, marker, lab in [("off", C_CACHE, "o", "cache only"),
+                                             ("on", C_BOTH, "D", "both levers")]:
+                ax.plot(caches, [get(w, d, off, c, field) for c in caches], "-",
+                        color=colour, marker=marker, markersize=3.4, linewidth=1.4,
+                        label=lab, clip_on=False, zorder=3)
+            ax.set_xscale("log", base=2)
+            ax.set_xticks(caches)
+            ax.set_xticklabels(["64", "128", "256", "512"])
+            ax.set_xlim(60, 545)
+            ax.set_ylim(bottom=0)
+            if row == 0:
+                ax.set_title(t, loc="left", color=INK)
+            else:
+                ax.set_xlabel("Cache (MB)")
+            if col == 0:
+                ax.set_ylabel(ylab)
+
+    handles = [Line2D([], [], color=C_CACHE, marker="o", markersize=3.4,
+                      linewidth=1.4, label="cache only"),
+               Line2D([], [], color=C_BOTH, marker="D", markersize=3.4,
+                      linewidth=1.4, label="both levers")]
+    fig.legend(handles=handles, loc="upper center", ncol=2, frameon=False,
+               bbox_to_anchor=(0.5, 1.015))
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    fig.savefig(os.path.join(OUT, "fig_dex_self.pdf"))
+    plt.close(fig)
+    print("wrote fig_dex_self.pdf")
+
+
+# ===========================================================================
+# Figure 6 -- DEX cache equivalence.
+# The provisioning question stated without an external baseline: how much cache
+# would the caching lever alone need to reach what the pair reaches at 64 MB?
+# For scans the answer is "more than the sweep contains".
+# ===========================================================================
+def fig_dex_equivalence():
+    rows = list(csv.DictReader(open(os.path.join(ROOT, "dex/build/results/summary.csv"))))
+    spec = [("lookup", "uniform", "Point, uniform"),
+            ("lookup", "zipfian", "Point, zipf"),
+            ("range", "uniform", "Range, uniform"),
+            ("range", "zipfian", "Range, zipf")]
+
+    def tput(w, d, off, c):
+        return float([x for x in rows if x["workload"] == w and x["dist"] == d
+                      and x["offload"] == off and int(x["cache_mb"]) == c][0]["throughput_mops"])
+
+    fig, ax = plt.subplots(figsize=(3.33, 2.5))
+    tidy(ax)
+    labels, ratios, colours = [], [], []
+    for w, d, t in spec:
+        target = tput(w, d, "on", 64)          # both levers, smallest cache
+        best_cache_only = tput(w, d, "off", 512)  # caching alone, largest cache
+        labels.append(t)
+        ratios.append(target / best_cache_only)
+        colours.append(C_BOTH if target >= best_cache_only else C_CACHE)
+
+    ys = range(len(labels))
+    ax.barh(list(ys), ratios, 0.55, color=colours, zorder=3)
+    ax.axvline(1.0, color=INK2, linewidth=0.8, linestyle="--", zorder=4)
+    for y, r in zip(ys, ratios):
+        ax.annotate(f"{r:.2f}x", xy=(r, y), xytext=(3, 0), textcoords="offset points",
+                    va="center", fontsize=7, color=INK)
+    ax.set_yticks(list(ys))
+    ax.set_yticklabels(labels, fontsize=7.2)
+    ax.invert_yaxis()
+    ax.xaxis.grid(True, color=GRID, linewidth=0.5)
+    ax.yaxis.grid(False)
+    ax.set_xlim(0, 1.9)
+    ax.set_xlabel("Both levers at 64 MB / caching alone at 512 MB")
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT, "fig_dex_equivalence.pdf"))
+    plt.close(fig)
+    print("wrote fig_dex_equivalence.pdf")
+
+
 if __name__ == "__main__":
     fig_lever_map()
     fig_dex_rpc()
     fig_dex_crossings()
     fig_scan_repair()
+    fig_dex_self()
+    fig_dex_equivalence()
     print("figures ->", OUT)

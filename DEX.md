@@ -11,9 +11,13 @@ cover for one another.
 Companion: [CHIME.md](CHIME.md) · cross-cutting argument: [REPORT.md](REPORT.md) ·
 mechanism detail: [IMPLEMENTATION.md](IMPLEMENTATION.md)
 
-**Configuration for every number here:** 2 nodes, 32 compute threads, 4 memory threads,
-50 M keys, scan length 100, zipf θ = 0.99. Source
-`dex/build/results/summary.csv` / `summary_full.csv`.
+**Configuration for every number here:** 2 nodes, **36** compute threads
+(`totalThreadCount 36`), 4 memory threads, 50 M keys, scan length 100,
+zipf θ = 0.99. Source `dex/build/results/summary.csv` / `summary_full.csv`.
+
+> **Corrected.** Earlier drafts of this document said 32 compute threads,
+> inherited from `COMPARISON.md`, which recorded the *intended* setting. Every run
+> log says `totalThreadCount 36`, and 36 is what was run.
 
 ---
 
@@ -229,12 +233,15 @@ Two cells need caveats, and both are DART moving rather than DEX:
 - DART's zipf lookup at 128 MB reads **2.655** against 4.29 / 4.27 / 4.28 elsewhere. The
   1.81× at that cell is inflated by DART's dip, not by DEX.
 
-> ⚠ **Thread counts were not matched.** DEX ran at 32 compute threads; the DART baseline
-> (`cache_sweep_baseline_20260615_125117.csv`) was actually run at **56** — despite
-> `COMPARISON.md` describing the intent as matched at 32. DEX is beating a
-> *better-provisioned* DART, so the crossover is if anything understated, but the
-> comparison is not clean. **Do not publish a bare "N× DART" number until DART is re-run at
-> 32 threads.**
+> ⚠ **Not in the paper, and the thread accounting is why.** The table above pairs DEX
+> against `cache_sweep_baseline_20260615_125117.csv`, which was run at **56** threads
+> against DEX's 36. (The paper's own provenance cites a *different* file,
+> `20260622_071147`, whose 36-thread rows would be matched — so a defensible comparison is
+> available, just not this one.) Beyond thread count, a per-thread cache and a shared cache
+> are not the same quantity, and the two harnesses do not report the same latency
+> statistic. **The paper therefore reports no cross-system number at all**; see its
+> *On the Absence of a Cross System Comparison* section. This table is kept here as a
+> working note, not as a result.
 
 ### 3.6 Figures
 

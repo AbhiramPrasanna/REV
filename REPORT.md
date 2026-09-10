@@ -252,31 +252,42 @@ separation and chroma checks before use.
 | **`fig_dex_rpc.pdf`** | DEX `rpc_per_op` vs cache — the flat 1.0000 / 1.3748 uniform rows | Arm I, Q6 | **written** |
 | **`fig_dex_crossings.pdf`** | DEX crossings/op, one lever vs two, 4 panels | Arm I, Q6 | **written** |
 | **`fig_scan_repair.pdf`** | range: stock / first-cut / batched | Arm II, Fig. 12 | **written** |
-| — | throughput vs p99, beats-DART region | Arm I | exists `hybrid_plots/fig_opshift.png` |
-| — | crossover, tput vs cache, p99 vs cache | Arm I | exists `compare_plots/` |
+| **`fig_dex_self.pdf`** | DEX throughput + p99 vs cache, one lever vs two | Arm I, Fig. 1 | **written** |
+| **`fig_dex_equivalence.pdf`** | cache equivalence: both levers @64 MB / caching @512 MB | Arm I, Q10 | **written** |
+| — | per-cell latency and throughput with gains | Arm I | exists `hybrid_plots/fig{1,2,3,4}*.png` |
 | *(pending)* | scan length {10, 100, 1000} | Arm I/II | **needs the run** — §V.2 |
-| *(pending)* | CHIME vs DART overlay | Arm II | **held back** — thread mismatch, §V.1 |
 
 **Dropped:** the "speedup vs post-cache remainder" scatter. It was computed on DEX's 16
 cells and the relationship is weak (*r* = 0.528) and inverted within workload classes, so
 shipping it would have overclaimed C3. See §I.2 C3.
 
+**Also dropped, with the DART material:** `fig_opshift.png` (beats-DART region),
+`fig_coverage.png`, `dex_catches_dart_*.png` and `latency_p99_vs_cache_*.png`, all of which
+have a DART line baked in. `fig_dex_self.pdf` replaces the last of those.
+
 ---
 
 # Part V — Global to-do
 
-## V.1 The methodological hole gating every DART ratio
+## V.1 Cross-system comparison: removed from the paper, not deferred
 
-- **DEX↔DART** pairs DEX at **32** compute threads against
-  `cache_sweep_baseline_20260615_125117.csv`, actually run at **56** — despite
-  `COMPARISON.md` describing the intent as matched at 32. DEX beats a *better-provisioned*
-  DART, so the crossover is understated, but not clean.
-- **CHIME↔DART** pairs `20260622_071147.csv` (34/36 threads, one machine) against CHIME on
-  both nodes — **68** client threads.
+**The paper now reports no cross-system number at all.** Both arms are ablations — one
+binary, one runtime setting apart — and the *On the Absence of a Cross System Comparison*
+section states why. Three yardsticks replace the external baseline: the design's own
+ceiling, cache equivalence, and crossings per operation.
 
-Re-run DART at 32 threads for DEX and 17/node-equivalent for CHIME, or state thread counts
-inline. **Do not submit a bare "N× DART" number until one is done**; correct
-`COMPARISON.md`, which still asserts the matched-at-32 version.
+The equalisations a DART comparison would need, each a place an effect can be manufactured:
+
+| | problem |
+|---|---|
+| **Thread count** | DEX ran at **36** (`totalThreadCount 36`), not the 32 `COMPARISON.md` claims. The DART file that document pairs against (`20260615_125117`) was run at **56**. A matched file *does* exist — `20260622_071147` has 36-thread rows — but it is not the one used. For CHIME the mismatch is structural: DART drives 34 threads from one machine, CHIME runs the same binary on both nodes, so 34 means 68. |
+| **Cache budget** | DART's cache is per-thread, CHIME's and DEX's are shared totals. Dividing one by the thread count is a convention, not an equivalence. |
+| **Latency statistic** | The two harnesses do not report the same one; a mean read as a tail is a real hazard. |
+| **Index shape** | ART's adaptive nodes have no fixed span, so "same inner node size" cannot be imposed. |
+
+To add one later: fix and state all four, use the same statistic on both sides, and run a
+sweep *for that purpose* rather than assembling two that happened to exist.
+`COMPARISON.md` has been corrected but remains a working note, not a result.
 
 ## V.2 Experiments by value
 
@@ -323,7 +334,7 @@ row in Part III shows. It encodes the contribution. If adopted:
 | CHIME lever map | [`CHIME/results/leafstudy2_compute.csv`](CHIME/results/leafstudy2_compute.csv) | 34 thr/node, 16 B values | Measured, **post-repair** |
 | CHIME first-cut leaf cache | sweep `leafstudy` | same | Measured, pre-repair |
 | CHIME stressed regime (16/32 MB) | `CHIME/results/stress/summary_compute.csv` | 24 thr/node, 48 B values | Measured — **different config, not spliced** |
-| DEX (all) | `dex/build/results/summary.csv`, `summary_full.csv` | 32 compute / 4 memory threads | Measured |
+| DEX (all) | `dex/build/results/summary.csv`, `summary_full.csv` | **36** compute / 4 memory threads | Measured |
 | DART reference | `cache_sweep_baseline_summary_20260615_125117.csv` | **56 threads** | Measured — see §V.1 |
 
 Not used anywhere: `dex/8_dex_offload_vs_dart.csv`, whose 64–256 MB rows are marked
