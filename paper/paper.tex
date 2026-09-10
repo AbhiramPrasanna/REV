@@ -1,0 +1,1667 @@
+%% ===========================================================================
+%%  REV
+%%  Rethinking the Execution Venue for RDMA Disaggregated-Memory Indexes
+%%
+%%  Compile (twice, for the question/table/figure references):
+%%      pdflatex paper && pdflatex paper
+%%
+%%  LAYOUT
+%%    1  Introduction
+%%    2  Scope and the shape of the study   (three arms; why DART is held still)
+%%    3  Setup
+%%    4  Arm I, part one:  DEX as originally built     (Q1..Q7)
+%%    5  Arm I, part two:  moving the operating point  (Q8..Q16)
+%%    6  Arm II:  CHIME versus DART        (in flight)
+%%    7  Arm III: scale out                (in flight)
+%%    8  Summary
+%%
+%%  Questions are auto numbered by the \q macro, so inserting one renumbers
+%%  every cross reference automatically. Refer to a question with \qref{label},
+%%  never by typing a number.
+%%
+%%  Figures come straight from the plot directories so they stay in sync with
+%%  the scripts that emit them:
+%%      ../compare_plots/   <- compare_dex_dart.py
+%%      ../hybrid_plots/    <- plot_hybrid_operating_point.py
+%%                          <- plot_operating_point_shift.py
+%%
+%%  PROVENANCE. Latency figures are read from the per run [ALL OPS] blocks in
+%%  the raw logs, never from an aggregate CSV:
+%%    dex/build/results/dex_{lookup,range}_{uniform,zipfian}_offload-{off,on}_cache*mb.log
+%%        base sweep, 2026-06-15, totalThreadCount 36, memThreadCount 4
+%%    dex/build/results/*_mt{2,4,6}.log      memThreadCount sweep, 2026-06-22
+%%    DART/cache_sweep_baseline_summary_20260622_071147.csv   (36 thread rows)
+%%  Node geometry and the cache data structure list come from
+%%    dex/include/cache/btree_node.h, cache/leanstore_cache.h,
+%%    tree/page_table.h, tree/hash_table.h
+%%  and are cross checked against the run log preamble.
+%%  The projected CSVs (8_dex_offload_vs_dart.csv, dex_offload_vs_dart_real_us.csv)
+%%  are NOT used anywhere. The three interpolated values are marked (~) and are
+%%  log linear interpolations BETWEEN measured sweep points, given only to
+%%  locate a crossing inside the swept interval.
+%%
+%%  House style for this file: no dash characters in the prose.
+%% ===========================================================================
+\documentclass[sigconf,nonacm]{acmart}
+
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{balance}
+
+\graphicspath{%
+  {../compare_plots/}{C:/Users/abhir/Downloads/REV/compare_plots/}%
+  {../hybrid_plots/}{C:/Users/abhir/Downloads/REV/hybrid_plots/}%
+  {./figures/}}
+
+\settopmatter{printacmref=false}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+
+% Long \texttt identifiers are the only things here wide enough to overflow a
+% two column measure; give TeX room rather than let a box sit in the margin.
+\emergencystretch=2em
+
+% The two RPC entry points, with break opportunities at the underscores.
+\newcommand{\rpclookup}{\texttt{cold\_\allowbreak to\_\allowbreak hot\_%
+  \allowbreak with\_\allowbreak rpc\_\allowbreak for\_\allowbreak lookup}}
+\newcommand{\rpcscan}{\texttt{cold\_\allowbreak to\_\allowbreak hot\_%
+  \allowbreak with\_\allowbreak rpc\_\allowbreak for\_\allowbreak scan}}
+
+% --- Auto numbered questions -----------------------------------------------
+% \q{question text}{label}  opens a question; \qref{label} cites it as "Qn".
+\newcounter{qnum}
+\makeatletter
+\newcommand{\q}[2]{%
+  \refstepcounter{qnum}%
+  \subsection{Q\theqnum. #1}%
+  \protected@edef\@currentlabel{\theqnum}%
+  \label{#2}}
+\makeatother
+\newcommand{\qref}[1]{Q\ref{#1}}
+
+\newcommand{\ans}{\noindent\textbf{Answer.}\ }
+\newcommand{\shortans}[1]{\par\smallskip\noindent%
+  \fcolorbox{black!15}{black!4}{\parbox{0.955\linewidth}{\small #1}}\par\smallskip}
+\newcommand{\status}[1]{\par\smallskip\noindent%
+  \fcolorbox{black!25}{black!6}{\parbox{0.955\linewidth}{\small
+  \textbf{Status.}\ #1}}\par\smallskip}
+
+\begin{document}
+
+% ===========================================================================
+\title{REV: Rethinking the Execution Venue for Indexes\\on RDMA Disaggregated Memory}
+\subtitle{Why a Cache Cannot Buy What a Miss Costs, and Where That Moves the Operating Point}
+
+\author{}
+\affiliation{%
+  \institution{}
+  \country{}
+}
+
+% ===========================================================================
+\begin{abstract}
+Disaggregated memory splits a cluster into CPU rich compute nodes and capacity
+rich, CPU poor memory nodes joined by RDMA. Every ordered index built on that
+substrate must answer a question that does not arise in a shared memory system:
+\emph{where does an index operation execute}. This paper studies three answers.
+\textbf{DEX} executes on the compute node and rations network trips with a path
+aware compute side cache. \textbf{CHIME} also executes on the compute node, but
+changes the shape of what a trip retrieves, pairing a hopscotch leaf layout with
+a compute side cache so a single one sided read covers more of the search.
+\textbf{DART} executes nowhere in particular: it arranges data so structural
+locality removes the trip, and it spends nothing at all on the memory node.
+
+We name the choice all three make and none expose the \emph{execution venue},
+and we argue it should be a per operation decision rather than a design time
+constant. The study runs in three arms against one unmodified DART baseline.
+This paper reports the first in full.
+
+\textbf{Arm I, DEX versus DART.} We first characterise DEX exactly as built,
+with offloading absent rather than merely disabled, and locate the operating
+point it can hold. Across an $8\times$ cache sweep, 64 to 512\,MB, that point
+moves along a curve but never reaches DART's: uniform range scans go from 0.42
+to 0.56\,Mops, 43\% of DART, and of the sixteen cells in the workload matrix
+\textbf{two} meet DART on throughput and \textbf{none} on tail latency. The
+cause is mechanical and is the thesis of the paper: a cache changes how
+\emph{often} an operation pays the remote toll and never changes what the toll
+\emph{is}. At 512\,MB only 0.31\% of uniform lookups are served without leaving
+the compute node, and the 99.7\% that leave still drag a whole leaf page across
+the wire to deliver 8\,B.
+
+We then add one knob, \emph{miss gated result shipping}: the cache continues to
+serve the inner path with one sided reads, but a leaf level miss becomes an RPC
+and the memory node returns the answer. The operating point does not merely
+improve, it relocates. Coverage of the matrix rises from 2 to 11 of 16 cells on
+throughput and from 0 to 4 on tail, with 4 cells now beating DART on both at
+once. The reachable p99 floor falls from 26.5 to 12.5\,\textmu s, so tail
+targets that were unservable at any cache size become servable at 256\,MB. Each
+megabyte of cache also becomes 1.8 to 4.1 times more productive, because the
+cache is now asked to hold the inner nodes rather than the data. The entire bill
+is four memory node service threads out of forty, gated by the \emph{miss} rate
+rather than the operation rate, so it recedes exactly as cache or skew makes the
+compute side self sufficient.
+
+\textbf{Arm II, CHIME.} The second arm asks whether that rescue is a property of
+execution venue or an artefact of how DEX fetches leaves, and it sweeps across
+the cache size at which CHIME's internal index stops fitting, which Arm~I could
+not do. The same push moves CHIME too, and separates the two levers cleanly:
+compute side caching raises the plateau where the index fits and does nearly
+nothing below it, while offload removes the cliff where it does not and is
+\emph{exactly} inert above it, holding one number across three consecutive cache
+points. Used together they exceed what either reaches alone, delivering 1.11
+times stock CHIME's best ever throughput on a quarter of the inner cache it needs
+to reach that number. We also report a deliberate falsification of the crossings
+account: an optimisation that shrank the bytes per covered leaf roughly fortyfold
+while leaving the crossing count alone lost 41\% of throughput, and lost 15\%
+even at a 59\% cache hit rate; given a batching path that removes crossings
+instead, the same cache gains 19\%.
+
+\textbf{Arm III} is in flight and its design is stated here: a scale out sweep
+that asks whether the miss gate keeps the memory node bill bounded as compute
+nodes are added. DART remains the structurally cheaper design under strict
+disaggregation, since it touches no memory node CPU at all. What we report is
+that the index family DART's own case deprecates is not poorer by structure. It
+was poorer by one unexamined constant.
+\end{abstract}
+
+\maketitle
+
+% ===========================================================================
+\section{Introduction}
+\label{sec:intro}
+
+An index on disaggregated memory has exactly two levers against remote cost, and
+the literature has largely treated them as rivals.
+
+A \textbf{compute side cache} decides \emph{how often} an operation touches the
+network. It is the lever DEX pulls. It is attractive because it is portable: it
+assumes nothing of the memory node beyond a region of registered memory, so it
+survives the strictest reading of disaggregation, in which the memory node has
+almost no usable CPU at all.
+
+\textbf{Offloading} decides \emph{what a touch costs}. It runs index logic on
+memory node CPUs so a request returns a result rather than bytes. It is the
+lever DEX exposes as a boolean and does not build its identity around, and the
+reason is the same axiom: the memory node is assumed too CPU poor to be a
+participant.
+
+\textbf{Structural locality} is the third answer, and it is DART's. Rather than
+making a remote trip cheaper or rarer, DART lays data out so the trip is not
+needed, and it therefore spends nothing on the memory node. In our measurements
+DART is not a curve at all: it is a fixed point, unmoved by a cache sweep it
+does not participate in, which is exactly what makes it a good reference against
+which to read everything else.
+
+CHIME sits between the first two. It keeps execution on the compute node like
+DEX, but attacks the \emph{shape} of a trip rather than its frequency, combining
+a hopscotch leaf layout with a compute side cache so one one sided read covers
+more of the search. It is the clearest evidence that the compute side has more
+than one way to economise, and also that all of those ways share a ceiling: they
+are still paying a per miss toll set by the wire, not by the answer.
+
+\paragraph{Operating points, not speedups.}
+The organising idea of this paper is that these systems should be compared as
+\emph{operating points} rather than as scores. An operating point here is the
+tuple a deployment actually has to live with: sustained throughput, p99 tail,
+the compute side cache it demands, and the memory node CPU it consumes. DART's
+is a single point, because none of the swept resources move it. DEX's is a curve
+traced out as cache grows. Asking whether DEX is fast is not a well posed
+question; asking where its curve sits relative to DART's point, how much of the
+workload matrix that curve covers, and what it would take to relocate it, is.
+Section~\ref{sec:built} establishes where the curve sits when DEX is taken
+exactly as built. Section~\ref{sec:moved} relocates it.
+
+\paragraph{This paper.}
+Section~\ref{sec:scope} states the shape of the study, its three arms, why DART
+itself is deliberately left unmodified, and why demonstrating catch up with the
+very index family DART's paper deprecates is the point rather than a
+convenience. Section~\ref{sec:setup} fixes what is being compared and how the
+numbers were obtained. Sections~\ref{sec:built} and~\ref{sec:moved} are the
+first arm in full, as a sequence of questions answered from the sweep.
+Sections~\ref{sec:chime} and~\ref{sec:scaleout} state the designs of the two
+arms still in flight.
+
+% ===========================================================================
+\section{Scope and the Shape of the Study}
+\label{sec:scope}
+
+The argument is about a design choice rather than about a single number, so it
+is worth saying precisely what is claimed, what is measured, and what is still
+to come.
+
+\paragraph{Three arms, one baseline.}
+Table~\ref{tab:arms} is the whole study. Each arm takes one member of the index
+family DART's case deprecates, holds DART fixed, and asks the same question:
+does the gap survive when the execution venue stops being a design time
+constant. The arms share a baseline and a discipline but not a mechanism, which
+is the point; if the answer is a property of venue rather than of B$^+$ trees,
+it should not depend on which member is tested.
+
+\begin{table}[t]
+\centering
+\small
+\caption{The three arms. This paper reports Arm~I in full and states the design
+of the other two.}
+\label{tab:arms}
+\begin{tabular}{@{}p{0.055\linewidth}p{0.30\linewidth}p{0.50\linewidth}@{}}
+\toprule
+arm & subject & question, and status \\
+\midrule
+I  & DEX, a cached B$^+$ tree
+   & Does miss gated result shipping move the operating point to DART's?
+     \textbf{Reported here}, Sections~\ref{sec:built} and~\ref{sec:moved}. \\
+\addlinespace
+II & CHIME, a hopscotch leaf B$^+$ tree
+   & Does the same rescue work on a design that economised on trip
+     \emph{shape} rather than trip count? \textbf{In flight},
+     Section~\ref{sec:chime}. \\
+\addlinespace
+III& DEX under scale out
+   & Does the miss gate keep the memory node bill bounded as compute nodes are
+     added? \textbf{In flight}, Section~\ref{sec:scaleout}. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Why DART is not offloaded, and why that is deliberate.}
+The obvious symmetric experiment, giving DART the same miss gated RPC path we
+give DEX, is one we have not run, and the reason is not oversight. DART's
+contribution \emph{is} spending nothing on the memory node. Structural locality
+is not a knob DART sets to some value; it is the claim that the remote trip can
+be arranged away rather than paid for, and the evidence for the claim is
+precisely that DART's curve does not move when the resources every other design
+competes for are swept. An offloaded DART would be a different system making a
+different argument, and it would cost us the one thing that makes this study
+readable: a reference that is flat by construction, against which every movement
+in every figure is attributable to the system under test.
+
+There is a second reason, and it is the one that matters for the thesis. The
+question is not \emph{how fast can DART be made}. It is whether a design that
+fixed its execution venue at build time can reach a design that never needed
+one, and what it has to spend to get there. Answering that requires DART held
+still. Offloading DART is a fair follow up, and it belongs with Arm~III rather
+than here, because the memory node CPU it would consume is exactly the resource
+that becomes contended once compute nodes are added.
+
+\paragraph{Why the catch up is demonstrated with the indexes DART deprecates.}
+It would be easy to read the choice of DEX and CHIME as arbitrary. It is the
+opposite. DART's own case is made partly by argument against this family: that
+cached, compute side index strategies are structurally the poorer answer on
+disaggregated memory, because they ration a cost they cannot reduce. We agree
+with the diagnosis, and Section~\ref{sec:built} reproduces it in detail on DEX's
+own binary, in more detail than the original criticism needed. The disagreement
+is about the prognosis. If those designs were poorer for a structural reason,
+then no small change should rescue them; a design that is wrong in kind does not
+become right with a patch. So the sharp test is to take a deprecated design
+exactly as published, change one event inside it, and see whether the gap
+attributed to structure turns out to be attributable to a single unexamined
+constant.
+
+That is why catch up is the interesting result rather than merely a favourable
+one. Beating DART with a system built to beat DART would show nothing. Reaching
+DART with the design DART deprecates, at a quarter to an eighth of the memory
+that design was thought to need, is a statement about which half of the
+criticism was load bearing.
+
+\paragraph{What this paper does not yet cover.}
+Writes are out of scope: the sweep is read only (\texttt{kReadRatio 100}), so
+every claim here is about lookups and scans, and nothing bounds insert, update
+or delete behaviour. Scale out is Arm~III and is not conceded but deferred; it
+is the sharpest open question for the argument rather than a footnote to it,
+because the hybrid's cost is memory node CPU and that is the resource a fixed
+memory tier must divide among a growing number of compute nodes while DART's
+demand for it stays at zero. CHIME is Arm~II. Both designs are stated in
+Sections~\ref{sec:chime} and~\ref{sec:scaleout} so that a reader can judge in
+advance what would confirm the thesis and what would falsify it.
+
+\paragraph{What the claim is.}
+Not that DEX is a poor index. It is that the quantity DEX spends its design
+budget on, the \emph{frequency} of a remote trip, is not the quantity that
+bounds it, and that the quantity which does bound it, the \emph{cost} of one
+trip, is reachable with a change small enough that we could make it by flipping
+a boolean on DEX's own binary. DART remains the structurally cheaper design
+under a strict reading of disaggregation, and we do not claim otherwise.
+
+% ===========================================================================
+\section{Setup: What Is Being Compared}
+\label{sec:setup}
+
+\paragraph{The three configurations.}
+Every DEX number in this paper comes from one binary, run with one boolean
+flipped. The sweep predates the framing of this paper and so carries the older,
+knob centric names; the mapping is worth stating once because it is what makes
+the comparison causal rather than correlational.
+
+\begin{itemize}
+  \item \textbf{DEX as built} (logged as \emph{offload off}). A path aware
+    compute side cache serves whatever levels are resident. A leaf level miss
+    calls admission control, pulls the whole leaf page over a one sided read,
+    installs it, and reads 8\,B out of it. The memory node stays idle. This is
+    DEX as an index strategy, and it is the control.
+  \item \textbf{DEX with the knob} (logged as \emph{offload on}). The same
+    cached descent. A leaf level miss, detected at the leaf parent
+    (\texttt{level}\,$=$\,1), becomes an RPC and the memory node returns the
+    answer. Where the composition rather than the boolean is meant, we call it
+    the \emph{hybrid index}.
+  \item \textbf{DART}. A fixed reference, run at the same thread count, holding
+    2.94\,Mops on uniform lookups and 1.30\,Mops on uniform scans, with p99
+    pinned at 20.5\,\textmu s and 41.5\,\textmu s across the whole cache sweep.
+\end{itemize}
+
+Because the first two are one boolean apart on an otherwise identical binary,
+any difference between their curves is attributable to converting a leaf miss
+from a page fetch into a result fetch, and to nothing else.
+
+\paragraph{The matrix.}
+Four workloads, point lookup and 100 key range scan crossed with uniform and
+Zipfian key distributions, over four cache sizes, 64/128/256/512\,MB, on a
+50\,M key bulk load at 16\,B per entry. That is sixteen cells per configuration,
+thirty two in all, and the coverage counts quoted throughout are counts over
+those sixteen.
+
+\paragraph{How latency is read.}
+p99 is compared against p99 on an identical artifact: operations per 500\,ns
+bucket plus per operation p50, p90, p99 and max, taken from the per run
+\texttt{[ALL OPS]} block of the raw log rather than from an aggregate CSV. The
+same logs separate \texttt{LOCAL (cache hit)} from \texttt{REMOTE (miss/rpc)},
+which is what makes \qref{q:buying} possible. Three values in this paper are log
+linear interpolations \emph{between} two measured sweep points, given only to
+locate a crossing inside the swept interval; each is marked $(\sim)$ where it
+appears. No projected or extrapolated CSV is used.
+
+\paragraph{Thread budget, and a correction.}
+The whole study runs at \texttt{totalThreadCount 36}, \texttt{memThreadCount 4},
+a 1:9 ratio of memory side to compute side threads. The DART baseline file
+carries both 34 and 36 thread rows; we use the 36 thread rows throughout, so the
+head to head is matched. We note for the record that an earlier methodology text
+described this as ``32 compute $+$ 4 memory''; every run log says 36, and 36 is
+what was run.
+
+% ===========================================================================
+\section{Arm I, Part One: DEX as Originally Built}
+\label{sec:built}
+
+This section characterises DEX with offloading \emph{absent} rather than merely
+switched off, and locates the operating point it can hold. Nothing here is a
+criticism of the implementation; it is an account of what the design can and
+cannot reach, which is the only fair basis for asking what a different design
+would have reached.
+
+% ---------------------------------------------------------------------------
+\q{What is DEX actually optimising, and what is DART?}{q:what}
+
+\ans DEX optimises the \emph{frequency} of a remote trip. DART optimises it out
+of existence. That difference is visible before any number is quoted, in the
+shape of the two curves: across an $8\times$ cache sweep DEX moves and DART does
+not. DART is flat because the cache axis is not an axis it lives on, and this is
+what makes it a reference rather than a competitor curve. Every movement in
+every figure in this paper belongs to the system under test.
+
+The consequence for reading the rest is that ``DEX improves'' is never by itself
+an interesting claim. The interesting claims are where a DEX curve \emph{crosses}
+DART's point, how much cache it needed to get there, and how much of the
+workload matrix ends up on the far side.
+
+% ---------------------------------------------------------------------------
+\q{Why did DEX build itself as an index strategy rather than around
+offloading?}{q:why}
+
+\ans Because it accepted the strictest reading of the disaggregation contract,
+in which the memory node is a capacity device with no usable CPU, and then
+optimised honestly inside that assumption. Read that way, DEX's choices are all
+correct. Caching is the only lever that assumes nothing of the far side. It is
+also the lever whose resource, compute side DRAM, is the largest and most
+routinely provisioned thing in a disaggregated deployment, and it reduces the
+number of times the expensive path is taken without requiring any change of
+contract. An index strategy is what you build when the far side is not allowed
+to be a participant.
+
+The cost of that decision is that it fixes the \emph{execution venue} at design
+time, for every operation, forever. All of DEX's engineering then goes into
+\emph{how often} an operation must leave the compute node, and none of it into
+\emph{what leaving costs}, because within the assumption the second quantity is
+not a variable. Offloading appears in the codebase as a boolean rather than as
+an architecture: there is no way to spend memory node cycles selectively, no
+notion of which operations deserve to be executed remotely, and no mechanism
+that gets cheaper as the cache gets better.
+
+\shortans{The short answer: DEX is a cache because it assumed the memory node
+could not be anything else. Everything measured from \qref{q:point} to
+\qref{q:enough} is that assumption being charged for.}
+
+% ---------------------------------------------------------------------------
+\q{What must be in place before either knob can be turned?}{q:machinery}
+
+\ans Considerably more than an index. Three commitments are made before a single
+operation runs, and both knobs then have to live inside them. This matters
+before any performance number, because the shape of these commitments is what
+decides which knob can move and how far.
+
+\paragraph{Node geometry, and the constant that is really three constants.}
+Inner and leaf fanout are decoupled in this build, but only logically.
+\texttt{innerPageSize} sets the inner fanout and therefore the tree height;
+\texttt{leafPageSize} sets the leaf fanout and therefore what one leaf costs to
+fetch. The values are in Table~\ref{tab:geom}. What matters is the third line:
+\texttt{pageSize} is defined as \texttt{leafPageSize}, and that single constant
+simultaneously fixes the physical node size, the RDMA transfer size, and the
+compute side cache slot. The run logs confirm the consequence directly, printing
+\texttt{alloc\_unit = 512} and \texttt{page num = 1048576} at the 512\,MB
+setting: the cache is exactly $512\,\text{MB} / 512\,\text{B}$ uniform slots.
+The page charged to every leaf miss is therefore not an independent tunable of
+the miss path. It is the same number as the cache slot.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Node geometry, taken from \texttt{btree\_node.h} and confirmed against
+the run logs. \texttt{NodeBase} is 64\,B, and entries are 16\,B in both node
+types: a key plus a pointer in the inner node, a key plus a value in the leaf.}
+\label{tab:geom}
+\begin{tabular}{lll}
+\toprule
+constant & value & what it sets \\
+\midrule
+\texttt{innerPageSize} & 160\,B & inner fanout 5, hence height \\
+\texttt{leafPageSize}  & 512\,B & leaf fanout 26, hence fetch cost \\
+\texttt{pageSize}      & 512\,B & physical node, wire transfer, \\
+                       &        & \emph{and} cache slot, as one value \\
+\texttt{megaLevel}     & 4      & levels grouped as a distribution subtree \\
+measured height        & 22     & printed by the sweep runs themselves \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Tree height is a consequence, not a setting.}
+\texttt{bulk\_load} sorts before inserting, so nodes settle at roughly half
+occupancy and the effective branching factor is about half the fanout. At an
+inner fanout of 5 that is a branching factor near 2, and the sweep runs print
+their height as the tree grows, ending at \textbf{22}. Height is what makes a
+descent expensive: twenty two levels is twenty two opportunities to miss, and it
+is why the cached configuration is asked to hold so much before it can serve
+anything locally.
+
+\paragraph{The data structures the cache drags in.}
+This is the part that is easy to underestimate. Turning the cache knob is not
+adding a lookaside buffer; it is building a buffer manager, and DEX builds all
+of it. From \texttt{leanstore\_cache.h}, \texttt{page\_table.h},
+\texttt{hash\_table.h} and \texttt{btree\_node.h}, in construction order:
+
+\begin{enumerate}
+  \item a uniform slot pool, \texttt{cache\_allocator::initialize(pageSize,
+    cache\_capacity} $\times$ \texttt{pageSize)};
+  \item a concurrent \emph{page table} giving ground truth for page identity,
+    three entries per 64\,B cache line bucket, logged at 1{,}048{,}576 entries
+    across 349{,}526 buckets in the 512\,MB runs;
+  \item a second concurrent hash table, the \emph{cooling} table, sized at
+    \texttt{cooling\_ratio} of the pool, logged at 104{,}857 entries across
+    17{,}477 buckets, that is, a tenth of the pool;
+  \item pointer swizzling, with a swizzle tag in the top pointer bit and a
+    parent pointer in every node;
+  \item a five valued residency state machine per node, \texttt{pos\_state}
+    running over remote, cooling, hot, local working set and pinned;
+  \item optimistic version locks carrying an IO lock bit and an obsolete tag
+    alongside the write lock;
+  \item epoch based reclamation for pages freed while readers may still hold
+    them;
+  \item sampling based eviction, two pages sampled per round to move nodes from
+    hot to cooling, plus a separate admission rate, logged at 0.1 here.
+\end{enumerate}
+
+Set against that, the offload path is \texttt{btree\_rpc.h} plus a handler
+dispatched at one level of the tree. The asymmetry is the finding: \emph{the
+mechanism DEX made its identity costs a subsystem, and the mechanism it exposed
+as a boolean costs a function.} A design that had treated the two as equals
+would have weighed them this way round.
+
+\paragraph{And the cache overcharges itself.}
+Because the pool is uniform slots of \texttt{pageSize}, an inner node of 160\,B
+of geometry occupies a 512\,B slot, a $3.2\times$ overcharge on exactly the
+object that \qref{q:whyworks} identifies as the one worth caching. The source
+records both the fact and why it was not fixed: separating the two needs per
+type allocation in the split path and two cache pools, and it saves
+disaggregated memory rather than cache. Every memory result in this paper was
+therefore measured while paying that overcharge, which makes the provisioning
+rule of \qref{q:whyworks} worth more than this sweep can show.
+
+% ---------------------------------------------------------------------------
+\q{Where does DEX's operating point actually sit?}{q:point}
+
+\ans Short of DART's, on every workload, at every cache size swept, on at least
+one of the two axes. Figure~\ref{fig:opshift} is the direct picture: throughput
+on the horizontal axis, p99 on the vertical, so better is right and down, DART
+is a single star because it does not move, and the shaded rectangle is the
+region that beats DART on both axes at once. The blue curve is DEX as built. On
+no panel does it enter the rectangle.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.97\textwidth]{fig_opshift.png}
+  \caption{The operating point, and where the knob moves it. Each panel plots
+  throughput against p99 tail, so a system improves as it moves right and down.
+  Point labels are cache size in MB and both axes start at zero. DART is a fixed
+  star because the cache axis is not one it lives on. The shaded rectangle is
+  the region that beats DART on throughput \emph{and} tail simultaneously. DEX
+  as built (blue) never enters it on any workload; DEX with miss gated result
+  shipping (orange) enters it on both lookup workloads, and on scans it moves
+  right past DART's throughput while staying above DART's tail.}
+  \label{fig:opshift}
+\end{figure*}
+
+Table~\ref{tab:envelope} states the same thing numerically as an envelope: the
+best DEX can do on each axis anywhere in the swept range, and what fraction of
+DART that represents.
+
+\begin{table}[t]
+\centering
+\small
+\caption{The operating envelope of DEX as built. ``Best'' is the most favourable
+value anywhere in the 64 to 512\,MB sweep, which is always the 512\,MB point.
+Throughput is quoted as a fraction of DART, tail as a multiple of DART, so in
+both columns a value of 1 would be parity and DEX wants to reach it.}
+\label{tab:envelope}
+\begin{tabular}{llrr}
+\toprule
+ & & best throughput & best p99 \\
+op & dist & as fraction of DART & as multiple of DART \\
+\midrule
+lookup & uniform & 0.86 & 1.39 \\
+lookup & zipf    & 1.70 & 1.32 \\
+scan   & uniform & 0.43 & 2.28 \\
+scan   & zipf    & 0.72 & 2.23 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Coverage is the honest summary.}
+A single best case number flatters any system, so the useful statistic is how
+much of the deployable space actually reaches the reference.
+Figure~\ref{fig:coverage} counts the sixteen cells of the matrix. DEX as built
+meets DART on throughput in \textbf{2} of them, both being Zipfian lookups at
+256 and 512\,MB. It meets DART on tail in \textbf{none}. It meets DART on both
+at once in \textbf{none}. Fourteen of sixteen cells are not competitive on
+throughput and all sixteen are not competitive on tail.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{fig_coverage.png}
+  \caption{Coverage of the sixteen cell workload matrix, counting cells whose
+  throughput is at or above DART's and whose p99 is at or below DART's. The
+  third group is the conjunction, which is what a deployment with both a
+  throughput target and a tail target actually needs.}
+  \label{fig:coverage}
+\end{figure}
+
+% ---------------------------------------------------------------------------
+\q{What is the cache actually buying?}{q:buying}
+
+\ans Very little, and the run logs say so in three independent ways.
+
+\paragraph{(a) Per megabyte, the cache is almost inert.}
+Going from 64 to 512\,MB adds 448\,MB and moves uniform scans from 0.42 to
+0.56\,Mops. That is 0.30\,Kops per megabyte, and it finishes at 43\% of DART.
+The other workloads are better but not different in kind: 2.76\,Kops/MB on
+uniform lookups, 6.72 on Zipfian lookups, 0.79 on Zipfian scans.
+
+\paragraph{(b) At the largest cache, the cache is barely serving operations.}
+The per run latency blocks separate operations served entirely from cache from
+operations that had to touch the network, and the split is stark. On uniform
+lookups at 512\,MB, DEX as built serves 147{,}640 operations locally against
+47{,}122{,}437 remotely. That is \textbf{0.31\%} of operations served without
+leaving the compute node, after an $8\times$ cache increase. Whatever the cache
+is doing, it is not answering queries.
+
+\paragraph{(c) The toll it cannot touch.}
+Since 99.7\% of operations leave the node, what bounds the system is the price
+of leaving, and that price is fixed by geometry rather than by cache.
+Table~\ref{tab:toll} isolates it: the same event, a leaf miss, served two ways.
+Reads per operation on uniform lookups fall only from 6.79 to 3.34 across the
+entire $8\times$ sweep, barely halved, because every leaf miss still drags a
+whole 512\,B page across the wire to deliver 8\,B.
+
+\begin{table}[t]
+\centering
+\small
+\caption{The toll itself, measured. Latency of the operations that had to touch
+the network, uniform lookups at 512\,MB, from the \texttt{REMOTE (miss/rpc)}
+line of each run. DEX as built serves a miss with a page read; with the knob it
+serves the same miss with an RPC. Microseconds.}
+\label{tab:toll}
+\begin{tabular}{lrrrrr}
+\toprule
+served by & $n$ & mean & p50 & p99 & p99.9 \\
+\midrule
+page read (as built) & 47.1\,M & 14.25 & 14.00 & 28.50 & 35.00 \\
+RPC (with the knob)  & 48.3\,M &  7.27 &  7.00 & 14.00 & 18.00 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A miss costs 14.25\,\textmu s on average when it is a page and 7.27\,\textmu s
+when it is an answer. Note the last two columns, because they settle the whole
+argument in advance: the p99 of an \emph{offloaded operation}, 14.0\,\textmu s,
+is already inside DART's whole system p99 of 20.5\,\textmu s. The thing DEX
+declined to build is, on its own, faster than the target DEX could not reach by
+rationing.
+
+\emph{Cache changes how often the toll is paid; it cannot change the toll.} That
+is why the blue curves in Figure~\ref{fig:opshift} bend toward an asymptote and
+stop short rather than continuing toward the shaded region.
+
+% ---------------------------------------------------------------------------
+\q{Would enough cache eventually fix it?}{q:enough}
+
+\ans No, and the tail is where this is unambiguous. Figure~\ref{fig:p99cache}
+plots p99 against cache for all four workloads, and Figure~\ref{fig:catches}
+replots the lookup pair as a ratio to DART, so parity becomes a single
+horizontal line.
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[b]{0.46\textwidth}
+    \includegraphics[width=\linewidth]{latency_p99_vs_cache_lookup_uniform.png}
+    \caption{Lookup / uniform}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.46\textwidth}
+    \includegraphics[width=\linewidth]{latency_p99_vs_cache_lookup_zipf.png}
+    \caption{Lookup / Zipfian}
+  \end{subfigure}
+  \\[0.8em]
+  \begin{subfigure}[b]{0.46\textwidth}
+    \includegraphics[width=\linewidth]{latency_p99_vs_cache_scan_uniform.png}
+    \caption{Scan / uniform}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.46\textwidth}
+    \includegraphics[width=\linewidth]{latency_p99_vs_cache_scan_zipf.png}
+    \caption{Scan / Zipfian}
+  \end{subfigure}
+  \caption{p99 tail latency against cache size. DEX as built (blue) never
+  reaches the DART line (green) on any workload at any swept cache size. With
+  the knob (red) it sits far below everywhere and passes DART on both lookup
+  workloads. Lower is better.}
+  \label{fig:p99cache}
+\end{figure*}
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[b]{0.49\linewidth}
+    \includegraphics[width=\linewidth]{dex_catches_dart_lookup_uniform.png}
+    \caption{Lookup / uniform}
+  \end{subfigure}\hfill
+  \begin{subfigure}[b]{0.49\linewidth}
+    \includegraphics[width=\linewidth]{dex_catches_dart_lookup_zipf.png}
+    \caption{Lookup / Zipfian}
+  \end{subfigure}
+  \caption{The lookup tail as a ratio, DEX p99 divided by DART p99. The dashed
+  line at 1.0 is parity and the shaded band below it is where DEX is faster than
+  DART. DEX as built (blue) stays above 1.0 at every cache size. With the knob
+  (red) it enters the band between 128 and 256\,MB on both distributions. The
+  scan workloads are omitted because neither configuration enters the band
+  anywhere in the sweep, which Figure~\ref{fig:p99cache} already shows.}
+  \label{fig:catches}
+\end{figure}
+
+Uniform lookups bottom out at 28.5\,\textmu s and Zipfian at 26.5\,\textmu s
+against DART's 20.5, after an $8\times$ cache increase. Not one of the four
+workloads gets p99 under DART's at any cache size we swept. Extrapolating the
+scan trend puts the crossing near 2068\,MB uniform and 1284\,MB Zipfian, roughly
+four times past the end of the sweep, which is another way of saying the answer
+is not in this design's budget.
+
+This is the load bearing observation of the paper. A cache can buy average
+throughput when the working set cooperates. It cannot close a tail gap, because
+the tail is populated by exactly the operations that missed, and for those
+operations nothing has changed.
+
+\paragraph{The cache reports its own failure, and the reading is flat.}
+There is a direct measurement of how often the caching lever fails, and it does
+not require inferring anything from throughput. With the knob on, an RPC is
+dispatched exactly when the cache could not resolve the leaf, so
+\texttt{rpc\_per\_op} counts leaf level cache failures per operation.
+Figure~\ref{fig:dexrpc} plots it across the sweep. Under uniform the two rows are
+flat: every lookup misses its leaf at 64, 128 and 256\,MB, and 99.7\% still do at
+512\,MB, while the uniform scan rate holds at 1.3748 to four decimal places
+across the whole $8\times$ increase. Under Zipfian the same measurement declines
+as it should, from 0.82 to 0.54 on lookups, because there a hot set exists and
+the lever can capture it. The uniform rows are not a small effect that more
+budget would grow. They are a lever reporting that it is disconnected.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{fig_dex_rpc.pdf}
+  \caption{RPCs per operation with the knob on, which counts how often the
+  compute side cache failed to resolve the leaf. Flat means more cache bought
+  nothing. Both uniform workloads are flat across an $8\times$ sweep, the scan
+  row to four decimal places; both Zipfian workloads decline, because a hot set
+  exists for the cache to hold.}
+  \label{fig:dexrpc}
+\end{figure}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{fig_dex_crossings.pdf}
+  \caption{Network crossings per operation, defined as RDMA reads plus RPCs,
+  with the caching lever alone and with both levers. Note the independent
+  vertical scales: the quantity to read within a panel is the gap between the
+  curves, and the quantity to read across panels is how much larger the scan
+  remainders are. Caching alone removes crossings slowly and, on uniform scans,
+  barely at all, falling only from 22.3 to 16.9 across the sweep. Adding the
+  second lever removes a roughly constant fraction, 2.0 to 3.3 times, at every
+  cache size.}
+  \label{fig:dexcrossings}
+\end{figure*}
+
+Figure~\ref{fig:dexcrossings} puts the same story in the unit the fabric charges
+in. Caching alone takes uniform scans from 22.3 crossings per operation to 16.9,
+a 32\% reduction for eight times the memory. The second lever takes the same
+workload to 5.6 at a single cache point, and to 9.6 at the smallest one, which is
+better than caching achieves anywhere in the sweep.
+
+% ---------------------------------------------------------------------------
+\q{Is there a workload where being purely an index strategy is enough?}{q:zipf}
+
+\ans Yes, one, and stating it plainly is what keeps the rest of the argument
+honest. Zipfian lookups, where a hot set fits inside half a gigabyte, pass
+DART's throughput from 256\,MB onward, reaching 5.06\,Mops at 512\,MB against
+DART's 2.97. That is rationing working exactly where rationing can work, and it
+is both of the two covered cells in Figure~\ref{fig:coverage}.
+
+It bounds the claim rather than contradicting it, for two reasons. First, it is
+a throughput result only: even here the tail never gets inside DART's, ending at
+26.5\,\textmu s against 20.5, which is why the tail bar in
+Figure~\ref{fig:coverage} is zero and not one. Second, it required 256\,MB,
+which is four times what the knob needs to pass the same line (\qref{q:parity}).
+The exception is real, and it is a statement about how forgiving skew is, not
+about how well the design scales.
+
+% ===========================================================================
+\section{Arm I, Part Two: Moving the Operating Point}
+\label{sec:moved}
+
+% ---------------------------------------------------------------------------
+\q{What is the ``simple push'' that changes the answer?}{q:push}
+
+\ans Convert one event. In DEX as built, a leaf level miss pulls a page. With
+the knob, that same miss becomes an RPC and the memory node returns the answer.
+Everything else, the descent, the cache, the admission policy, the binary, is
+unchanged.
+
+\begin{itemize}
+  \item \textbf{Point lookup.} The miss dispatches \rpclookup. The memory node
+    searches the leaf in place and returns the value. One RPC replaces one page
+    read and the page is never materialised on the compute node.
+  \item \textbf{Range scan.} The miss dispatches \rpcscan, carrying the residual
+    key count still outstanding. The memory node walks across sibling leaves,
+    packs the matching pairs into a scratch region, and the compute node
+    retrieves the batch with a single read. If the range extends past the last
+    key covered, the traversal resumes at $\text{max\_key}+1$ and the remainder
+    is served the same way.
+\end{itemize}
+
+The structure is hybrid along two axes at once, and both show up in the results.
+\emph{Across the tree} it is one sided above the leaves and RPC based at the
+leaves, so the inner path remains a pure caching workload with a completely idle
+memory node, and only the one level that caching handles worst is result
+shipped. \emph{Within a single scan} it is hybrid per operation: the resident
+prefix of the range is scanned locally and only the uncached tail is offloaded,
+so a scan that hits costs the memory node nothing at all.
+
+\paragraph{The gate is the whole idea.}
+The memory node is engaged only on a miss, so its CPU demand scales with the
+\emph{miss} rate and not with the operation rate. Read as knobs, cache and
+offload are substitutes, since more cache means the RPC path fires less often.
+Read as one structure they are complements: more cache does not idle the RPC
+path, it \emph{shrinks the bill} that path sends. This is the difference between
+the hybrid and an unconditional pushdown design, which would pay one RPC per
+operation forever regardless of what the cache already held.
+
+% ---------------------------------------------------------------------------
+\q{Where did the operating point move to?}{q:moved}
+
+\ans Into the region DEX as built could not reach on any workload, and it moved
+on both axes at once rather than trading one for the other. The orange curves in
+Figure~\ref{fig:opshift} are the answer: on both lookup panels they cross into
+the shaded rectangle, and on both scan panels they move right past DART's
+throughput line while remaining above its tail line.
+
+\paragraph{The shift, stated as a vector.}
+Table~\ref{tab:shift} gives the displacement at the largest cache, which is the
+cleanest like for like comparison because both configurations have every
+advantage the sweep can give them.
+
+\begin{table}[t]
+\centering
+\small
+\caption{The operating point displacement at 512\,MB. Both axes move in the
+favourable direction on every workload, so this is a relocation rather than a
+trade.}
+\label{tab:shift}
+\begin{tabular}{llrrrr}
+\toprule
+ & & \multicolumn{2}{c}{throughput (Mops)} & \multicolumn{2}{c}{p99 (\textmu s)} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+op & dist & as built & with knob & as built & with knob \\
+\midrule
+lookup & uniform & 2.52 & 4.93 $(+95\%)$ & 28.5 & 14.0 $(-51\%)$ \\
+lookup & zipf    & 5.06 & 8.66 $(+71\%)$ & 26.5 & 12.5 $(-53\%)$ \\
+scan   & uniform & 0.56 & 1.46 $(+162\%)$ & 95.0 & 58.0 $(-39\%)$ \\
+scan   & zipf    & 0.95 & 2.37 $(+150\%)$ & 92.5 & 53.0 $(-43\%)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{The curve does not just move, it steepens.}
+The less obvious effect, and the one with the clearer provisioning consequence,
+is that each megabyte of cache becomes more productive. Measured as throughput
+gained per megabyte added over the 448\,MB the sweep spans:
+
+\begin{center}
+\small
+\begin{tabular}{llrrr}
+\toprule
+op & dist & as built & with knob & factor \\
+\midrule
+lookup & uniform & 2.76 & 6.16 & $2.2\times$ \\
+lookup & zipf    & 6.72 & 11.97 & $1.8\times$ \\
+scan   & uniform & 0.30 & 1.24 & $4.1\times$ \\
+scan   & zipf    & 0.79 & 2.41 & $3.1\times$ \\
+\bottomrule
+\multicolumn{5}{l}{\footnotesize Kops per MB of cache added, 64 to 512\,MB.} \\
+\end{tabular}
+\end{center}
+
+This is the difference between a system whose cache is being asked to hold the
+data and one whose cache is being asked to hold the index, and it is explained
+in \qref{q:whyworks}. It matters because a curve that is both higher and steeper
+is a curve on which buying memory is a rational decision, which on the blue
+curve it largely was not.
+
+% ---------------------------------------------------------------------------
+\q{What does the shifted operating point now cover?}{q:coverage}
+
+\ans Considerably more of the space a deployment actually has to choose inside.
+It is worth separating three kinds of coverage, because they answer three
+different provisioning questions.
+
+\paragraph{(a) Matrix coverage: from 2 cells to 11.}
+Counting the sixteen cells against DART, as in Figure~\ref{fig:coverage}:
+
+\begin{center}
+\small
+\begin{tabular}{lcc}
+\toprule
+cells of 16 meeting DART & as built & with the knob \\
+\midrule
+on throughput          & 2 & 11 \\
+on p99 tail            & 0 & 4 \\
+on both simultaneously & 0 & 4 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The last row is the one a deployment with both a throughput target and a tail
+target has to satisfy, and it moves from impossible to satisfiable. The five
+throughput cells that remain uncovered are the four uniform scans below 512\,MB
+and the 64\,MB Zipfian scan, which misses parity by under one percent
+(1.291 against 1.309) and is scored as a miss because the counting is strict.
+
+\paragraph{(b) Cache budget coverage: the deployable floor drops.}
+As built, no cache size below 256\,MB put any workload at DART's throughput, and
+the one workload that got there needed 256\,MB. With the knob, three of four
+workloads reach DART at 64 or 128\,MB. The band of cache budgets in which
+deploying DEX is defensible therefore extends downward by a factor of two to
+four, and on scans the comparison is sharper still: the knob at 64\,MB beats the
+as built configuration at 512\,MB on throughput and tail simultaneously
+(\qref{q:parity}), so an eighth of the memory buys a strictly better point.
+
+\paragraph{(c) Tail SLO coverage: targets that were unreachable become routine.}
+This is the coverage that changes most, because it goes from empty to populated.
+The best p99 DEX as built achieves anywhere in the matrix is 26.5\,\textmu s. A
+service with a tail target tighter than that could not be served by DEX at any
+cache size on any workload, full stop. With the knob the floor is
+12.5\,\textmu s:
+
+\begin{center}
+\small
+\begin{tabular}{lcc}
+\toprule
+p99 target & cells served, as built & cells served, with knob \\
+\midrule
+$\leq 30$\,\textmu s & 1 & 8 \\
+$\leq 20.5$\,\textmu s (DART) & 0 & 4 \\
+$\leq 15$\,\textmu s & 0 & 4 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{(d) Workload coverage: scans stop being a category loss.}
+As built, range scans were not a workload DEX competed on: 43\% and 72\% of
+DART's throughput with a tail 2.2 times DART's. With the knob they finish at
+112\% and 181\% of DART's throughput. Scans move from a category where the
+design was structurally out of contention to one where it leads on throughput,
+with the tail still adverse and honestly reported in \qref{q:stops}. That is a
+change in which workloads the system can be proposed for at all, which is a
+different and larger claim than a percentage improvement.
+
+% ---------------------------------------------------------------------------
+\q{How much earlier does parity arrive?}{q:parity}
+
+\ans Between one and four times earlier on the cache axis, and on two workloads
+so early that the sweep never found the crossing. Table~\ref{tab:parity} gives
+the first swept cache at which each curve meets DART, so lower is better.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Cache required to reach DART's operating point. ``n.r.'' means not
+reached anywhere in the swept 64 to 512\,MB range. $(\sim)$ marks a log linear
+interpolation between two measured points, given only to locate the crossing
+inside the swept interval.}
+\label{tab:parity}
+\begin{tabular}{ll cc cc}
+\toprule
+ & & \multicolumn{2}{c}{throughput parity} & \multicolumn{2}{c}{tail parity} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+op & dist & as built & with knob & as built & with knob \\
+\midrule
+lookup & uniform & n.r.   & 128\,MB         & n.r. & $(\sim)$165\,MB \\
+lookup & zipf    & 256\,MB& $\leq$ 64\,MB   & n.r. & $(\sim)$151\,MB \\
+scan   & uniform & n.r.   & $(\sim)$336\,MB & n.r. & n.r. \\
+scan   & zipf    & n.r.   & $\leq$ 64\,MB   & n.r. & n.r. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On three of four workloads the knob is level with DART at the first or second
+cache point. Two are already past DART at 64\,MB, the smallest cache we ran, so
+we never found where they actually cross. The as built configuration reaches
+that line once, at 256\,MB, and never otherwise.
+
+\paragraph{One eighth the memory, and it still wins.}
+The comparison that makes the provisioning consequence concrete is the knob at
+64\,MB against the as built configuration at 512\,MB:
+
+\begin{center}
+\small
+\begin{tabular}{lcc}
+\toprule
+ & with knob, 64\,MB & as built, 512\,MB \\
+\midrule
+scan uniform, throughput & 0.90\,Mops & 0.56\,Mops \\
+scan uniform, p99        & 79.0\,\textmu s & 95.0\,\textmu s \\
+scan zipf, throughput    & 1.29\,Mops & 0.95\,Mops \\
+scan zipf, p99           & 76.0\,\textmu s & 92.5\,\textmu s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+One eighth of the memory, ahead on throughput and on tail at the same time. On
+uniform lookups the same comparison holds at a quarter of the memory: 3.00\,Mops
+with 128\,MB against 2.52\,Mops with 512\,MB.
+
+% ---------------------------------------------------------------------------
+\q{How much better does it get, and does the tail pay for it?}{q:better}
+
+\ans It ends between $1.1\times$ and $3\times$ DART, and the tail does not pay
+for it anywhere. Throughput across the sweep is in Table~\ref{tab:hybthr}.
+Zipfian lookups are ahead of DART from the smallest cache we ran. Uniform scans
+are the slow workload and the honest one: a 100 key scan touches several leaves
+and offloads 1.37 RPCs per operation rather than one, so it needs most of the
+swept cache to get past DART.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Throughput with the knob, in Mops/s across the cache sweep, and the
+ratio to DART at the largest cache. DART is 2.94 to 2.97\,Mops on lookups and
+1.30 on scans.}
+\label{tab:hybthr}
+\begin{tabular}{l rrrr c}
+\toprule
+workload & 64 & 128 & 256 & 512 & vs.\ DART \\
+\midrule
+lookup uniform & 2.17 & 3.00 & 4.75 & 4.93 & $1.7\times$ \\
+lookup zipf    & 3.30 & 4.80 & 7.61 & 8.66 & $2.9\times$ \\
+scan zipf      & 1.29 & 1.53 & 1.86 & 2.37 & $1.8\times$ \\
+scan uniform   & 0.90 & 1.01 & 1.18 & 1.46 & $1.1\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.98\textwidth]{fig1_latency.png}
+  \caption{Query latency, DEX with and without the knob, all sixteen cells.
+  Cache rises 64 to 512\,MB up each workload group. Both panels share one scale
+  and start at zero. The figure beside each row is how much faster the knob
+  makes that row. Lower is better.}
+  \label{fig:hyblat}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.86\textwidth]{fig2_throughput.png}
+  \caption{Throughput, same sixteen rows as Figure~\ref{fig:hyblat}. The figure
+  beside each row is the throughput gain over DEX as built. Higher is better.}
+  \label{fig:hybthr}
+\end{figure*}
+
+The tail result is the stronger one, because the natural worry about moving work
+onto a shared service tier is that it buys mean latency at the tail's expense.
+That does not happen here. Table~\ref{tab:p99} gives p99 for all sixteen cells,
+read straight out of the per run \texttt{[ALL OPS]} blocks. Every single one
+improves, by 31\% to 59\%.
+
+\begin{table}[t]
+\centering
+\small
+\caption{p99 in microseconds, all sixteen cells. Every cell improves. p99.9
+falls in all sixteen as well, taking uniform scans from 105.0 to
+67.0\,\textmu s and Zipfian scans from 103.5 to 63.5\,\textmu s at 512\,MB. An
+independent July run agrees, giving 93.5 $\Rightarrow$ 56.0\,\textmu s on
+uniform scans at 512\,MB against June's 95.0 $\Rightarrow$ 58.0.}
+\label{tab:p99}
+\begin{tabular}{llrrr}
+\toprule
+op / dist & cache & as built & with knob & cut \\
+\midrule
+lookup / uniform & 64\,MB  & 45.5  & 30.5 & 33\% \\
+                 & 128\,MB & 40.5  & 24.0 & 41\% \\
+                 & 256\,MB & 35.0  & 14.5 & 59\% \\
+                 & 512\,MB & 28.5  & 14.0 & 51\% \\
+\addlinespace
+lookup / zipf    & 64\,MB  & 44.0  & 28.5 & 35\% \\
+                 & 128\,MB & 39.0  & 22.0 & 44\% \\
+                 & 256\,MB & 33.0  & 13.5 & 59\% \\
+                 & 512\,MB & 26.5  & 12.5 & 53\% \\
+\addlinespace
+scan / uniform   & 64\,MB  & 114.5 & 79.0 & 31\% \\
+                 & 128\,MB & 109.5 & 74.0 & 32\% \\
+                 & 256\,MB & 104.0 & 66.5 & 36\% \\
+                 & 512\,MB & 95.0  & 58.0 & 39\% \\
+\addlinespace
+scan / zipf      & 64\,MB  & 113.5 & 76.0 & 33\% \\
+                 & 128\,MB & 108.0 & 70.0 & 35\% \\
+                 & 256\,MB & 101.0 & 62.5 & 38\% \\
+                 & 512\,MB & 92.5  & 53.0 & 43\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[b]{0.98\textwidth}
+    \includegraphics[width=\linewidth]{fig3_gain_thr.png}
+  \end{subfigure}
+  \\[0.6em]
+  \begin{subfigure}[b]{0.98\textwidth}
+    \includegraphics[width=\linewidth]{fig4_gain_tail.png}
+  \end{subfigure}
+  \caption{The gain from the knob, one panel per workload so no lines cross,
+  shared y scale starting at zero. Top: throughput ratio against DEX as built;
+  the dashed line is parity. Bottom: p99 reduction in percent; every point is
+  positive, which is the sixteen cell claim of Table~\ref{tab:p99} in one
+  picture.}
+  \label{fig:gains}
+\end{figure*}
+
+\paragraph{One ratio rises, and it is easy to misread.}
+Tail amplification, p99 over mean, goes from 1.47 to 2.35 on uniform scans and
+2.44 to 3.50 on Zipfian scans. That is not a tail regression. Over the same pair
+of runs the mean falls 62\%, from 64.79 to 24.65\,\textmu s, while p99 falls
+39\%, from 95.0 to 58.0. The ratio grows because the denominator improved more.
+Both numbers went down.
+
+What actually changes is the shape of the distribution, and the bucket
+histograms say so directly. Without the RPC path every scan performs the same
+16.9 page reads, so the distribution is narrow and uniformly slow: p50 66.5,
+p90 82.5, p99 95.0. With it the distribution is bimodal: p50 21.5, p90 43.5,
+p99 58.0, with a fast mode from about 6\,\textmu s and over 26\% of operations
+finishing under 17\,\textmu s. Those are the scans whose range prefix was
+already resident and which therefore never contacted the memory node, which is
+the within scan half of the design showing up in the histogram. The spread
+widens because a fast population appeared, not because a slow one got slower,
+and the slow end moved down too, which is why p99 and p99.9 both fall.
+\emph{The knob does not add a tail to the distribution. It adds a head.}
+
+% ---------------------------------------------------------------------------
+\q{Why does such a small change move the point so far?}{q:whyworks}
+
+\ans Because the two configurations ask the cache for completely different
+objects, and only one of those objects fits.
+
+DEX as built wants \emph{leaves} resident, since a resident leaf is the only way
+it avoids a page read. With 50\,M keys at 16\,B the leaf level is near 1.9\,GB,
+so full residency sits far outside any cache in the sweep and reads per
+operation decay slowly, 6.79 to 3.34 over an $8\times$ range.
+
+With the knob it wants only the \emph{inner path} resident, since every leaf
+access is an RPC regardless of what is cached. That object is small enough to
+satisfy inside the sweep, and the counters show it being satisfied:
+
+\begin{center}
+\small
+\begin{tabular}{lcccc}
+\toprule
+\texttt{rdma\_read/op}, with knob & 64\,MB & 128\,MB & 256\,MB & 512\,MB \\
+\midrule
+lookup / uniform & 2.33 & 1.12 & 0.0056 & 0.0008 \\
+lookup / zipf    & 1.30 & 0.55 & 0.0079 & 0.0010 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+By 256\,MB the compute node has stopped reading remote memory altogether, at
+0.006 reads per operation, while still serving every operation correctly. That
+is three orders of magnitude where the as built configuration managed a factor
+of two. Misses per operation tell the same story from the other side; at two
+memory cores, with six cores agreeing to within 0.1\%:
+
+\begin{center}
+\small
+\begin{tabular}{lcc}
+\toprule
+cache & lookup, as built / knob & scan, as built / knob \\
+\midrule
+64\,MB  & 6.79 / 3.33 & 22.35 / 8.18 \\
+512\,MB & 3.34 / 1.00 & 16.88 / 4.26 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{The provisioning rule.}
+This is the useful form of the whole result, and the reason the curve steepens
+in \qref{q:moved}. The knob's cache requirement scales with the size of the
+\emph{internal nodes}, so with key count and not with value width, whereas the
+as built requirement scales with the size of the \emph{data}. A deployment can
+provision against the first and cannot against the second. That is why parity
+moves from never to 64\,MB.
+
+\paragraph{An honest gap in the instrumentation.}
+Two caveats belong here rather than in a footnote. The path aware miss counters
+that would decompose a miss into inner versus leaf read zero in every cell of
+this sweep, so they are not evidence for anything and we do not use them; the
+inner versus leaf argument rests on \texttt{rdma\_read/op} and \texttt{rpc/op},
+which do vary sensibly across the sweep. Separately, the source estimates the
+inner working set at this geometry near 1.9\,GB, which would not fit any cache
+we swept, yet \texttt{rdma\_read/op} falls to 0.0008 by 512\,MB, so the inner
+path plainly does become resident. The bulk load keys logged for the sweep span
+7{,}325{,}973 to 26{,}738{,}230 over a nominal 50{,}001{,}000 key space, which
+indicates the loaded tree holds fewer distinct keys than \texttt{bulk\_load\_num}
+suggests. We record this as an open item. It affects the absolute cache sizes at
+which parity arrives, and it affects no comparison in this paper, because both
+configurations were run on the identical tree.
+
+% ---------------------------------------------------------------------------
+\q{What does it cost, and does the cost grow with load?}{q:cost}
+
+\ans Four memory node threads out of forty, and no, it shrinks. Both bounds are
+measured independently.
+
+\paragraph{(a) Four threads capture the benefit.}
+Sweeping \texttt{memThreadCount} over $\{2,4,6\}$, in a separate run, so read
+the trend rather than the absolutes:
+
+\begin{center}
+\small
+\begin{tabular}{lccc cc}
+\toprule
+workload & 2 & 4 & 6 & 2$\to$4 & 4$\to$6 \\
+\midrule
+lookup uniform, 256\,MB & 2.98 & 4.46 & 4.73 & $+50\%$ & $+6\%$ \\
+lookup uniform, 512\,MB & 3.33 & 4.62 & 4.81 & $+39\%$ & $+4\%$ \\
+lookup zipf, 256\,MB    & 5.37 & 7.15 & 7.38 & $+33\%$ & $+3\%$ \\
+lookup zipf, 512\,MB    & 6.60 & 8.11 & 8.30 & $+23\%$ & $+2\%$ \\
+scan uniform, 512\,MB   & 1.340& 1.348& 1.336& flat & flat \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Past four threads the bottleneck has left the memory node entirely.
+Figure~\ref{fig:memthreads} shows the knee against the DART line.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{memthreads_cache_lookup_uniform.png}
+  \caption{Memory node service threads against cache, uniform lookups. The
+  dotted blue line is DEX as built, which is flat in thread count and is the
+  control proving the memory node is idle without the RPC path. Two service
+  threads under serve the RPC stream and only cross DART at 256\,MB; four cross
+  at 128\,MB and keep climbing. The Zipfian panel has the same shape and is
+  omitted.}
+  \label{fig:memthreads}
+\end{figure}
+
+\paragraph{(b) The bill is gated by misses, not by operations.}
+DEX as built is flat in thread count, 1.175, 1.177 and 1.167\,Mops at 2, 4 and 6
+threads, which is the control proving the memory node sits idle without the RPC
+path. What that path costs is one RPC per miss:
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+\texttt{rpc/op}, lookup uniform & about 1.0, flat (every op misses at the leaf) \\
+\texttt{rpc/op}, lookup zipf    & $0.82 \Rightarrow 0.54$ (64 to 512\,MB) \\
+\texttt{rpc/op}, scan uniform   & 1.37, flat \\
+\texttt{rpc/op}, scan zipf      & $1.22 \Rightarrow 0.945$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Memory node load is therefore \emph{self limiting}: highest exactly where cache
+is scarce, receding as cache or skew makes the compute side self sufficient. The
+gating turns offloading from a permanent tax into a miss recovery mechanism, and
+it is why four threads are enough. It is also the property Arm~III
+(Section~\ref{sec:scaleout}) has to test, because self limiting per compute node
+is not the same as bounded across many.
+
+% ---------------------------------------------------------------------------
+\q{Where does the claim stop?}{q:stops}
+
+\ans Two bounds, recorded so the rest survives scrutiny, plus one non bound that
+is easy to assume wrongly.
+
+\paragraph{Scan tails do not reach DART's.}
+The knob takes uniform scans from 114.5 to 79\,\textmu s at 64\,MB and to
+58\,\textmu s at 512\,MB, against DART's flat 41.5. That is a large improvement
+at every point and enough to take scan throughput past DART, but it is not tail
+parity inside the sweep, which is why the scan panels of
+Figure~\ref{fig:opshift} show the orange curve to the right of DART and above
+it. The scan claim is a throughput claim.
+
+\paragraph{Zipfian lookups are winnable by cache alone.}
+As \qref{q:zipf} recorded, DEX as built does pass DART's throughput there from
+256\,MB. The knob's edge in that one cell is arriving with four times less cache
+and being the only configuration that also closes the tail.
+
+\paragraph{The four service threads are not the tail bottleneck.}
+If they were a queue, adding threads would drain it. They do not move the scan
+tail at all: 55.5, 55.0 and 55.5\,\textmu s at 2, 4 and 6 threads on uniform
+scans at 512\,MB, flat inside one 500\,ns bucket, and 51.0 / 51.0\,\textmu s at
+2 and 4 threads on Zipfian scans. Where thread queueing does show up is lookups,
+and there four threads \emph{relieve} it: 22.5, 13.5 and 13.0\,\textmu s at 2, 4
+and 6 threads. Two threads under serve the RPC stream; four do not. The scan
+tail is set by the cost of the offloaded multi leaf scan itself.
+
+% ---------------------------------------------------------------------------
+\q{So what should DEX have been built as?}{q:should}
+
+\ans Not a better cache. A system whose \emph{execution venue} is a run time
+decision.
+
+Everything from \qref{q:point} to \qref{q:enough} is one finding stated several
+ways. DEX spends its entire design budget on the frequency of a remote trip, and
+the quantity that actually bounds it is the cost of one. Eight times the cache
+moves uniform scans from 0.42 to 0.56\,Mops, reads per operation barely halve,
+0.31\% of operations are served locally at the largest cache, and the tail never
+reaches DART on any of the four workloads. More memory does not fix it, because
+a miss costs a whole page no matter how rarely it happens. An index strategy can
+walk along that curve. It cannot move it.
+
+Everything from \qref{q:push} to \qref{q:cost} says what moving it takes, and
+how little. One event was converted, at one level of the tree, behind one gate.
+That was enough to take matrix coverage from 2 cells to 11 on throughput and
+from 0 to 4 on tail and on both at once, to drop the reachable p99 floor from
+26.5 to 12.5\,\textmu s, to make each megabyte of cache 1.8 to 4.1 times more
+productive, and to win on scans at one eighth the memory the as built design
+needs. It cost four threads out of forty, and the bill falls as the cache
+improves. A design that treated the venue as a variable from the beginning,
+rather than as a boolean bolted onto a cache, would have had all of this
+available on day one.
+
+\paragraph{The generalisation.}
+Three properties are worth stating as design rules rather than as results,
+because none is specific to a B$^+$ tree or to this cluster. They are also the
+three predictions Arm~II is a test of.
+
+\begin{enumerate}
+  \item \textbf{Ship answers, not pages, but only where caching loses.} The
+    inner path is where caching wins and it should stay one sided and remote CPU
+    free. The leaf level is where caching structurally cannot win, because leaf
+    residency scales with the data, and it is exactly the level worth executing
+    remotely. Choosing the venue \emph{per level} is what keeps the memory node
+    idle for the majority of the work.
+  \item \textbf{Gate the remote venue on evidence the index already has.} A miss
+    is a free, exact signal that the compute side cannot answer locally.
+    Conditioning remote execution on it makes the cost self limiting, which is
+    what separates this from unconditional pushdown: cache and offload become
+    complements rather than substitutes, and adding cache reduces the memory
+    node bill instead of stranding the mechanism.
+  \item \textbf{Make the venue decision per operation, not per system.} The
+    within scan behaviour is the sharpest evidence. A scan whose prefix is
+    resident is served entirely locally and costs the memory node nothing; only
+    the uncached tail is offloaded. That is the fast mode in the histogram, and
+    it is why the knob adds a head to the latency distribution rather than a
+    tail.
+\end{enumerate}
+
+\paragraph{And what DART keeps.}
+DART reaches its operating point through structural locality and spends nothing
+on the memory node, which keeps it the structurally cheaper design under a
+strict reading of disaggregation, and that should be said as plainly as the
+rest. The claim here is narrower and, we think, more useful: a cached tree can
+meet DART on DART's own axis, on a quarter to an eighth of the memory the cached
+design would need, paid for with four threads. Cache alone had eight times the
+memory and could not close the gap. Composing the two closes it at the first
+cache point.
+
+% ===========================================================================
+\section{Arm II: CHIME versus DART}
+\label{sec:chime}
+
+\status{Experiment~A and the lever sweep are complete and are reported here.
+Experiment~B, the matched head to head against DART, is run but is held back
+from this draft because its thread counts are not yet matched
+(Section~\ref{sec:chimeopen}).}
+
+\paragraph{Why CHIME is the right second test.}
+Arm~I could be explained away in a manner that would leave the thesis intact but
+uninteresting: perhaps DEX in particular happened to have an unusually bad leaf
+miss, and the rescue is a fact about DEX rather than about execution venue.
+CHIME is the natural control, because it is a member of the same deprecated
+family that already economised on the remote trip in a \emph{different}
+direction. Where DEX reduced how often a trip happens, CHIME reduces how many
+trips a search needs, pairing a hopscotch leaf layout with a compute side cache
+so that one one sided read covers more of the search. If the three design rules
+of \qref{q:should} are properties of venue, the same miss gated push should move
+CHIME's operating point too, and for the same reason. If instead the rescue is
+specific to how DEX fetches leaves, CHIME should show little movement, and the
+thesis of this paper should be narrowed accordingly.
+
+\paragraph{The axis is different, and deliberately so.}
+Arm~I swept cache from 64 to 512\,MB against an index whose leaf level was far
+larger than any of those, so the sweep never crossed a residency boundary; it
+only moved along one side of it. CHIME's internal node index is approximately
+55\,MB, so the cache points are chosen at 64, 32 and 16\,MB, which brackets that
+figure: the index fits, is stressed, and is heavily stressed. This makes Arm~II a
+test of the same claim under a condition Arm~I could not create, namely a cache
+that is genuinely adequate for the inner path and then progressively is not. The
+provisioning rule of \qref{q:whyworks} predicts the offload path should matter
+least at 64\,MB and most at 16\,MB, and that its cost should rise as the cache
+shrinks rather than as the load grows.
+
+\paragraph{The two experiments.}
+Experiment~A is the ablation, CHIME with the offload path off and on, at each
+cache point, across all four workloads, driven by
+\texttt{CHIME/run/run\_cache\_stress.sh}. Cache size is a runtime parameter
+(\texttt{CHIME\_CACHE\_MB}) rather than a build flag, so as in Arm~I the two
+configurations are one setting apart on one binary and any difference is causal.
+Experiment~B is the head to head, a matched sweep via
+\texttt{DART/script/cache\_sweep\_compare.sh} with the overlay produced by
+\texttt{compare\_chime\_dart.py}.
+
+\paragraph{The comparability contract, including what cannot be equalised.}
+This needs stating up front because one part of it is genuinely not achievable.
+DART is a radix tree and CHIME is a B$^+$ tree, and ART's adaptive nodes
+(Node4/16/48/256) have no fixed span, so ``the same inner node size'' is not a
+condition that can be imposed on both. We therefore do not claim it. What is
+held equal is the dataset (30\,M keys of 8\,B with 48\,B values, expressed as
+CHIME \texttt{BULK=30}, \texttt{keyLen=8}, \texttt{simulatedValLen=48} and DART
+\texttt{mb\_key\_count=30M}, \texttt{payload\_byte=48}), the cache budget (DART's
+being per thread, so the total is divided by the thread count), the workloads,
+and a thread count of 24. CHIME is pinned at \texttt{internalSpanSize=16}. The
+full contract is recorded in \texttt{CHIME/EXPERIMENTS\_cache\_stress.md}.
+
+\paragraph{One difference from Arm~I that must not be silently absorbed.}
+Latency in Arm~II is compared \textbf{mean against mean}, not p99 against p99,
+because DART reports a mean and CHIME's mean is what the \texttt{[ALL OPS]} log
+line yields under that harness. Arm~I's strongest results are tail results, and
+they will not have a direct counterpart here. Any tail claim for CHIME will
+require the same per bucket instrumentation Arm~I used, and until that is in
+place Arm~II can speak to throughput and mean latency only. We flag this rather
+than reporting a mean and letting it be read as a tail.
+
+% ---------------------------------------------------------------------------
+\q{Does the second lever move CHIME's operating point too?}{q:chimemoves}
+
+\ans Yes, and it moves it in a different place than in DEX, which is what makes
+the arm informative rather than merely confirmatory. In DEX the caching lever had
+no residency boundary inside the sweep and the second lever helped everywhere. In
+CHIME there is a boundary, the sweep crosses it, and the two levers turn out to
+act on opposite sides of it.
+
+We swept the compute side budget across 512, 256, 128 and 64\,MB, crossed with a
+leaf caching arm and with the offload arm, over four workloads: 64 cells, six
+hours per node. The leaf cache is carved \emph{out} of the total budget rather
+than added to it, so every arm occupies identical compute side memory and caching
+leaves has to earn its share against the inner nodes it displaces. Without that
+constraint a win would only report that CHIME had been given more memory.
+
+\paragraph{Read the sweep against inner cache, not total.}
+This is the step that makes the result legible. What the caching lever actually
+spends on the descent is the \emph{inner} budget, and the leaf arm halves it. Once
+the cells are re-indexed that way, the two arms become commensurable: a leaf on
+cell at 128\,MB total and a leaf off cell at 64\,MB total both run a 64\,MB inner
+cache, and they measure 0.645 and 0.632\,Mops, within 2\% of each other, despite
+one holding twice the total memory. Performance here is a function of the inner
+budget and the total is close to irrelevant, which is a fact about CHIME worth
+reporting on its own.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{fig_lever_map.pdf}
+  \caption{The lever map. Compute node throughput against the inner node cache,
+  which is what the caching lever spends. The shaded band is where CHIME's
+  internal index, roughly 90 to 100\,MB at this geometry, stops fitting. Caching
+  raises the right hand plateau and does almost nothing to the left of the band;
+  offload raises the left hand floor and is inert to the right of it. The two
+  levers act on disjoint parts of the curve, and only their combination is high
+  on both sides.}
+  \label{fig:levermap}
+\end{figure*}
+
+Figure~\ref{fig:levermap} is the answer, and each lever has a signature.
+
+\begin{itemize}
+  \item \textbf{Caching raises the plateau.} Adding the leaf cache lifts point
+    Zipfian from 2.857 to 3.999\,Mops, a 40\% gain, and batched range Zipfian
+    from 0.500 to 0.594, a 19\% gain. To the left of the band it does essentially
+    nothing: 1.091 becomes 1.250.
+  \item \textbf{Offload removes the cliff.} At a 64\,MB inner cache, point
+    Zipfian goes from 1.091 to 2.727\,Mops. To the right of the band it is
+    \emph{exactly} inert, holding 2.857 across three consecutive cache points.
+    That flatness is the miss gate of \qref{q:push} working as specified: with
+    only level one nodes cached, a cache hit cannot pass the gate at all.
+  \item \textbf{Together they exceed what either reaches.} At a 32\,MB inner
+    cache with 32\,MB of leaf cache, point Zipfian reaches 3.157\,Mops. Stock
+    CHIME's ceiling is 2.857 and it needs at least a 128\,MB inner cache to hold
+    it. The pair therefore delivers 1.11 times stock's best ever number on half
+    the total budget and a quarter of the inner budget.
+\end{itemize}
+
+\shortans{The same miss gated push moves CHIME as it moved DEX, so the rescue is
+a property of execution venue rather than of how DEX fetches leaves. What CHIME
+adds is that the two levers are separable in the data: one owns the plateau, the
+other owns the cliff, and neither substitutes for the other.}
+
+\paragraph{Where it does not hold, stated plainly.}
+The headline is a Zipfian result. Under uniform, both levers at a 32\,MB inner
+cache reach 1.666\,Mops against a stock plateau of 2.307, so the pair does
+\emph{not} beat stock's ceiling there; it only removes the cliff. And on uniform
+scans the leaf caching lever is a net loss at every budget we swept, costing 21\%
+at 512\,MB, because a uniform scan streams through leaves it will never revisit
+and there is nothing for that lever to hold.
+
+\paragraph{One lever can also make things worse, and the other bounds it.}
+At a 128\,MB total budget the leaf arm runs a 64\,MB inner cache, which is below
+the band, and uniform point throughput falls from 2.307 to 0.645\,Mops. That is a
+3.6 times self inflicted collapse caused by spending budget on the wrong lever.
+With offload on, the same cell recovers to 1.714. So the second lever is not
+merely additive. It bounds the downside of using the first one aggressively,
+which is what makes an aggressive caching policy safe to adopt at all.
+
+% ---------------------------------------------------------------------------
+\q{Does the crossings account survive a deliberate attempt to falsify
+it?}{q:falsify}
+
+\ans It does, and the attempt is worth reporting because it failed in the exact
+manner the account predicts. The claim of \qref{q:whyworks} is that what matters
+is crossings and not bytes. That claim forbids something specific: an
+optimisation that shrinks the bytes a crossing carries, applied where the
+baseline already spends exactly one crossing, must not help, and must not be
+rescued by a high hit rate either.
+
+CHIME's scan path is precisely that setting. It spends one read per covered leaf.
+Our first leaf cache did shrink those reads, from roughly a kilobyte to a 24 byte
+validation probe on a hit, a factor of about forty, while leaving the crossing
+count untouched: the probe is still issued per covered leaf. The account predicts
+a regression, and the measurement delivered one, of 41\% on uniform scans. More
+tellingly it also lost 15\% on Zipfian scans \emph{at a 59\% hit rate}, which
+rules out the obvious alternative explanation that the cache was simply too
+small.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.94\linewidth]{fig_scan_repair.pdf}
+  \caption{The falsification test and its repair. Shrinking the bytes per covered
+  leaf by roughly forty times while leaving the crossing count alone loses
+  throughput, and loses it even on the Zipfian cells where the hit rate is 59\%.
+  Batching the covered set into two doorbell rounds removes crossings instead of
+  bytes, and the Zipfian arm turns from a regression into a gain.}
+  \label{fig:scanrepair}
+\end{figure}
+
+The repair follows from the same account. The covered leaf set is fully known
+before any I/O is issued, so the probes need not be serial: one batch validates
+every resident leaf and a second fetches the rest, taking a twelve leaf scan from
+twelve crossings to two. Figure~\ref{fig:scanrepair} shows the result. The
+Zipfian arm moves from $-15\%$ to $+19\%$, and the uniform arm from $-41\%$ to
+$-21\%$. The leaf arm gains between 35\% and 40\% in all four cells, and the near
+uniformity of that gain is itself evidence: a crossing count fix should show up
+as a flat multiplier that does not depend on hit rate, and it does.
+
+\shortans{An optimisation that removed bytes without removing crossings lost
+41\%, and lost even at a 59\% hit rate; the same cache, given a batching path
+that removes crossings instead, gains 19\%. The account is falsifiable, we
+attempted it, and it survived.}
+
+\paragraph{The point path is untouched, which is also the control.}
+Batching changed only the scan path, and the point cells reproduce across two
+independent six hour sweeps to four decimal places: 2.3072 against 2.307 for
+uniform baseline, 3.9991 against 3.999 for the Zipfian leaf arm. Run to run noise
+where the index fits is therefore negligible, and the scan movements above are
+signal. In the stressed cells noise runs 5 to 12\%, so small differences at or
+below a 64\,MB inner cache should not be read.
+
+\paragraph{The tail did not follow the throughput.}
+This is the one place where the second lever buys throughput and gives something
+back. On Zipfian scans at 512\,MB the leaf arm gains 19\% of throughput while p99
+moves the wrong way, 90.5\,\textmu s against 81.0 for stock; on uniform scans p99
+is 116.5 against 81.0, improved from 157.5 before batching but still worse than
+stock. The likely cause is the batching itself: a scan that must fetch many
+leaves now takes one large stall rather than several small ones, which helps the
+mean and hurts the tail. Arm~I's result was that the push improves throughput and
+tail together. Arm~II's leaf caching lever does not, and we report it rather than
+quoting the throughput alone.
+
+% ---------------------------------------------------------------------------
+\subsection{Open items for this arm}
+\label{sec:chimeopen}
+
+Three things are outstanding and each is stated so a reader can discount the arm
+appropriately.
+
+\begin{itemize}
+  \item \textbf{The head to head is not thread matched.} The committed DART
+    baseline for this arm was run with 34 and 36 client threads on one machine,
+    while CHIME runs the same binary on both nodes, so a 34 thread setting means
+    68 client threads in total. We therefore report CHIME against itself here and
+    hold the DART overlay back rather than publish a ratio whose denominator is
+    not comparable.
+  \item \textbf{The admission ratio has not been swept.} The batched path ships
+    with per path admission set to admit everything, deliberately, so that the
+    batching change could be attributed on its own. The residual $-21\%$ on
+    uniform scans is the per miss fill cost that admission exists to remove, and
+    at a 12\% hit rate roughly 88\% of covered leaves pay it. That sweep is the
+    obvious next measurement.
+  \item \textbf{The sweep does not cross the band in one configuration.} The
+    cells at and above a 64\,MB inner cache come from the sweep reported here;
+    the more heavily stressed points come from an earlier sweep at a different
+    thread count and value size. They are not spliced into one curve anywhere in
+    this paper, and a single configuration spanning 16 to 512\,MB would replace
+    both.
+\end{itemize}
+
+% ===========================================================================
+\section{Arm III: Scale Out}
+\label{sec:scaleout}
+
+\status{Not yet run. Stated here because it is the sharpest open question for
+the argument, not a loose end.}
+
+Arm~I's cost result is that the memory node bill is gated by the miss rate
+rather than the operation rate, and that four service threads out of forty
+capture the whole benefit (\qref{q:cost}). Both of those were measured on two
+nodes, one compute and one memory (\texttt{kNodeCount 2}). Self limiting per
+compute node is not the same property as bounded across many, and the difference
+is exactly where a design that spends memory node CPU must answer to a design
+that spends none.
+
+The asymmetry is easy to state. As compute nodes are added, DART's demand for
+memory node CPU stays at zero by construction. The hybrid's demand grows with
+the aggregate miss rate, and the memory tier it draws on is fixed. So there is
+some number of compute nodes at which the four thread budget stops being
+sufficient, and the questions that matter are what that number is, what sets it,
+and whether the miss gate makes it recede.
+
+The gate predicts it should. Per compute node, more cache means fewer RPCs, and
+the aggregate bill is the sum of per node miss rates rather than of per node
+operation rates. An unconditional pushdown design would scale its memory node
+demand with total throughput, and would therefore hit a hard wall; a miss gated
+design should scale it with total \emph{misses}, which is a smaller and more
+compressible quantity. That is a prediction with an obvious falsifier: if the
+service tier saturates at a compute node count that a pushdown design would also
+have reached, the gating bought nothing at scale and the Arm~I result is a two
+node result. The sweep will report the same axes as Arm~I, adding compute node
+count, and the quantity to watch is memory node CPU utilisation per unit of
+delivered throughput.
+
+% ===========================================================================
+\section{Summary}
+\label{sec:summary}
+
+Taken exactly as built, DEX holds an operating point that does not reach DART's
+on any workload at any cache size we swept, and the cause is not the cache being
+too small. It is that the cache changes how often the remote toll is paid and
+never what the toll is: at 512\,MB only 0.31\% of uniform lookups are served
+locally, and each of the remaining 99.7\% drags a whole leaf page across the
+wire to deliver 8\,B. Two of sixteen cells reach DART on throughput and none on
+tail.
+
+Cached DEX and offloaded DEX are not two designs to choose between. Composed,
+they are one index: a cached inner path served one sided, leaf misses shipping
+results instead of pages, and an RPC path gated to fire only on a miss. Against
+the same fixed DART baseline that composition
+
+\begin{itemize}
+  \item relocates the operating point on both axes at once, ending 71\% to 162\%
+    higher on throughput and 39\% to 53\% lower on p99 at 512\,MB;
+  \item takes matrix coverage from 2 to 11 cells on throughput, from 0 to 4 on
+    tail, and from 0 to 4 on both simultaneously;
+  \item drops the reachable p99 floor from 26.5 to 12.5\,\textmu s, so tail
+    targets unservable at any cache size become servable at 256\,MB;
+  \item makes each megabyte of cache 1.8 to 4.1 times more productive, because
+    the cache is asked to hold the inner nodes rather than the data, which is
+    also why it beats the as built design on scans at one eighth the memory;
+  \item pays for all of it with four memory node service threads whose
+    engagement is gated by the miss rate, so the bill recedes as cache or skew
+    makes the compute side self sufficient.
+\end{itemize}
+
+The bounds are recorded in \qref{q:stops}: scan tails remain above DART's
+everywhere in the swept range, and Zipfian lookups are the one cell where cache
+alone also passes DART's throughput. Two arms remain. CHIME versus DART asks
+whether the same rescue works on a design that economised on trip shape rather
+than trip count, across the cache size at which its internal index stops
+fitting. The scale out sweep asks whether the miss gate keeps the memory node
+bill bounded as compute nodes are added, which is where a design that spends
+memory node CPU must finally answer to one that spends none. DART remains the
+structurally cheaper design under strict disaggregation. What Arm~I reports is
+that the family DART's own case deprecates was not poorer by structure. It was
+poorer by one unexamined constant.
+
+\balance
+\end{document}
