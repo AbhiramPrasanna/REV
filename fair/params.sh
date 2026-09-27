@@ -91,6 +91,24 @@ quiet_filter() {
   grep --line-buffered -vE '^[[:space:]]*$|REMOTE CPU LOAD|^[[:space:]]*dir [0-9]+: active|AGGREGATE active|^\[CPU (compute|memory) *\]' || true
 }
 
+# Clear everything a previous run could have left on THIS server: benchmark
+# processes of all three systems and this user's memcached. Each system's
+# script also resets memcached before every cell; this is the between-systems
+# (and after-a-crash) reset. Safe to run when nothing is left.
+cleanup_node() {
+  echo ">> [$(hostname -s)] cleanup: stopping leftover newbench / micro_test / DART processes and memcached"
+  sudo pkill -9 -x newbench 2>/dev/null
+  pkill -9 -u "$(id -u)" -x micro_test 2>/dev/null
+  sudo pkill -9 -f "$DART_DIR/bin/(monitor|compute|memory)" 2>/dev/null
+  pkill -u "$(id -u)" -x memcached 2>/dev/null   # only ours: server 8 is shared
+  rm -f /tmp/memcached-fair.pid
+  sleep 3
+  if pgrep -x newbench >/dev/null || pgrep -u "$(id -u)" -x micro_test >/dev/null; then
+    echo ">> cleanup: WARNING, benchmark processes still running:" >&2
+    pgrep -af "newbench|micro_test" >&2
+  fi
+}
+
 preflight_cores() {   # warn if client + memory threads cannot each get a core
   local need=$1 have
   have=$(nproc 2>/dev/null || echo 0)
