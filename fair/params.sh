@@ -82,6 +82,15 @@ memc_set_zero() {   # host port key
   exec 3>&- 3<&-
 }
 
+# Terminal filter: hide the every-2-second load reports (REMOTE CPU LOAD / dir /
+# AGGREGATE / [CPU ...] lines) so the per-cell results stay readable. The log
+# files written by `tee` still contain everything (the scripts parse them).
+# SHOW_LOAD=1 shows them on the terminal too.
+quiet_filter() {
+  if [ "${SHOW_LOAD:-0}" = 1 ]; then cat; return; fi
+  grep --line-buffered -vE '^[[:space:]]*$|REMOTE CPU LOAD|^[[:space:]]*dir [0-9]+: active|AGGREGATE active|^\[CPU (compute|memory) *\]' || true
+}
+
 preflight_cores() {   # warn if client + memory threads cannot each get a core
   local need=$1 have
   have=$(nproc 2>/dev/null || echo 0)

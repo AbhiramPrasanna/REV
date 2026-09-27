@@ -293,7 +293,12 @@ run_one() {
   echo "############################################################"; echo
   # stdbuf -oL: line-buffer through the `| tee` pipe, otherwise progress prints
   # sit in a 4KB buffer during the (slow) bulk load and the run looks hung.
-  ( cd "$BUILD_DIR" && env "${envs[@]}" stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "$log"
+  # The terminal hides the every-2-second load reports (REMOTE CPU LOAD / dir /
+  # AGGREGATE / [CPU ...]); the log keeps them all. SHOW_LOAD=1 shows them too.
+  ( cd "$BUILD_DIR" && env "${envs[@]}" stdbuf -oL -eL "${cmd[@]}" ) 2>&1 | tee "$log" \
+    | if [[ "${SHOW_LOAD:-0}" == 1 ]]; then cat; else
+        { grep --line-buffered -vE '^[[:space:]]*$|REMOTE CPU LOAD|^[[:space:]]*dir [0-9]+: active|AGGREGATE active|^\[CPU (compute|memory) *\]' || true; }
+      fi
 
   # ---- extract headline numbers into a CSV row -------------------------
   # Throughput now comes from micro_test's [RESULT] line: this node's exact

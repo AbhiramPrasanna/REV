@@ -87,7 +87,7 @@ for mt in $MEMTHREADS; do
 
       if [ "$role" = compute ]; then
         restart_memcached || { echo "memcached restart failed" >&2; exit 1; }
-        sudo stdbuf -oL "$BIN" "${args[@]}" 2>&1 | tee "$log"
+        sudo stdbuf -oL "$BIN" "${args[@]}" 2>&1 | tee "$log" | quiet_filter
         thr=$(awk '/Final throughput =/{v=$NF} END{print (v!=""?v:"NA")}' "$log")
         p99=$(awk '/^[[:space:]]*ALL[[:space:]]/{ if(match($0,/p99=[ ]*[0-9.]+/)){s=substr($0,RSTART,RLENGTH);gsub(/p99=[ ]*/,"",s);v=s} } END{print (v!=""?v:"NA")}' "$log")
         rr=$(awk '/Avg. rdma read \/ op =/{v=$NF} END{print (v!=""?v:"NA")}' "$log")
@@ -101,7 +101,7 @@ for mt in $MEMTHREADS; do
         sleep 3
       else
         wait_for_compute || exit 1
-        sudo stdbuf -oL "$BIN" "${args[@]}" 2>&1 | tee "$log"
+        sudo stdbuf -oL "$BIN" "${args[@]}" 2>&1 | tee "$log" | quiet_filter
         pk=$(sed -nE 's/.*AGGREGATE active = ([0-9.]+)%.*/\1/p' "$log" | sort -g | tail -1)
         pt=$(sed -nE 's/.*AGGREGATE active = [0-9.]+% \(of [0-9]+ dir-threads; ([0-9.]+)% per-thread.*/\1/p' "$log" | sort -g | tail -1)
         echo "dex,$wl,$cache,$mt,${pk:-NA},${pt:-NA},$log" >> "$csv_m"
