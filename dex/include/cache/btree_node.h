@@ -43,8 +43,24 @@ static const uint64_t swizzle_hide = (1ULL << 63) - 1;
 // Keep multiples of 16. leafPageSize must stay <= the RDMA buffer slot
 // (max(kLeafPageSize,kInternalPageSize) in Common.h, currently 1024); raise
 // those if you grow leafPageSize past 1024.
-static const uint64_t innerPageSize = 160; // INNER fanout (height) knob
-static const uint64_t leafPageSize = 512;  // LEAF size knob (fetch cost)
+//
+// Build-time override (cmake -DDEX_INNER_PAGE=<B> -DDEX_LEAF_PAGE=<B>). The
+// defaults (160 / 512) are the geometry every existing DEX result used (tree
+// height 22). For the fair DEX/CHIME/DART comparison use 336 / 352: with the
+// 64 B NodeBase that gives 16 inner entries and 16 leaf entries, matching
+// CHIME's internalSpanSize = leafSpanSize = 16 (height ~6-7 at 50M keys).
+#ifndef DEX_INNER_PAGE
+#define DEX_INNER_PAGE 160
+#endif
+#ifndef DEX_LEAF_PAGE
+#define DEX_LEAF_PAGE 512
+#endif
+static const uint64_t innerPageSize = DEX_INNER_PAGE; // INNER fanout (height) knob
+static const uint64_t leafPageSize = DEX_LEAF_PAGE;   // LEAF size knob (fetch cost)
+static_assert(DEX_INNER_PAGE % 16 == 0 && DEX_LEAF_PAGE % 16 == 0,
+              "page sizes must be multiples of 16");
+static_assert(DEX_INNER_PAGE <= DEX_LEAF_PAGE,
+              "inner geometry must fit in the leaf-sized physical slot");
 static const uint64_t pageSize = leafPageSize; // physical / cache-slot / IO size
 static const uint64_t megaLevel =
     4; // 4 level as a Bigger Node to do coarse-grained distribution

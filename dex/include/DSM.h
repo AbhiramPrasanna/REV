@@ -426,9 +426,29 @@ public:
   }
 };
 
+// MN_ONLY_PLACEMENT (cmake -DMN_ONLY_PLACEMENT=ON): every tree node is placed on
+// a memory node, never on a compute node. Stock DEX treats every machine as a
+// memory server, so with 2 machines tree levels alternate between the compute
+// node and the memory node (get_random_id always picks the *other* node) and
+// the compute node's dir threads serve part of the pushdown RPCs. Compute nodes
+// are node IDs [0, computeNR); memory nodes are [computeNR, machineNR).
+// The root pointer store (kRootPointerStoreOffest on node 0) is unchanged.
+inline uint32_t dsm_placement_node(uint32_t node_id, uint32_t machineNR,
+                                   uint32_t computeNR) {
+#ifdef MN_ONLY_PLACEMENT
+  if (computeNR < machineNR) {
+    uint32_t mem_nodes = machineNR - computeNR;
+    return computeNR + (node_id % mem_nodes);
+  }
+#else
+  (void)computeNR;
+#endif
+  return node_id % machineNR;
+}
+
 inline GlobalAddress DSM::alloc(size_t size) {
-  thread_local int next_target_node =
-      (getMyThreadID() + getMyNodeID()) % conf.machineNR;
+  thread_local int next_target_node = dsm_placement_node(
+      getMyThreadID() + getMyNodeID(), conf.machineNR, conf.computeNR);
   thread_local int next_target_dir_id =
       (getMyThreadID() + getMyNodeID()) % memThreadCount;
 
@@ -442,7 +462,8 @@ inline GlobalAddress DSM::alloc(size_t size) {
     local_allocator.set_chunck(rpc_wait()->addr);
 
     if (++next_target_dir_id == memThreadCount) {
-      next_target_node = (next_target_node + 1) % conf.machineNR;
+      next_target_node = dsm_placement_node(next_target_node + 1,
+                                            conf.machineNR, conf.computeNR);
       next_target_dir_id = 0;
     }
 
@@ -454,7 +475,7 @@ inline GlobalAddress DSM::alloc(size_t size) {
 }
 
 inline GlobalAddress DSM::alloc(size_t size, uint32_t node_id) {
-  node_id = node_id % conf.machineNR;
+  node_id = dsm_placement_node(node_id, conf.machineNR, conf.computeNR);
   thread_local int next_target_dir_id =
       (getMyThreadID() + getMyNodeID()) % memThreadCount;
 

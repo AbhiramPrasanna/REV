@@ -17,6 +17,28 @@ if(MANUAL_PUSHDOWN)
   message(STATUS "MANUAL_PUSHDOWN enabled: rpc_rate controls offloading (adaptive policy off)")
 endif()
 
+# Place every tree node on a memory node (never on the compute node). Stock DEX
+# spreads nodes over all machines; see dsm_placement_node() in include/DSM.h.
+option(MN_ONLY_PLACEMENT "Allocate all tree nodes on memory nodes only" OFF)
+if(MN_ONLY_PLACEMENT)
+  add_definitions(-DMN_ONLY_PLACEMENT)
+  message(STATUS "MN_ONLY_PLACEMENT enabled: tree nodes live on memory nodes only")
+endif()
+
+# Node geometry (bytes). Defaults reproduce every existing DEX result
+# (inner 160 -> fanout 5, height 22; leaf 512 -> 25 entries). Fair comparison
+# with CHIME (16-entry inner and leaf nodes): -DDEX_INNER_PAGE=336 -DDEX_LEAF_PAGE=352
+set(DEX_INNER_PAGE "" CACHE STRING "DEX inner node geometry in bytes (default 160)")
+set(DEX_LEAF_PAGE "" CACHE STRING "DEX leaf node size in bytes (default 512)")
+if(DEX_INNER_PAGE)
+  add_definitions(-DDEX_INNER_PAGE=${DEX_INNER_PAGE})
+  message(STATUS "DEX_INNER_PAGE=${DEX_INNER_PAGE}")
+endif()
+if(DEX_LEAF_PAGE)
+  add_definitions(-DDEX_LEAF_PAGE=${DEX_LEAF_PAGE})
+  message(STATUS "DEX_LEAF_PAGE=${DEX_LEAF_PAGE}")
+endif()
+
 if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0 -mssse3 -march=native")
 elseif(${CMAKE_BUILD_TYPE} STREQUAL "RelWithDebInfo")

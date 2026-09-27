@@ -256,14 +256,20 @@ public:
   // up to `num` pairs into its scratch slot; on return `result_addr` is that
   // slot (RDMA-read `cnt` pairs from it), `max_key` is the resume boundary, and
   // `leaves` is how many leaves the MN scanned (for offload accounting).
+  // `start_level` (default 1): level of `leaf_addr` as the CN's cache reported
+  // it. 1 = it is the entry leaf. >= 2 = it is an internal node; the MN walks
+  // down to the leaf itself (the scan counterpart of rpc_lookup's descent).
   int rpc_scan(const GlobalAddress &leaf_addr, const Key &from, const Key &to,
-               int num, GlobalAddress &result_addr, Key &max_key, int &leaves) {
+               int num, GlobalAddress &result_addr, Key &max_key, int &leaves,
+               int start_level = 1) {
     RawMessage m;
     m.type = RpcType::RPC_SCAN;
     m.addr = leaf_addr;
     memcpy(&m.k, from.data(), define::keyLen);
     memcpy(&m.v, to.data(), define::keyLen);
-    m.level = num;
+    // Same packing as chime_offload::pack_scan_level (chime_rpc.h): count in
+    // bits 0-15, start level in bits 16-31. Kept inline to avoid an include cycle.
+    m.level = (num & 0xFFFF) | ((start_level & 0xFFFF) << 16);
     rpc_call_dir(m, leaf_addr.nodeID, thread_id % chime::num_dir());
     auto *mm = rpc_wait();
     result_addr = mm->addr;

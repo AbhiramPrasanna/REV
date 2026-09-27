@@ -59,10 +59,17 @@
 // }
 
 // Max memory-node directory (service) threads. memThreadCount must be <= this.
-// Raised 4 -> 8 to allow the memThreadCount sweep up to 8 (sweep_memthreads.sh).
+// Raised 4 -> 8 -> 16: 8 covers the 2/4/6/8 sweep, 16 is the saturation control
+// ("does more MN CPU still buy anything once 8 threads have stopped helping?").
 // NOTE: changing this changes per-node DSM/directory layout, so BOTH nodes must
 // be rebuilt with the same value or QP/DSM metadata desyncs.
-#define NR_DIRECTORY 8
+//
+// This is only the array bound; memThreadCount (argv) picks how many run. DSM
+// spawns memThreadCount dir threads on EVERY node, compute node included, and
+// they busy-poll, so a high count also costs compute-node cores. Directory.cpp
+// pins them from the top of the real core count for that reason; check
+// (cores - memThreadCount) >= app threads before running a large value.
+#define NR_DIRECTORY 16
 
 #define LOCK_VERSION 1
 

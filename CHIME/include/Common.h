@@ -69,7 +69,11 @@
 // dsmRKey[], local_allocators[][], dirMessageQPN[], ...) and drives the QP
 // exchange in DSMKeeper. Those stay at the max on every node so the two nodes'
 // connection exchange is symmetric no matter how many dir threads actually run.
-#define NR_DIRECTORY 8
+//
+// Raised 8 -> 16 so CHIME_DIR_THREADS can reach the same 16-thread saturation
+// control DEX now sweeps to. Changing it changes the per-node QP layout, so
+// BOTH nodes must be rebuilt with the same value.
+#define NR_DIRECTORY 16
 #define DIR_MESSAGE_NR 128
 
 namespace chime {

@@ -235,6 +235,13 @@ std::atomic<int> done_cnt{0};   // threads that finished their op quota
 // 0 = op-bounded: run exactly opM*1e6 ops per node (DEX's time_based=0).
 // 1 = time-bounded: cycle the array for TEST_EPOCH*TIME_INTERVAL seconds.
 int g_time_based = 0;
+// CHIME_MN_CLIENTS=0: the memory node (node 0) runs no client operations. Its
+// threads still take part in every barrier (bulk / warmup / done), so the run
+// structure is unchanged, but only the compute node drives load -- the same
+// client placement as DEX and DART, where the memory node serves requests only.
+// Default 1 = stock behaviour (both nodes run kThreadCount clients each).
+bool g_run_clients = true;
+bool g_mn_clients = true;   // same value on every node (from the env var)
 
 
 void thread_bulk_load(int id) {
@@ -287,7 +294,8 @@ void thread_run(int id) {
 
   // 2. warmup (untimed) -- fills the CN cache. Now runs against a COMPLETE tree.
   uint64_t *my_warm = warmup_array + id * thread_warmup_num;
-  for (uint64_t c = 0; c < thread_warmup_num; ++c) run_item(my_warm[c], nullptr);
+  if (g_run_clients)
+    for (uint64_t c = 0; c < thread_warmup_num; ++c) run_item(my_warm[c], nullptr);
 
   warmup_cnt.fetch_add(1);
   if (id == 0) {
@@ -332,7 +340,7 @@ void thread_run(int id) {
   bench::ThreadStats &my_stats = bench::g_stats[tid];
   uint64_t *my_work = workload_array + id * thread_op_num;
   uint64_t cur = 0;
-  for (uint64_t done = 0; !need_stop && (g_time_based || done < thread_op_num); ++done) {
+  for (uint64_t done = 0; g_run_clients && !need_stop && (g_time_based || done < thread_op_num); ++done) {
     uint64_t item = my_work[cur];
     cur = (cur + 1) % thread_op_num;
 
@@ -418,6 +426,20 @@ int main(int argc, char *argv[]) {
   if (const char *cm = getenv("CHIME_CACHE_MB")) g_index_cache_mb = atoi(cm);
   if (const char *ld = getenv("CHIME_LOADERS")) LOADER_NUM = atoi(ld);  // bulk-load threads
   if (const char *tb = getenv("CHIME_TIME_BASED")) g_time_based = atoi(tb);
+  if (const char *mc = getenv("CHIME_MN_CLIENTS")) g_mn_clients = (atoi(mc) != 0);
+  g_run_clients = g_mn_clients || dsm->getMyNodeID() != 0;
+  printf("[CONFIG node %d] clients on this node: %s (CHIME_MN_CLIENTS)\n",
+         dsm->getMyNodeID(), g_run_clients ? "yes" : "no");
+  {
+    auto flag = [](const char *n) { const char *s = getenv(n); return s && atoi(s) != 0; };
+    printf("[CONFIG node %d] scan path: from_cache=%d offload_always=%d "
+           "(CHIME_SCAN_FROM_CACHE / CHIME_SCAN_OFFLOAD_ALWAYS)\n",
+           dsm->getMyNodeID(), (int)flag("CHIME_SCAN_FROM_CACHE"),
+           (int)flag("CHIME_SCAN_OFFLOAD_ALWAYS"));
+  }
+  if (g_time_based && !g_run_clients)
+    printf("[CONFIG node %d] WARNING: time-bounded mode with no clients here\n",
+           dsm->getMyNodeID());
 
   // CHIME_CACHE_MB is the TOTAL compute-side cache budget. Without leaf caching it
   // is all internal nodes; with it, part goes to leaves. The total is the axis the
@@ -612,7 +634,9 @@ int main(int argc, char *argv[]) {
   // Then pick the sweep so the index falls INSIDE it: points below evict, points
   // above fit. If free_size is ~0 / negative here, the cache is overflowing and
   // eviction IS running (which is the regime we want at 16/32/64MB).
-  if (dsm->getMyNodeID() == 0) {
+  // Print from a node that actually ran the warmup: node 0 normally, the
+  // compute node when the memory node runs no clients (CHIME_MN_CLIENTS=0).
+  if (dsm->getMyNodeID() == (g_mn_clients ? 0 : kNodeCount - 1)) {
     printf("[INDEX] --- post-bulk-load cache occupancy (cache = %d MB) ---\n",
            g_index_cache_mb);
     tree->statistics();

@@ -1,0 +1,92 @@
+# ===========================================================================
+# fair/params.sh -- ONE set of settings for the fair DEX / CHIME / DART sweep.
+# Sourced by every fair/*.sh on BOTH servers. Anything here can be overridden
+# from the environment, but both servers must see the SAME values (in particular
+# RUN_ID, CACHES, MEMTHREADS, WORKLOADS), because the two sides walk the same
+# list of cells in the same order.
+#
+#   server 8 (10.30.1.8) = memory node   server 6 (10.30.1.6) = compute node
+#
+# What "fair" fixes (see ARCHITECTURE.md §7):
+#   same data      50M keys, 8 B keys, 8 B values, in all three systems
+#   same clients   36 client threads, all on the compute node
+#   same tree      DEX and CHIME both use 16-entry inner nodes and 16-entry leaves
+#   same cache     the TOTAL compute-side cache is the swept value in all three
+#                  (DART keeps no node cache, so for DART it has no effect)
+#   same run       10M warmup ops (DEX, CHIME; DART has no warmup phase) then
+#                  30M measured ops; p99 from 0.5 us histograms in all three
+# ===========================================================================
+
+: "${RUN_ID:?set RUN_ID to the same name on both servers, e.g. RUN_ID=fair1}"
+
+: "${MEM_IP:=10.30.1.8}"        # memory node (server 8)
+: "${CMP_IP:=10.30.1.6}"        # compute node (server 6)
+: "${MEMC_PORT:=11211}"
+
+: "${THREADS:=36}"              # client threads, compute node only
+: "${KEYS_M:=50}"               # keys loaded, millions
+: "${VALUE_B:=8}"               # value bytes
+: "${WARMUP_M:=10}"             # warmup ops, millions (DEX, CHIME)
+: "${OPS_M:=30}"                # measured ops, millions
+: "${SCAN_LEN:=100}"            # keys per range scan
+: "${ZIPF_THETA:=0.99}"
+
+# Swept axes.
+: "${CACHES:=32 64 128 256 512 1024}"       # total compute-side cache, MB
+: "${MEMTHREADS:=0 1 2 3 4 5 6 7 8}"         # memory node threads; 0 = no offloading
+: "${WORKLOADS:=point-uniform point-zipf range-uniform range-zipf}"
+
+# CHIME leaf cache arms run at every cell ("0 1"); CHIME+ is the better of the two.
+: "${CHIME_LEAF_SET:=0 1}"
+
+# Fair tree geometry (bytes). DEX: 64 B node header, 16 B per entry.
+#   inner 336 -> (336-8-64)/16 = 16 entries   leaf 352 -> (352-32-64)/16 = 16 entries
+# CHIME: internalSpanSize = leafSpanSize = 16 (its build default).
+DEX_INNER_PAGE=336
+DEX_LEAF_PAGE=352
+CHIME_INTERNAL_SPAN=16
+
+# Paths (same layout on both servers).
+REV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FAIR_DIR="$REV_DIR/fair"
+RESULTS_DIR="$FAIR_DIR/results/$RUN_ID"
+DEX_BUILD="$REV_DIR/dex/build_fair"
+CHIME_BUILD="$REV_DIR/CHIME/build_fair"
+DART_DIR="$REV_DIR/DART"
+
+# ---------------------------------------------------------------------------
+# small helpers shared by the run scripts
+# ---------------------------------------------------------------------------
+wl_dist()  { case "$1" in *-uniform) echo uniform ;; *) echo zipf ;; esac; }
+wl_op()    { case "$1" in point-*) echo point ;; *) echo range ;; esac; }
+
+# memcached text protocol over /dev/tcp (no nc needed).
+memc_get() {   # host port key -> value (empty if missing/unreachable)
+  local host=$1 port=$2 key=$3 line val=""
+  exec 3<>"/dev/tcp/${host}/${port}" 2>/dev/null || { echo ""; return 1; }
+  printf 'get %s\r\n' "$key" >&3
+  while IFS= read -r -t 2 line <&3; do
+    line=${line%$'\r'}
+    case "$line" in
+      VALUE*) IFS= read -r -t 2 val <&3; val=${val%$'\r'} ;;
+      END|ERROR*|"") break ;;
+    esac
+  done
+  exec 3>&- 3<&-
+  echo "$val"
+}
+memc_set_zero() {   # host port key
+  exec 3<>"/dev/tcp/$1/$2" 2>/dev/null || return 1
+  printf 'set %s 0 0 1\r\n0\r\n' "$3" >&3
+  IFS= read -r -t 2 _ <&3
+  exec 3>&- 3<&-
+}
+
+preflight_cores() {   # warn if client + memory threads cannot each get a core
+  local need=$1 have
+  have=$(nproc 2>/dev/null || echo 0)
+  if [ "$have" -lt "$need" ]; then
+    echo "WARNING: $(hostname -s) has $have logical CPUs; this run pins ~$need threads." >&2
+    echo "         Threads will share cores and results will understate every system." >&2
+  fi
+}

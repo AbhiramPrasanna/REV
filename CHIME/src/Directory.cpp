@@ -63,13 +63,20 @@ void Directory::dirThread() {
   // app range never reached the wrapped dir cores.
   //
   // Deriving from _SC_NPROCESSORS_ONLN instead makes it correct on any machine
-  // without a per-box macro edit. App threads occupy odd cores 1..2T-1 (main
-  // thread at 2T+1); dir threads take nproc-1, nproc-3, ... so they only ever
-  // collide if the app range genuinely runs out of cores -- which is warned below.
+  // without a per-box macro edit.
+  //
+  // App threads occupy ODD cores 1..2T-1 (micro_test pins app thread i to
+  // i*2+1, main thread to 2T+1), so dir threads now take EVEN cores from the
+  // top: nproc-2, nproc-4, ... That is collision-free by construction, whatever
+  // T is. The previous version counted down the ODD cores (nproc-1, nproc-3,
+  // ...), which was fine at 4 dir threads but not at 16: on a 64-core box those
+  // are 63..33, and with T=34 the app range runs to 67 and wraps, so the dir
+  // threads would sit on app cores and the memory-thread sweep would measure
+  // core contention rather than service capacity.
   long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
   if (ncpu <= 0) ncpu = CPU_PHYSICAL_CORE_NUM * 2;
-  int dir_core = (int)(ncpu - 1 - 2 * (long)dirID);
-  if (dir_core < 0) dir_core = (int)(ncpu - 1);
+  int dir_core = (int)(((ncpu - 1) & ~1L) - 2 * (long)dirID);
+  if (dir_core < 0) dir_core = (int)((ncpu - 1) & ~1L);
   bindCore((uint16_t)dir_core);
   Debug::notifyInfo("dir %d launch! (core %d of %ld)\n", dirID, dir_core, ncpu);
 
@@ -144,13 +151,24 @@ void Directory::process_message(const RawMessage *m) {
     auto *out = reinterpret_cast<std::pair<Key, Value> *>(
         scanScratchBase + (uint64_t)slot * chime_offload::kScanSlotBytes);
 
-    int want = m->level;
+    int want = 0, start_level = 0;
+    chime_offload::unpack_scan_level(m->level, want, start_level);
     if (want > chime_offload::kScanSlotCap) want = chime_offload::kScanSlotCap;
+
+    // start_level >= 2: m->addr is the CN's deepest cached internal node, so walk
+    // down to the leaf covering `from` here first (as RPC_LOOKUP does). Otherwise
+    // m->addr is already the entry leaf (the original request form).
+    GlobalAddress entry = m->addr;
+    if (start_level >= 2)
+      entry = chime_offload::descend_to_leaf((char *)dCon->dsmPool, m->addr,
+                                             start_level, from);
 
     Key max_key{};
     int leaves = 0;
-    int cnt = chime_offload::range_scan((char *)dCon->dsmPool, m->addr, from, to,
-                                        want, out, max_key, leaves);
+    int cnt = 0;
+    if (entry != GlobalAddress::Null())
+      cnt = chime_offload::range_scan((char *)dCon->dsmPool, entry, from, to,
+                                      want, out, max_key, leaves);
 
     send = (RawMessage *)dCon->message->getSendPool();
     send->level = cnt;                    // pairs packed

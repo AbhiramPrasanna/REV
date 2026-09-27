@@ -391,6 +391,16 @@ run_sequence() {
   mkdir -p "$base"
   SWEEP_CSV="$base/summary_${role}.csv"     # all rows (all cache points) land here
 
+  # When a caller sweeps the dir-thread count (DIR_SUBDIR=1), the per-cell log
+  # paths would otherwise be identical across dir values and each pass would
+  # overwrite the last. The CSV keeps its dir_threads column and stays one file,
+  # so resume still works across the whole sweep.
+  local mbase="$base"
+  if [[ "${DIR_SUBDIR:-0}" == 1 ]]; then
+    mbase="$base/dir_${DIR_THREADS}"
+    mkdir -p "$mbase"
+  fi
+
   echo ">> SWEEP: workloads=[${WORKLOADS:-point-uniform point-zipf range-uniform range-zipf}]  offload=[${SEQUENCE:-off on}]  role=$role"
   echo ">>        point op=${POINT_OP}M  range op=${RANGE_OP}M scan_range=${SCAN_RANGE}  zipf theta=${ZIPF_THETA}"
   if [[ -n "${LEAF_SET:-}" ]]; then
@@ -403,13 +413,13 @@ run_sequence() {
   if [[ ${#caches[@]} -eq 0 ]]; then
     echo ">>        cache: current build (kIndexCacheSize unchanged)"
     CACHE_CUR="build"
-    _run_matrix "$role" "$base"
+    _run_matrix "$role" "$mbase"
   else
     echo ">>        CACHE SWEEP CHIME_CACHE_MB=[${caches[*]}] (runtime, no rebuild)"
     local cmb
     for cmb in "${caches[@]}"; do
       CACHE_CUR="$cmb"                     # passed to micro_test as CHIME_CACHE_MB
-      _run_matrix "$role" "$base/cache_${cmb}MB"
+      _run_matrix "$role" "$mbase/cache_${cmb}MB"
     done
   fi
 

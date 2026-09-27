@@ -519,6 +519,18 @@ void parse_args(int argc, char *argv[]) {
          admission_rate, auto_tune);
   std::cout << "kMaxThread = " << kMaxThread << std::endl;
   std::cout << "KeySpace = " << kKeySpace << std::endl;
+  // Machine-readable geometry line (fair-comparison sweep parses it).
+  std::cout << "[GEOMETRY] inner_page=" << cachepush::innerPageSize
+            << " leaf_page=" << cachepush::leafPageSize
+            << " inner_entries=" << cachepush::BTreeInner<Key>::maxEntries
+            << " leaf_entries=" << cachepush::BTreeLeaf<Key, Value>::maxEntries
+            << " slot=" << cachepush::pageSize
+#ifdef MN_ONLY_PLACEMENT
+            << " placement=mn_only"
+#else
+            << " placement=all_nodes"
+#endif
+            << std::endl;
 }
 
 void bulk_load() {

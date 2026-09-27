@@ -122,7 +122,15 @@ Tree::Tree(DSM *dsm, uint16_t tree_id, bool init_root) : dsm(dsm), tree_id(tree_
 
 #ifdef TREE_ENABLE_CACHE
 #ifdef SPECULATIVE_READ
-  if (g_index_cache_mb > define::kHotspotBufSize + 20) tree_cache = new TreeCache(g_index_cache_mb - define::kHotspotBufSize, dsm);  // enable hotspot idx cache
+  // The hotspot buffer's 30 MB comes out of the index budget ONLY when that
+  // buffer actually exists. With the leaf cache on it is disabled (see below),
+  // and subtracting its share anyway left 30 MB of the budget unused -- the
+  // leaf-cache arm then ran on less memory than the total it reported.
+  bool hotspot_on = (g_index_cache_mb > define::kHotspotBufSize + 20);
+#ifdef CACHE_LEAF_NODE
+  if (leafcache::enabled() && !leafcache::keep_speculative()) hotspot_on = false;
+#endif
+  if (hotspot_on) tree_cache = new TreeCache(g_index_cache_mb - define::kHotspotBufSize, dsm);  // enable hotspot idx cache
   else tree_cache = new TreeCache(g_index_cache_mb, dsm);
 #else
   tree_cache = new TreeCache(g_index_cache_mb, dsm);
@@ -1909,9 +1917,22 @@ GlobalAddress Tree::get_leaf_addr(const Key &k, CoroPull* sink) {
 }
 
 
+// CHIME_SCAN_FROM_CACHE=1: a scan request starts from the deepest inner node the
+// compute-side cache holds (or the root on a full miss), and the memory node
+// walks the rest of the tree down to the entry leaf -- the same thing a point
+// lookup does with rpc_lookup/lookup_from. Default 0 = original behaviour: the
+// compute node walks down to the entry leaf with one-sided reads
+// (get_leaf_addr, ~6-7 round trips on an inner-cache miss) and only then sends
+// the request.
+static bool env_flag(const char *name) {
+  const char *s = getenv(name);
+  return s != nullptr && atoi(s) != 0;
+}
+
 int Tree::range_query_offload(const Key &from, const Key &to, std::map<Key, Value> &ret) {  // [from, to)
   assert(dsm->is_register());
   before_operation(nullptr);
+  static const bool scan_from_cache = env_flag("CHIME_SCAN_FROM_CACHE");
 
   auto buffer = (dsm->get_rbuf(nullptr)).get_range_buffer();
   Key cur = from;
@@ -1919,11 +1940,38 @@ int Tree::range_query_offload(const Key &from, const Key &to, std::map<Key, Valu
 
   auto tid = dsm->getMyThreadID();
   while (cur < to) {
-    GlobalAddress leaf_addr = get_leaf_addr(cur, nullptr);
+    GlobalAddress start_addr;
+    int start_level = 1;              // 1 = start_addr is the entry leaf
+    if (scan_from_cache) {
+      bool from_cache = false;
+#ifdef TREE_ENABLE_CACHE
+      GlobalAddress sibling;
+      uint16_t lvl = 0;
+      if (tree_cache->search_from_cache(cur, start_addr, sibling, lvl)) {
+        start_level = lvl;            // same (addr, level) pair Tree::search uses
+        from_cache = true;
+      }
+#endif
+      if (!from_cache) {              // full miss: start from the root
+        auto e = get_root_ptr(nullptr);
+        start_addr = e.ptr;
+        start_level = e.level;
+      }
+    } else {
+      start_addr = get_leaf_addr(cur, nullptr);
+    }
     GlobalAddress result_addr;
     Key max_key{};
     int leaves = 0;
-    int cnt = dsm->rpc_scan(leaf_addr, cur, to, chime_offload::kScanSlotCap, result_addr, max_key, leaves);
+    int cnt = dsm->rpc_scan(start_addr, cur, to, chime_offload::kScanSlotCap,
+                            result_addr, max_key, leaves, start_level);
+    if (cnt == 0 && leaves == 0 && start_level >= 2) {
+      // The memory node could not walk down from the cached node (a stale cache
+      // entry, or the path left this node): retry from the leaf the old way.
+      start_addr = get_leaf_addr(cur, nullptr);
+      cnt = dsm->rpc_scan(start_addr, cur, to, chime_offload::kScanSlotCap,
+                          result_addr, max_key, leaves, 1);
+    }
     offload_scan_cnt[tid] ++;
     offload_scan_leaf[tid] += leaves;
     if (cnt > 0) {
@@ -2370,6 +2418,19 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
   // for fabrics with full experimental verbs). The default serves covered leaves
   // with lookup-grade per-leaf reads -- see the block after the coverage guard.
   static const bool use_legacy_batched = (getenv("CHIME_RANGE_BATCHED") != nullptr);
+
+#ifdef ENABLE_OFFLOAD
+  // CHIME_SCAN_OFFLOAD_ALWAYS=1: hand EVERY scan to the memory node while
+  // offloading is on, even when the inner nodes are cached -- the path DEX+
+  // uses (it pushes every scan leaf miss down). Default 0 = the original gate:
+  // offload only on an inner-cache miss (complete miss or uncovered tail).
+  // With offloading off (rate 0, "0 memory threads") this never fires.
+  static const bool scan_offload_always = env_flag("CHIME_SCAN_OFFLOAD_ALWAYS");
+  if (scan_offload_always && should_offload(dsm->getMyThreadID())) {
+    range_query_offload(from, to, ret);
+    return true;
+  }
+#endif
 
   thread_local std::vector<InternalNode> cache_search_result;
   thread_local std::set<GlobalAddress> leaf_addrs;

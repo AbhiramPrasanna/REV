@@ -6,6 +6,7 @@
 #include "remote_load.h" // memory-node "remote CPU load" (dir-thread active %)
 
 #include <gperftools/profiler.h>
+#include <unistd.h>  // sysconf(_SC_NPROCESSORS_ONLN) for dir-thread pinning
 
 GlobalAddress g_root_ptr = GlobalAddress::Null();
 int g_root_level = -1;
@@ -40,8 +41,27 @@ Directory::~Directory() { delete chunckAlloc; }
 
 void Directory::dirThread() {
   // bindCore((19 - dirID) * 2);
-  bindCore(39 - dirID);
-  Debug::notifyInfo("dir %d launch!\n", dirID);
+  //
+  // This used to be bindCore(39 - dirID), a constant tuned for one box: with 4
+  // dir threads it lands on 39..36, just above the 36 app threads (newbench pins
+  // app thread i to core i). Two things break it. On a machine with fewer than
+  // 40 cores the bind simply fails and the thread runs unpinned (DEX's bindCore
+  // does not wrap). And with the memThreadCount sweep now reaching 16, 39-dirID
+  // walks down to core 24, landing on top of app threads 24..35 -- on the
+  // COMPUTE node too, since DSM spawns memThreadCount dir threads on every node
+  // and they busy-poll a CQ. Either way the memory-thread axis would measure
+  // core contention instead of memory-node service capacity.
+  //
+  // Derive from the real core count and fill from the top, so dir threads stay
+  // clear of app cores 0..(threads-1) as long as cores - memThreadCount >= app
+  // threads. 16 dirs on a 64-core box occupy 63..48; 36 app threads occupy
+  // 0..35.
+  long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+  if (ncpu <= 0) ncpu = 40;  // what the old constant assumed
+  int dir_core = (int)(ncpu - 1 - (long)dirID);
+  if (dir_core < 0) dir_core = (int)(ncpu - 1);
+  bindCore((uint16_t)dir_core);
+  Debug::notifyInfo("dir %d launch! (core %d of %ld)\n", dirID, dir_core, ncpu);
 
   // Start the periodic remote-CPU-load report once (the memory node has no
   // explicit run boundary, so this is how its steady-state load is observed).

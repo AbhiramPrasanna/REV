@@ -197,6 +197,69 @@ inline int lookup_from(char *dsm_base, GlobalAddress node_addr, int level,
   return 2;
 }
 
+// Walk from the CN's cache boundary down to the leaf covering `k`, entirely in
+// local DSM. Same descent as lookup_from (turn-right on a concurrent split
+// included) but it stops at the leaf and returns its address instead of probing
+// it. `level <= 1` means `node_addr` already IS the leaf. Returns
+// GlobalAddress::Null() if the walk fails (pathological writer / off-node).
+// Used by the scan pushdown so a scan request can start from the deepest cached
+// node, exactly as point lookups do, instead of the CN walking down one sided.
+inline GlobalAddress descend_to_leaf(char *dsm_base, GlobalAddress node_addr,
+                                     int level, const Key &k) {
+  static thread_local InternalScratch is;
+  for (int hops = 0; hops < 64; ++hops) {
+    if (level <= 1) return node_addr;
+
+    InternalNode *node = nullptr;
+    for (int spin = 0; !read_internal_local(dsm_base, node_addr, is, node); ++spin)
+      if (spin > (1 << 22)) return GlobalAddress::Null();
+
+    const auto &fk = node->metadata.fence_keys;
+    if (k >= fk.highest) {
+      GlobalAddress sib = node->metadata.sibling_ptr;
+      if (!sibling_on_this_node(sib, node_addr.nodeID)) return GlobalAddress::Null();
+      node_addr = sib;
+      continue;
+    }
+
+    level = node->metadata.level;
+    auto &records = node->records;
+#ifdef UNORDERED_INTERNAL_NODE
+    std::sort(records, records + define::internalSpanSize,
+              [](const InternalEntry &a, const InternalEntry &b) {
+                if (a.key == define::kkeyNull) return false;
+                if (b.key == define::kkeyNull) return true;
+                return a.key < b.key;
+              });
+#endif
+    if (k < records[0].key) {
+      node_addr = node->metadata.leftmost_ptr;
+    } else {
+      GlobalAddress child = records[define::internalSpanSize - 1].ptr;
+      for (int i = 1; i < (int)define::internalSpanSize; ++i) {
+        if (k < records[i].key || records[i].key == define::kkeyNull) {
+          child = records[i - 1].ptr;
+          break;
+        }
+      }
+      node_addr = child;
+    }
+  }
+  return GlobalAddress::Null();
+}
+
+// RPC_SCAN packs two fields into RawMessage.level so the message format does
+// not change: bits 0-15 = requested pair count (<= kScanSlotCap), bits 16-31 =
+// the level of the start node (0 or 1 = the start node is the leaf itself;
+// >= 2 = an internal node the MN must first descend from).
+inline int pack_scan_level(int count, int start_level) {
+  return (count & 0xFFFF) | ((start_level & 0xFFFF) << 16);
+}
+inline void unpack_scan_level(int packed, int &count, int &start_level) {
+  count = packed & 0xFFFF;
+  start_level = (packed >> 16) & 0xFFFF;
+}
+
 // Range scan pushdown, executed entirely on the MN. Starting at `leaf_addr`
 // (the leaf covering `from`), collect keys in [from, to) and walk the sibling
 // chain that stays on THIS node, packing up to `max_num` pairs into `out`.
