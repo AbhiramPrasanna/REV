@@ -583,12 +583,18 @@ public:
         ret = cache.page_table_->remove_with_lock(node, mem_node);
         assert(ret == true);
       }
-    } else {
-      if (node.nodeID == node_id) {
-        std::cout << "Existing ID = " << node.nodeID << std::endl;
-        std::cout << "New ID = " << node_id << std::endl;
-      }
+    } else if (node.nodeID == node_id) {
+      // The node already lives on the target memory server. Stock DEX never
+      // reaches this (it always moves a split subtree to ANOTHER machine), so
+      // it asserts. With MN_ONLY_PLACEMENT there is a single memory server:
+      // every node is already on it and the move is a no-op, exactly like the
+      // inner-level branch above, which skips nodes already on node_id.
+#ifndef MN_ONLY_PLACEMENT
+      std::cout << "Existing ID = " << node.nodeID << std::endl;
+      std::cout << "New ID = " << node_id << std::endl;
       assert(node.nodeID != node_id);
+#endif
+    } else {
       // last-level node movement
       auto new_node = allocate_node(node_id);
       mem_node->remote_address = new_node;
