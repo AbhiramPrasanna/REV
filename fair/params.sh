@@ -11,10 +11,9 @@
 #   same data      50M keys, 8 B keys, 8 B values, in all three systems
 #   same clients   36 client threads, all on the compute node
 #   same tree      DEX and CHIME both use 16-entry inner nodes and 16-entry leaves,
-#                  AND both load the keys in sorted order, so the trees also match
-#                  in fill (~half-full nodes), height and inner-node bytes. Same node
-#                  size alone is not enough: CHIME's stock shuffled load packs nodes
-#                  fuller and gives a shorter tree with far fewer inner bytes.
+#                  AND the same fill: CHIME is built with DEX's measured 8 keys per
+#                  leaf and 7 children per inner node, so height (9), leaf count and
+#                  inner-node count match. Same node size alone is not enough.
 #   same cache     the TOTAL compute-side cache is the swept value in all three
 #                  (DART keeps no node cache, so for DART it has no effect)
 #   same run       10M warmup ops (DEX, CHIME; DART has no warmup phase) then
@@ -47,21 +46,26 @@
 #   inner 336 -> (336-8-64)/16 = 16 entries   leaf 352 -> (352-32-64)/16 = 16 entries
 # CHIME: leafSpanSize = 16 (fixed in Common.h); internalSpanSize set below.
 #
-# Matching the TREE, not just the node capacity (both trees loaded sorted):
-#   DEX   (fair3, measured): 9 levels, 6,249,999 leaves, 1,041,652 inner nodes,
-#         about 7 children per inner node (a sorted split leaves it half full).
-#   CHIME span 16 (shape1, measured): 8 levels, 6,176,228 leaves, 772,006 inner
-#         nodes -- its split keeps about 9 children, so one level fewer.
-#   CHIME span 12 keeps about 7 children, like DEX: expected 9 levels and about
-#         1.03 M inner nodes. Its inner nodes are smaller in bytes (~266 B vs
-#         DEX's 352 B slot), so the inner set is ~260 MB against DEX's 350 MB.
+# Matching the TREE, not just the node capacity:
+#   DEX (fair3, measured): sorted inserts leave nodes half full -- 9 levels,
+#     6,249,999 leaves (8 keys each), 1,041,652 inner nodes (7 children each).
+#   CHIME inserting the same sorted keys got 8 levels and 772,006 inner nodes
+#     (its inner split keeps 9 children, not 7) and took 43 min to load.
+#   So CHIME is BUILT bottom-up from the sorted keys with DEX's fill
+#     (CHIME_BULK_BUILD=1, 8 keys per leaf, 7 children per inner node), same
+#     16-entry nodes as DEX: expected 9 levels, 6,250,000 leaves, ~1,041,667
+#     inner nodes (~333 MB at 335 B, against DEX's 350 MB at 352 B). Takes
+#     seconds. The workloads are read-only, so how the tree was built does not
+#     change what is measured.
 DEX_INNER_PAGE=336
 DEX_LEAF_PAGE=352
-CHIME_INTERNAL_SPAN=12
-# CHIME bulk-load order. 1 = sorted, like DEX's bulk_load (fair default);
-# 0 = CHIME's stock shuffled load. Check the result with the [TREE] line in the
-# compute log against DEX's "Tree height / #leaf nodes / #inner nodes" lines.
-: "${CHIME_SORTED_LOAD:=1}"
+CHIME_INTERNAL_SPAN=16
+: "${CHIME_BULK_BUILD:=1}"
+: "${CHIME_BUILD_LEAF_KEYS:=8}"
+: "${CHIME_BUILD_INNER_FANOUT:=7}"
+# Insert-based loads, only used with CHIME_BULK_BUILD=0:
+# CHIME_SORTED_LOAD=1 inserts in sorted order (slow, see above); 0 = stock shuffled.
+: "${CHIME_SORTED_LOAD:=0}"
 
 # Paths (same layout on both servers).
 REV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

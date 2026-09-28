@@ -103,6 +103,13 @@ int g_warmup_offload_rate = 0;
 int scan_range = 100;               // key-span of a range scan (like fix_range_size)
 // CHIME_SORTED_LOAD=1: DEX-style sorted bulk load (see generate_workload).
 bool g_sorted_load = false;
+// CHIME_BULK_BUILD=1: build the tree bottom-up from the sorted keys instead of
+// inserting them (Tree::bulk_build). CHIME_BUILD_LEAF_KEYS / CHIME_BUILD_INNER_FANOUT
+// set the fill; the defaults are DEX's measured fill after its sorted load
+// (8 keys per leaf, 7 children per inner node), which reproduces DEX's tree.
+bool g_bulk_build = false;
+int g_build_leaf_keys = 8;
+int g_build_inner_fanout = 7;
 
 uint64_t kKeySpace = 0;
 uint64_t bulk_load_num = 0;
@@ -170,7 +177,7 @@ void generate_workload() {
   // (thread_bulk_load), so the 8 loaders append at 8 different places in the tree
   // instead of all contending on the rightmost leaf. Only the load order changes:
   // workload keys come from next_dist_key(), not from bulk_array's order.
-  if (g_sorted_load) std::sort(bulk_array, bulk_array + bulk_load_num);
+  if (g_sorted_load || g_bulk_build) std::sort(bulk_array, bulk_array + bulk_load_num);
 
   init_key_generator();
 
@@ -271,6 +278,13 @@ void thread_bulk_load(int id) {
   if (dsm->getMyNodeID() != kNodeCount - 1) return;   // only the loader node builds
   int loaders = std::min(kThreadCount, LOADER_NUM);
   uint64_t total = (bulk_load_num + loaders - 1) / loaders, step = total / 10 + 1, done = 0;
+  if (g_bulk_build) {
+    // One thread writes every node; the other loaders have nothing to do.
+    if (id == 0)
+      tree->bulk_build(bulk_array, bulk_load_num, g_build_leaf_keys, g_build_inner_fanout,
+                       [] { return randval(e); });
+    return;
+  }
   if (g_sorted_load) {
     // Sorted load: loader `id` inserts its own contiguous block of the sorted
     // keys in ascending order (see generate_workload).
@@ -325,6 +339,7 @@ void thread_run(int id) {
       uint16_t height = tree->root_level();
       uint64_t leaves = leaf_splits + 1;
       uint64_t inner = (all - leaf_splits) + (height >= 2 ? height - 1 : 0);
+      if (tree->built_leaves) leaves = tree->built_leaves, inner = tree->built_inner;  // bottom-up build
       printf("[TREE] height=%u leaves=%lu inner_nodes=%lu keys_per_leaf=%.2f "
              "inner_MB=%.1f leaf_MB=%.1f (internal span %u, leaf span %u, "
              "node bytes inner=%u leaf=%u)\n",
@@ -475,8 +490,16 @@ int main(int argc, char *argv[]) {
   if (const char *tb = getenv("CHIME_TIME_BASED")) g_time_based = atoi(tb);
   if (const char *mc = getenv("CHIME_MN_CLIENTS")) g_mn_clients = (atoi(mc) != 0);
   if (const char *sl = getenv("CHIME_SORTED_LOAD")) g_sorted_load = (atoi(sl) != 0);
-  printf("[CONFIG node %d] bulk-load order: %s (CHIME_SORTED_LOAD)\n",
-         dsm->getMyNodeID(), g_sorted_load ? "sorted, contiguous per loader (DEX-like)" : "shuffled");
+  if (const char *bb = getenv("CHIME_BULK_BUILD")) g_bulk_build = (atoi(bb) != 0);
+  if (const char *lk = getenv("CHIME_BUILD_LEAF_KEYS")) g_build_leaf_keys = atoi(lk);
+  if (const char *fo = getenv("CHIME_BUILD_INNER_FANOUT")) g_build_inner_fanout = atoi(fo);
+  if (g_bulk_build)
+    printf("[CONFIG node %d] bulk load: bottom-up build, %d keys per leaf, %d children per inner node"
+           " (CHIME_BULK_BUILD / CHIME_BUILD_LEAF_KEYS / CHIME_BUILD_INNER_FANOUT)\n",
+           dsm->getMyNodeID(), g_build_leaf_keys, g_build_inner_fanout);
+  else
+    printf("[CONFIG node %d] bulk-load order: %s (CHIME_SORTED_LOAD)\n",
+           dsm->getMyNodeID(), g_sorted_load ? "sorted, contiguous per loader (DEX-like)" : "shuffled");
   g_run_clients = g_mn_clients || dsm->getMyNodeID() != 0;
   printf("[CONFIG node %d] clients on this node: %s (CHIME_MN_CLIENTS)\n",
          dsm->getMyNodeID(), g_run_clients ? "yes" : "no");

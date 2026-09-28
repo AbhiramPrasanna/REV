@@ -101,6 +101,16 @@ public:
   int range_query_offload(const Key &from, const Key &to, std::map<Key, Value> &ret);
 #endif
 
+  // Bottom-up build of the whole tree from SORTED keys, for the fair comparison
+  // with DEX: every leaf gets `leaf_keys` keys and every inner node
+  // `inner_fanout` children -- DEX's measured fill (8 and 7) -- so the two trees
+  // have the same height and node counts. Writes each node once, in CHIME's own
+  // on-wire format (the same encoding the split paths use), then swings the root
+  // pointer. One thread, before any other operation. Replaces 50M inserts.
+  void bulk_build(const uint64_t *sorted_keys, uint64_t n, int leaf_keys, int inner_fanout,
+                  const std::function<Value()>& gen_value);
+  uint64_t built_leaves = 0, built_inner = 0;   // set by bulk_build
+
   void statistics();
   // Number of levels, leaves included (the root entry's level): same meaning as
   // DEX's "Tree height". Used for the [TREE] shape line after the bulk load.

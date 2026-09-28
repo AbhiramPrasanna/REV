@@ -3153,6 +3153,171 @@ uint16_t Tree::root_level() {
   return get_root_ptr(nullptr).level;
 }
 
+
+// Bottom-up bulk build (see Tree.h). Every node is laid out exactly as the split
+// paths lay out a fresh sibling (hopscotch_split_and_unlock / node_split_and_unlock):
+//   leaf  : keys placed with hopscotch_insert_locally, fence keys [low, max+1)
+//           (SIBLING_BASED_VALIDATION's split key), sibling_ptr = next leaf,
+//           metadata replicated + cacheline versions encoded, VALOCK lock word
+//           unlocked with max_key_idx + vacancy bitmap, leaf stamp 0 ("never
+//           written", which the leaf cache treats as cacheable);
+//   inner : leftmost_ptr + (child low key, child) records in key order, fence
+//           keys, sibling_ptr / sibling_leftmost_ptr to the next node on the level,
+//           lock word 0.
+// The first node on every level starts at the widest low key and the last ends
+// at the widest high key, so the top node is is_root(). CHIME's ghost key (the
+// largest key, kept in the rightmost leaf from the start) is appended like any
+// other key. Nodes are written with one synchronous RDMA write each.
+void Tree::bulk_build(const uint64_t *sorted_keys, uint64_t n, int leaf_keys, int inner_fanout,
+                      const std::function<Value()>& gen_value) {
+  assert(dsm->is_register());
+  if (leaf_keys < 1 || leaf_keys > (int)define::neighborSize) {
+    // More than neighborSize keys could need a hop that fails; DEX's fill is 8.
+    fprintf(stderr, "bulk_build: leaf_keys=%d must be 1..%u\n", leaf_keys, define::neighborSize);
+    abort();
+  }
+  if (inner_fanout < 2 || inner_fanout > (int)define::internalSpanSize) {
+    fprintf(stderr, "bulk_build: inner_fanout=%d must be 2..%u\n", inner_fanout, define::internalSpanSize);
+    abort();
+  }
+  Timer timer;
+  timer.begin();
+
+  // 1. Keys as CHIME keys, strictly increasing. int2key maps 0 and 1 to the same
+  //    key (0 is the null key), so drop repeats -- the insert path would have
+  //    turned the second one into an update.
+  std::vector<Key> keys;
+  keys.reserve(n + 1);
+  for (uint64_t i = 0; i < n; ++ i) {
+    Key k = int2key(sorted_keys[i]);
+    if (!keys.empty() && !(keys.back() < k)) {
+      if (keys.back() == k) continue;
+      fprintf(stderr, "bulk_build: keys are not sorted (index %lu)\n", (unsigned long)i);
+      abort();
+    }
+    keys.push_back(k);
+  }
+  Key ghost_key;
+  ghost_key.fill(0xff);
+  ghost_key = ghost_key - 1;
+  if (keys.empty() || keys.back() < ghost_key) keys.push_back(ghost_key);
+
+  const FenceKeys widest = FenceKeys::Widest();
+  const uint64_t key_cnt = keys.size();
+  const uint64_t leaf_cnt = (key_cnt + leaf_keys - 1) / leaf_keys;
+  if (leaf_cnt < 2) {
+    fprintf(stderr, "bulk_build: needs at least two leaves (%lu keys)\n", (unsigned long)key_cnt);
+    abort();
+  }
+
+  // 2. Leaves. Addresses first: a leaf needs its right neighbour's address.
+  std::vector<GlobalAddress> addr(leaf_cnt);
+  std::vector<Key> low(leaf_cnt);
+  for (auto& a : addr) a = dsm->alloc(define::allocationLeafSize);
+  low[0] = widest.lowest;
+  for (uint64_t j = 1; j < leaf_cnt; ++ j) low[j] = keys[j * leaf_keys - 1] + 1;  // previous leaf's max + 1
+
+  const uint64_t step = leaf_cnt / 10 + 1;
+  for (uint64_t j = 0; j < leaf_cnt; ++ j) {
+    auto leaf_buffer = (dsm->get_rbuf(nullptr)).get_leaf_buffer();
+    memset(leaf_buffer, 0, define::allocationLeafSize);
+    auto leaf = new (leaf_buffer) LeafNode;
+    const uint64_t first = j * leaf_keys, last = std::min<uint64_t>(key_cnt, first + leaf_keys);
+    for (uint64_t i = first; i < last; ++ i) {
+#ifdef HOPSCOTCH_LEAF_NODE
+      hopscotch_insert_locally(leaf->records, keys[i], gen_value());
+#else
+      leaf->records[i - first].update(keys[i], gen_value());
+#endif
+    }
+    const bool rightmost = (j + 1 == leaf_cnt);
+    leaf->metadata.fence_keys = FenceKeys{low[j], rightmost ? widest.highest : low[j + 1]};
+    leaf->metadata.sibling_ptr = rightmost ? GlobalAddress::Null() : addr[j + 1];
+
+    auto encoded_leaf_buffer = (dsm->get_rbuf(nullptr)).get_leaf_buffer();
+    memset(encoded_leaf_buffer, 0, define::allocationLeafSize);   // lock word + stamp start at 0
+#ifdef METADATA_REPLICATION
+    auto intermediate_leaf_buffer = (dsm->get_rbuf(nullptr)).get_leaf_buffer();
+    MetadataManager::encode_node_metadata(leaf_buffer, intermediate_leaf_buffer);
+    LeafVersionManager::encode_node_versions(intermediate_leaf_buffer, encoded_leaf_buffer);
+#else
+    VersionManager<LeafNode, LeafEntry>::encode_node_versions(leaf_buffer, encoded_leaf_buffer);
+#endif
+#ifdef VACANCY_AWARE_LOCK
+    int max_key_idx = 0;
+    std::vector<int> empty_idxes;
+    for (int i = 0; i < (int)define::leafSpanSize; ++ i) {
+      const auto& e = leaf->records[i];
+      if (e.key == define::kkeyNull) empty_idxes.emplace_back(i);
+      else if (leaf->records[max_key_idx].key == define::kkeyNull || leaf->records[max_key_idx].key < e.key) max_key_idx = i;
+    }
+    auto if_lock = new (encoded_leaf_buffer + get_lock_info(true)) VALOCK(0ULL, max_key_idx);  // unlocked
+    if_lock->update_vacancy(0, define::leafSpanSize - 1, empty_idxes);
+#endif
+    dsm->write_sync(encoded_leaf_buffer, addr[j], define::allocationLeafSize);
+    if ((j + 1) % step == 0)
+      printf("[build] leaves: %lu%% (%lu/%lu)\n", (unsigned long)((j + 1) * 100 / leaf_cnt),
+             (unsigned long)(j + 1), (unsigned long)leaf_cnt);
+  }
+  built_leaves = leaf_cnt;
+  built_inner = 0;
+
+  // 3. Inner levels, bottom up, until one node is left: the root. A last group
+  //    of a single child joins the group before it (inner_fanout + 1 children).
+  std::vector<GlobalAddress> child_addr = std::move(addr);
+  std::vector<Key> child_low = std::move(low);
+  uint16_t level = 1;  // CHIME numbers the leaves' parents level 1
+  while (child_addr.size() > 1) {
+    const uint64_t m = child_addr.size();
+    uint64_t node_cnt = (m + inner_fanout - 1) / inner_fanout;
+    if (node_cnt > 1 && m % inner_fanout == 1) -- node_cnt;
+    auto begin_of = [&](uint64_t t) { return t * inner_fanout; };
+    auto end_of = [&](uint64_t t) { return t + 1 == node_cnt ? m : (t + 1) * inner_fanout; };
+
+    std::vector<GlobalAddress> node_addr(node_cnt);
+    std::vector<Key> node_low(node_cnt);
+    for (uint64_t t = 0; t < node_cnt; ++ t) {
+      // the root entry packs its address, so the root needs the packed alignment
+      node_addr[t] = (node_cnt == 1) ? dsm->alloc(define::allocationInternalSize, PACKED_ADDR_ALIGN_BIT)
+                                     : dsm->alloc(define::allocationInternalSize);
+      node_low[t] = child_low[begin_of(t)];
+    }
+    for (uint64_t t = 0; t < node_cnt; ++ t) {
+      const uint64_t b = begin_of(t), e = end_of(t);
+      const bool rightmost = (t + 1 == node_cnt);
+      auto internal_buffer = (dsm->get_rbuf(nullptr)).get_internal_buffer();
+      memset(internal_buffer, 0, define::allocationInternalSize);
+      auto node = new (internal_buffer) InternalNode;
+      node->metadata.level = level;
+      node->metadata.leftmost_ptr = child_addr[b];
+      for (uint64_t c = b + 1; c < e; ++ c) node->records[c - b - 1] = InternalEntry(child_low[c], child_addr[c]);
+      node->metadata.fence_keys = FenceKeys{node_low[t], rightmost ? widest.highest : child_low[e]};
+      node->metadata.sibling_ptr = rightmost ? GlobalAddress::Null() : node_addr[t + 1];
+      node->metadata.sibling_leftmost_ptr = rightmost ? GlobalAddress::Null() : child_addr[e];
+
+      auto encoded_node_buffer = (dsm->get_rbuf(nullptr)).get_internal_buffer();
+      memset(encoded_node_buffer, 0, define::allocationInternalSize);  // lock word starts at 0
+      VersionManager<InternalNode, InternalEntry>::encode_node_versions(internal_buffer, encoded_node_buffer);
+      dsm->write_sync(encoded_node_buffer, node_addr[t], define::allocationInternalSize);
+    }
+    built_inner += node_cnt;
+    printf("[build] inner level %u: %lu nodes\n", (unsigned)level, (unsigned long)node_cnt);
+    child_addr = std::move(node_addr);
+    child_low = std::move(node_low);
+    ++ level;
+  }
+
+  // 4. Swing the root pointer from the empty root leaf node 0 installed.
+  const RootEntry new_root(level, child_addr[0]);
+  auto cas_buffer = (dsm->get_rbuf(nullptr)).get_cas_buffer();
+  uint64_t cur = (uint64_t)get_root_ptr(nullptr);
+  while (!dsm->cas_sync(root_ptr_ptr, cur, (uint64_t)new_root, cas_buffer)) cur = *cas_buffer;
+  rough_height.store(level);
+  printf("[build] done in %.1fs: height=%u leaves=%lu inner_nodes=%lu (%d keys per leaf, %d children per inner node)\n",
+         timer.end() / 1e9, (unsigned)level, (unsigned long)built_leaves, (unsigned long)built_inner,
+         leaf_keys, inner_fanout);
+}
+
 void Tree::statistics() {
 #ifdef TREE_ENABLE_CACHE
   tree_cache->statistics();
