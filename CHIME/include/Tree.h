@@ -102,6 +102,9 @@ public:
 #endif
 
   void statistics();
+  // Number of levels, leaves included (the root entry's level): same meaning as
+  // DEX's "Tree height". Used for the [TREE] shape line after the bulk load.
+  uint16_t root_level();
   // Leaf-cache counters only. Separate from statistics() so it can be called at
   // the END of the measured phase without re-printing (and re-dating) the index
   // cache's post-bulk-load occupancy line, which the sweep scripts parse.

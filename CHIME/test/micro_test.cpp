@@ -70,6 +70,8 @@ int LOADER_NUM = 8;
 
 extern volatile bool need_stop;
 extern volatile bool need_clear[MAX_APP_THREAD];
+extern uint64_t split_node[MAX_APP_THREAD];       // leaf + internal splits (Tree.cpp)
+extern uint64_t split_hopscotch[MAX_APP_THREAD];  // leaf splits only
 extern int g_index_cache_mb;   // runtime index-cache size (MB); see Tree.cpp
 #ifdef CACHE_LEAF_NODE
 extern int g_leaf_cache_mb;    // runtime leaf-cache size (MB); see LeafCache.h
@@ -99,6 +101,8 @@ int kOffloadRate = 100;
 // measured phase runs at kOffloadRate. CHIME_WARMUP_OFFLOAD overrides.
 int g_warmup_offload_rate = 0;
 int scan_range = 100;               // key-span of a range scan (like fix_range_size)
+// CHIME_SORTED_LOAD=1: DEX-style sorted bulk load (see generate_workload).
+bool g_sorted_load = false;
 
 uint64_t kKeySpace = 0;
 uint64_t bulk_load_num = 0;
@@ -158,6 +162,15 @@ void generate_workload() {
   // scatter splits across the tree, so 8 loaders stay low-contention (point always
   // built fine). The range-scan flood was the missing bulk->warmup barrier
   // (thread_run), not the insertion order.
+  //
+  // CHIME_SORTED_LOAD=1 (fair comparison with DEX): load the keys in SORTED
+  // order, as DEX's bulk_load does, so both trees are built the same way and end
+  // up the same shape (nodes ~half full, same height). Unlike the reverted global
+  // sort above, each loader takes its own CONTIGUOUS block of the sorted keys
+  // (thread_bulk_load), so the 8 loaders append at 8 different places in the tree
+  // instead of all contending on the rightmost leaf. Only the load order changes:
+  // workload keys come from next_dist_key(), not from bulk_array's order.
+  if (g_sorted_load) std::sort(bulk_array, bulk_array + bulk_load_num);
 
   init_key_generator();
 
@@ -252,11 +265,24 @@ void thread_bulk_load(int id) {
   // threads in parallel (traversal + leaf writes overlap); the per-word lock in
   // DSM::cas_mask_sync serialises only same-word emulated masked-CAS, so the
   // split/lock protocol never races even without hardware masked atomics -- fast
-  // AND correct. Keys stay SHUFFLED (CHIME's split is not sequential-insert-aware,
-  // so a sorted load builds a taller, under-filled tree).
+  // AND correct. By default keys stay SHUFFLED (CHIME's split is not
+  // sequential-insert-aware, so a sorted load builds a taller, under-filled tree);
+  // CHIME_SORTED_LOAD=1 asks for exactly that DEX-like tree for the fair sweep.
   if (dsm->getMyNodeID() != kNodeCount - 1) return;   // only the loader node builds
   int loaders = std::min(kThreadCount, LOADER_NUM);
   uint64_t total = (bulk_load_num + loaders - 1) / loaders, step = total / 10 + 1, done = 0;
+  if (g_sorted_load) {
+    // Sorted load: loader `id` inserts its own contiguous block of the sorted
+    // keys in ascending order (see generate_workload).
+    uint64_t begin = (uint64_t)id * total;
+    uint64_t end = std::min<uint64_t>(bulk_load_num, begin + total);
+    for (uint64_t i = begin; i < end; ++i) {
+      tree->insert(int2key(bulk_array[i]), randval(e));
+      if (id == 0 && ++done % step == 0)
+        printf("[bulk] loader node (sorted): %lu%% (%lu/%lu keys)\n", done * 100 / total, done, total);
+    }
+    return;
+  }
   for (uint64_t i = id; i < bulk_load_num; i += loaders) {   // strided over the whole key set
     tree->insert(int2key(bulk_array[i]), randval(e));
     if (id == 0 && ++done % step == 0)
@@ -288,6 +314,27 @@ void thread_run(int id) {
   if (id == 0) {
     while (bulk_cnt.load() != kThreadCount) ;
     dsm->barrier("bulk_finish");
+    // Tree shape, measured on the loader node right after the load (the split
+    // counters are zeroed only when the tree is created). Every leaf split adds
+    // one leaf; every internal split adds one internal node; every root growth
+    // adds one more (roots at levels 2..height). Same meanings as DEX's
+    // "#leaf nodes / #inner nodes / Tree height" lines, for the fair comparison.
+    if (dsm->getMyNodeID() == kNodeCount - 1) {
+      uint64_t all = 0, leaf_splits = 0;
+      for (int i = 0; i < MAX_APP_THREAD; ++i) { all += split_node[i]; leaf_splits += split_hopscotch[i]; }
+      uint16_t height = tree->root_level();
+      uint64_t leaves = leaf_splits + 1;
+      uint64_t inner = (all - leaf_splits) + (height >= 2 ? height - 1 : 0);
+      printf("[TREE] height=%u leaves=%lu inner_nodes=%lu keys_per_leaf=%.2f "
+             "inner_MB=%.1f leaf_MB=%.1f (internal span %u, leaf span %u, "
+             "node bytes inner=%u leaf=%u)\n",
+             (unsigned)height, (unsigned long)leaves, (unsigned long)inner,
+             leaves ? (double)bulk_load_num / leaves : 0.0,
+             inner * (double)define::allocationInternalSize / define::MB,
+             leaves * (double)define::allocationLeafSize / define::MB,
+             (unsigned)define::internalSpanSize, (unsigned)define::leafSpanSize,
+             (unsigned)define::allocationInternalSize, (unsigned)define::allocationLeafSize);
+    }
     bulk_cnt.store(-1);
   }
   while (bulk_cnt.load() != -1) ;
@@ -427,6 +474,9 @@ int main(int argc, char *argv[]) {
   if (const char *ld = getenv("CHIME_LOADERS")) LOADER_NUM = atoi(ld);  // bulk-load threads
   if (const char *tb = getenv("CHIME_TIME_BASED")) g_time_based = atoi(tb);
   if (const char *mc = getenv("CHIME_MN_CLIENTS")) g_mn_clients = (atoi(mc) != 0);
+  if (const char *sl = getenv("CHIME_SORTED_LOAD")) g_sorted_load = (atoi(sl) != 0);
+  printf("[CONFIG node %d] bulk-load order: %s (CHIME_SORTED_LOAD)\n",
+         dsm->getMyNodeID(), g_sorted_load ? "sorted, contiguous per loader (DEX-like)" : "shuffled");
   g_run_clients = g_mn_clients || dsm->getMyNodeID() != 0;
   printf("[CONFIG node %d] clients on this node: %s (CHIME_MN_CLIENTS)\n",
          dsm->getMyNodeID(), g_run_clients ? "yes" : "no");

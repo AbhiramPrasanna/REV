@@ -3149,6 +3149,10 @@ void Tree::coro_worker(CoroPull &sink, RequstGen *gen, WorkFunc work_func) {
   }
 }
 
+uint16_t Tree::root_level() {
+  return get_root_ptr(nullptr).level;
+}
+
 void Tree::statistics() {
 #ifdef TREE_ENABLE_CACHE
   tree_cache->statistics();

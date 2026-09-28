@@ -9,6 +9,8 @@
 #   CHIME_MN_CLIENTS=0           clients only on the compute node (like DEX/DART)
 #   CHIME_SCAN_FROM_CACHE=1      scan requests start from the deepest cached node
 #   CHIME_SCAN_OFFLOAD_ALWAYS=1  every scan goes to the memory node (like DEX+)
+#   CHIME_SORTED_LOAD=1          bulk load in sorted key order, like DEX, so both
+#                                trees come out the same shape (params.sh)
 # With memory threads 0 the two scan switches have no effect (offloading is off).
 #
 # Driven through CHIME/run/run_leaf_cache.sh (same handshake, memcached reset,
@@ -40,6 +42,7 @@ export LEAF_SET="$CHIME_LEAF_SET" LEAF_CACHE_PCT="${LEAF_CACHE_PCT:-50}"
 export CHIME_MN_CLIENTS=0
 export CHIME_SCAN_FROM_CACHE=1
 export CHIME_SCAN_OFFLOAD_ALWAYS="${CHIME_SCAN_OFFLOAD_ALWAYS:-1}"
+export CHIME_SORTED_LOAD
 mkdir -p "$LOG_DIR"
 
 for mt in $MEMTHREADS; do

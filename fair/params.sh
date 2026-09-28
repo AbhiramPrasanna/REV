@@ -10,7 +10,11 @@
 # What "fair" fixes (see ARCHITECTURE.md §7):
 #   same data      50M keys, 8 B keys, 8 B values, in all three systems
 #   same clients   36 client threads, all on the compute node
-#   same tree      DEX and CHIME both use 16-entry inner nodes and 16-entry leaves
+#   same tree      DEX and CHIME both use 16-entry inner nodes and 16-entry leaves,
+#                  AND both load the keys in sorted order, so the trees also match
+#                  in fill (~half-full nodes), height and inner-node bytes. Same node
+#                  size alone is not enough: CHIME's stock shuffled load packs nodes
+#                  fuller and gives a shorter tree with far fewer inner bytes.
 #   same cache     the TOTAL compute-side cache is the swept value in all three
 #                  (DART keeps no node cache, so for DART it has no effect)
 #   same run       10M warmup ops (DEX, CHIME; DART has no warmup phase) then
@@ -45,6 +49,10 @@
 DEX_INNER_PAGE=336
 DEX_LEAF_PAGE=352
 CHIME_INTERNAL_SPAN=16
+# CHIME bulk-load order. 1 = sorted, like DEX's bulk_load (fair default);
+# 0 = CHIME's stock shuffled load. Check the result with the [TREE] line in the
+# compute log against DEX's "Tree height / #leaf nodes / #inner nodes" lines.
+: "${CHIME_SORTED_LOAD:=1}"
 
 # Paths (same layout on both servers).
 REV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -97,9 +105,9 @@ quiet_filter() {
 # (and after-a-crash) reset. Safe to run when nothing is left.
 cleanup_node() {
   echo ">> [$(hostname -s)] cleanup: stopping leftover newbench / micro_test / DART processes and memcached"
-  sudo pkill -9 -x newbench 2>/dev/null
+  sudo -n pkill -9 -x newbench 2>/dev/null   # -n: never stop for a password
   pkill -9 -u "$(id -u)" -x micro_test 2>/dev/null
-  sudo pkill -9 -f "$DART_DIR/bin/(monitor|compute|memory)" 2>/dev/null
+  sudo -n pkill -9 -f "$DART_DIR/bin/(monitor|compute|memory)" 2>/dev/null
   pkill -u "$(id -u)" -x memcached 2>/dev/null   # only ours: server 8 is shared
   rm -f /tmp/memcached-fair.pid
   sleep 3
