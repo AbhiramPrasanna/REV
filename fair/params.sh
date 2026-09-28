@@ -45,10 +45,19 @@
 
 # Fair tree geometry (bytes). DEX: 64 B node header, 16 B per entry.
 #   inner 336 -> (336-8-64)/16 = 16 entries   leaf 352 -> (352-32-64)/16 = 16 entries
-# CHIME: internalSpanSize = leafSpanSize = 16 (its build default).
+# CHIME: leafSpanSize = 16 (fixed in Common.h); internalSpanSize set below.
+#
+# Matching the TREE, not just the node capacity (both trees loaded sorted):
+#   DEX   (fair3, measured): 9 levels, 6,249,999 leaves, 1,041,652 inner nodes,
+#         about 7 children per inner node (a sorted split leaves it half full).
+#   CHIME span 16 (shape1, measured): 8 levels, 6,176,228 leaves, 772,006 inner
+#         nodes -- its split keeps about 9 children, so one level fewer.
+#   CHIME span 12 keeps about 7 children, like DEX: expected 9 levels and about
+#         1.03 M inner nodes. Its inner nodes are smaller in bytes (~266 B vs
+#         DEX's 352 B slot), so the inner set is ~260 MB against DEX's 350 MB.
 DEX_INNER_PAGE=336
 DEX_LEAF_PAGE=352
-CHIME_INTERNAL_SPAN=16
+CHIME_INTERNAL_SPAN=12
 # CHIME bulk-load order. 1 = sorted, like DEX's bulk_load (fair default);
 # 0 = CHIME's stock shuffled load. Check the result with the [TREE] line in the
 # compute log against DEX's "Tree height / #leaf nodes / #inner nodes" lines.

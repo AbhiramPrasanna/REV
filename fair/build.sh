@@ -31,7 +31,7 @@ build_dex() {
 }
 
 build_chime() {
-  echo "== CHIME: span=${CHIME_INTERNAL_SPAN} (inner and leaf), value=${VALUE_B}B, offload + leaf cache compiled in"
+  echo "== CHIME: inner span=${CHIME_INTERNAL_SPAN}, leaf span=16, value=${VALUE_B}B, offload + leaf cache compiled in"
   echo "   (CHIME's NIC macros live in include/Rdma.h; if this server was never set up,"
   echo "    run CHIME/run/configure_nic.sh on it first)"
   rm -rf "$CHIME_BUILD" && mkdir -p "$CHIME_BUILD" && cd "$CHIME_BUILD"

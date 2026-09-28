@@ -244,7 +244,7 @@ memory node — which is why the scan path now matches DEX+'s.
 | Property | Setting | Why |
 |---|---|---|
 | Data | 50 M keys, 8 B keys, 8 B values in all three | DEX stores 8 B values; CHIME is built with `-DCHIME_VALUE_LEN=8`; DART runs `--payload_byte=8`. |
-| Tree shape | DEX and CHIME: **16-entry inner nodes, 16-entry leaves** | DEX `-DDEX_INNER_PAGE=336 -DDEX_LEAF_PAGE=352` gives (336-8-64)/16 = 16 inner entries and (352-32-64)/16 = 16 leaf entries; CHIME's spans are 16. Node size alone does not fix the tree: the load order sets how full nodes are. DEX loads sorted, which leaves nodes half full, so its tree is taller and has more inner nodes than CHIME's stock shuffled load (about 7 levels, roughly 100 MB). Measured in run fair3, DEX's tree is 9 levels with 6,249,999 leaves (2,098 MB) and 1,041,652 inner nodes (350 MB, about 7 children each). The fair sweep therefore loads CHIME sorted as well (`CHIME_SORTED_LOAD=1`). Compare DEX's `Tree height` / `#leaf nodes` / `#inner nodes` lines with CHIME's `[TREE]` line in the compute logs. DART's radix shape cannot be matched, and that difference is what the comparison measures. |
+| Tree shape | DEX and CHIME: **16-entry inner nodes, 16-entry leaves** | DEX `-DDEX_INNER_PAGE=336 -DDEX_LEAF_PAGE=352` gives (336-8-64)/16 = 16 inner entries and (352-32-64)/16 = 16 leaf entries; CHIME's leaf span is 16 and its inner span is 12 in the fair sweep (see below). Node size alone does not fix the tree: the load order sets how full nodes are. DEX loads sorted, which leaves nodes half full, so its tree is taller and has more inner nodes than CHIME's stock shuffled load (about 7 levels, roughly 100 MB). Measured in run fair3, DEX's tree is 9 levels with 6,249,999 leaves (2,098 MB) and 1,041,652 inner nodes (350 MB, about 7 children each). The fair sweep therefore loads CHIME sorted as well (`CHIME_SORTED_LOAD=1`). Sorted, CHIME with span 16 measured 8 levels, 6,176,228 leaves and 772,006 inner nodes: its split keeps about 9 children, not DEX's 7. With inner span 12 it keeps about 7, which should give DEX's 9 levels and about 1.03 M inner nodes; the inner set is then about 260 MB, smaller than DEX's 350 MB because a CHIME inner node takes about 266 B against DEX's 352 B slot. Compare DEX's `Tree height` / `#leaf nodes` / `#inner nodes` lines with CHIME's `[TREE]` line in the compute logs. DART's radix shape cannot be matched, and that difference is what the comparison measures. |
 | Cache range | 32, 64, 128, 256, 512, 1024 MB total | Runs from "inner nodes do not fit" (32-128) through the boundary (256-512, near DEX's measured 350 MB inner set) to "fit" (1024). With upstream geometry (64-entry nodes) the inner set would be ~30-45 MB and there would be almost no "do not fit" region. |
 | Memory threads | 0-8; **0 = no offloading** | DEX: `rpc_rate 0` with one idle directory thread (needed to hand out memory chunks). CHIME: offload off, one directory thread. k ≥ 1: offloading on with k threads. DART: not applicable. |
 | Clients | 36 threads, compute node only | DEX and DART already do this; CHIME uses `CHIME_MN_CLIENTS=0`. |
@@ -345,7 +345,7 @@ ops M, check, time_based, early_stop, index (0 DEX, 1 Sherman, 2 SMART), rpc_rat
 admission rate, auto_tune, threads per compute node.
 
 **CHIME (CMake)**: `ENABLE_OFFLOAD` (OFF), `CACHE_LEAF_NODE` (ON), `CHIME_VALUE_LEN`
-(48; fair 8), `CHIME_INTERNAL_SPAN` (16). Layout-changing flags must match on both
+(48; fair 8), `CHIME_INTERNAL_SPAN` (16; fair 12). Layout-changing flags must match on both
 servers.
 
 **CHIME (environment)**
