@@ -9,8 +9,8 @@
 #   CHIME_MN_CLIENTS=0           clients only on the compute node (like DEX/DART)
 #   CHIME_SCAN_FROM_CACHE=1      scan requests start from the deepest cached node
 #   CHIME_SCAN_OFFLOAD_ALWAYS=1  every scan goes to the memory node (like DEX+)
-#   CHIME_BULK_BUILD=1           tree built bottom-up with DEX's fill (8 keys per
-#                                leaf, 7 children per inner node): same shape as DEX
+# Tree: TREE_SETUP=stress (default) = stock shuffled insert load; TREE_SETUP=fair
+# = CHIME_BULK_BUILD=1, built with DEX's fill (same shape as DEX). See params.sh.
 # With memory threads 0 the two scan switches have no effect (offloading is off).
 #
 # Driven through CHIME/run/run_leaf_cache.sh (same handshake, memcached reset,
@@ -44,6 +44,12 @@ export CHIME_SCAN_FROM_CACHE="${CHIME_SCAN_FROM_CACHE:-1}"
 export CHIME_SCAN_OFFLOAD_ALWAYS="${CHIME_SCAN_OFFLOAD_ALWAYS:-1}"
 export CHIME_SORTED_LOAD CHIME_BULK_BUILD CHIME_BUILD_LEAF_KEYS CHIME_BUILD_INNER_FANOUT
 mkdir -p "$LOG_DIR"
+if [ "$CHIME_BULK_BUILD" = 1 ]; then
+  echo "CHIME setup ($TREE_SETUP): 16-entry nodes, tree bulk-built with $CHIME_BUILD_LEAF_KEYS keys per leaf and $CHIME_BUILD_INNER_FANOUT children per inner node"
+else
+  echo "CHIME setup ($TREE_SETUP): 16-entry nodes, keys inserted $( [ "$CHIME_SORTED_LOAD" = 1 ] && echo sorted || echo shuffled ) (stock load)"
+fi
+echo "  each cell prints '>> tree:' (levels, inner and leaf nodes and MB) and '>> result:'"
 
 for mt in $MEMTHREADS; do
   if [ "$mt" -eq 0 ]; then

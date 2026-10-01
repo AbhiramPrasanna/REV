@@ -25,7 +25,15 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/params.sh"
 
 OUT="$RESULTS_DIR/dex"; mkdir -p "$OUT"
 BIN="$DEX_BUILD/newbench"
-[ -x "$BIN" ] || { echo "build first: RUN_ID=$RUN_ID ./fair/build.sh dex" >&2; exit 1; }
+[ -x "$BIN" ] || { echo "build first: RUN_ID=$RUN_ID TREE_SETUP=$TREE_SETUP ./fair/build.sh dex" >&2; exit 1; }
+want="inner_page=$DEX_INNER_PAGE leaf_page=$DEX_LEAF_PAGE placement=$DEX_PLACEMENT"
+have="$(cat "$DEX_BUILD/build_stamp.txt" 2>/dev/null || echo none)"
+if [ "$have" != "$want" ]; then
+  echo "DEX binary in $DEX_BUILD was built for [$have], this run wants [$want]." >&2
+  echo "Rebuild on BOTH servers: RUN_ID=$RUN_ID TREE_SETUP=$TREE_SETUP ./fair/build.sh dex" >&2
+  exit 1
+fi
+echo "DEX setup ($TREE_SETUP): inner page ${DEX_INNER_PAGE} B, leaf page ${DEX_LEAF_PAGE} B, placement ${DEX_PLACEMENT}"
 
 # newbench reads ../memcached.conf relative to its working directory.
 cd "$DEX_BUILD"
@@ -61,7 +69,7 @@ wait_for_compute() {    # memory server only: compute has registered as node 0
 
 csv_c="$OUT/dex_compute.csv"; csv_m="$OUT/dex_memory.csv"
 [ "$role" = compute ] && [ ! -f "$csv_c" ] && \
-  echo "system,workload,dist,cache_mb,memthreads,offload,leaf,tput_mops,p99_us,rdma_read_per_op,rpc_per_op,tree_height,inner_entries,leaf_entries,placement,log" > "$csv_c"
+  echo "system,workload,dist,cache_mb,memthreads,offload,leaf,tput_mops,p99_us,rdma_read_per_op,rpc_per_op,tree_height,inner_entries,leaf_entries,placement,log,inner_page_b,leaf_page_b,slot_b,inner_nodes,inner_mb,leaf_nodes,leaf_mb,tree_mb,cache_slots" > "$csv_c"
 [ "$role" = memory ] && [ ! -f "$csv_m" ] && \
   echo "system,workload,cache_mb,memthreads,mn_peak_active_pct,mn_peak_per_thread_pct,log" > "$csv_m"
 
@@ -96,8 +104,20 @@ for mt in $MEMTHREADS; do
         ie=$(sed -nE 's/.*\[GEOMETRY\].*inner_entries=([0-9]+).*/\1/p' "$log" | tail -1)
         le=$(sed -nE 's/.*\[GEOMETRY\].*leaf_entries=([0-9]+).*/\1/p' "$log" | tail -1)
         pl=$(sed -nE 's/.*\[GEOMETRY\].*placement=([a-z_]+).*/\1/p' "$log" | tail -1)
-        echo "dex,$wl,$(wl_dist "$wl"),$cache,$mt,$off,NA,$thr,$p99,$rr,$rp,${h:-NA},${ie:-NA},${le:-NA},${pl:-NA},$log" >> "$csv_c"
-        echo "    -> ${thr} Mops  p99 ${p99} us  reads/op ${rr}  requests/op ${rp}  height ${h}"
+        # Tree shape (DEX's get_basic lines; sizes are node count x slot size,
+        # i.e. what the tree occupies on the memory node and in the cache).
+        ip=$(sed -nE 's/.*\[GEOMETRY\].*inner_page=([0-9]+).*/\1/p' "$log" | tail -1)
+        lp=$(sed -nE 's/.*\[GEOMETRY\].*leaf_page=([0-9]+).*/\1/p' "$log" | tail -1)
+        sl=$(sed -nE 's/.*\[GEOMETRY\].*slot=([0-9]+).*/\1/p' "$log" | tail -1)
+        inn=$(awk -F'= ' '/^#inner nodes =/{v=$2} END{print v}' "$log")
+        inmb=$(awk -F'= ' '/^inner size\(MB\) =/{v=$2} END{print v}' "$log")
+        lfn=$(awk -F'= ' '/^#leaf nodes =/{v=$2} END{print v}' "$log")
+        lfmb=$(awk -F'= ' '/^leaf size\(MB\) =/{v=$2} END{print v}' "$log")
+        slots=$(awk -F'= ' '/^Cache capacity =/{v=$2} END{print v}' "$log")
+        tot=$(awk -v a="$inmb" -v b="$lfmb" 'BEGIN{ if (a!="" && b!="") printf "%.1f", a+b; else print "NA" }')
+        echo "dex,$wl,$(wl_dist "$wl"),$cache,$mt,$off,NA,$thr,$p99,$rr,$rp,${h:-NA},${ie:-NA},${le:-NA},${pl:-NA},$log,${ip:-NA},${lp:-NA},${sl:-NA},${inn:-NA},${inmb:-NA},${lfn:-NA},${lfmb:-NA},${tot},${slots:-NA}" >> "$csv_c"
+        echo "    -> ${thr} Mops  p99 ${p99} us  reads/op ${rr}  requests/op ${rp}"
+        echo "    -> tree: ${h:-?} levels | inner ${inn:-?} nodes = ${inmb:-?} MB (${ie:-?} entries, ${ip:-?} B page) | leaves ${lfn:-?} = ${lfmb:-?} MB (${le:-?} entries, ${lp:-?} B page) | total ${tot} MB | cache ${cache} MB = ${slots:-?} slots of ${sl:-?} B"
         sleep 3
       else
         wait_for_compute || exit 1

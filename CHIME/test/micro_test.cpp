@@ -340,13 +340,14 @@ void thread_run(int id) {
       uint64_t leaves = leaf_splits + 1;
       uint64_t inner = (all - leaf_splits) + (height >= 2 ? height - 1 : 0);
       if (tree->built_leaves) leaves = tree->built_leaves, inner = tree->built_inner;  // bottom-up build
+      const double inner_mb = inner * (double)define::allocationInternalSize / define::MB;
+      const double leaf_mb = leaves * (double)define::allocationLeafSize / define::MB;
       printf("[TREE] height=%u leaves=%lu inner_nodes=%lu keys_per_leaf=%.2f "
-             "inner_MB=%.1f leaf_MB=%.1f (internal span %u, leaf span %u, "
+             "inner_MB=%.1f leaf_MB=%.1f total_MB=%.1f (internal span %u, leaf span %u, "
              "node bytes inner=%u leaf=%u)\n",
              (unsigned)height, (unsigned long)leaves, (unsigned long)inner,
              leaves ? (double)bulk_load_num / leaves : 0.0,
-             inner * (double)define::allocationInternalSize / define::MB,
-             leaves * (double)define::allocationLeafSize / define::MB,
+             inner_mb, leaf_mb, inner_mb + leaf_mb,
              (unsigned)define::internalSpanSize, (unsigned)define::leafSpanSize,
              (unsigned)define::allocationInternalSize, (unsigned)define::allocationLeafSize);
     }

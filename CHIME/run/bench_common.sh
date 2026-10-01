@@ -335,9 +335,28 @@ run_one() {
              | sed -nE 's/.*leaf=([0-9]+) MB.*/\1/p'; } 2>/dev/null || true)"
   lhit="$( { grep -E '^\[LEAFCACHE\] hit=' "$log" | tail -1 \
             | sed -nE 's/.*hit_pct=([0-9.]+).*/\1/p'; } 2>/dev/null || true)"
+  # Tree shape from the loader's [TREE] line (compute node only; NA on the memory
+  # node). Appended AFTER the log column so older positional parsers keep working.
+  local tline th tleaves tinner tinmb tlfmb ttot
+  tline="$( { grep -E '^\[TREE\]' "$log" | tail -1; } 2>/dev/null || true)"
+  th="$(sed -nE 's/.*height=([0-9]+).*/\1/p' <<<"$tline")"
+  tleaves="$(sed -nE 's/.* leaves=([0-9]+).*/\1/p' <<<"$tline")"
+  tinner="$(sed -nE 's/.*inner_nodes=([0-9]+).*/\1/p' <<<"$tline")"
+  tinmb="$(sed -nE 's/.*inner_MB=([0-9.]+).*/\1/p' <<<"$tline")"
+  tlfmb="$(sed -nE 's/.*leaf_MB=([0-9.]+).*/\1/p' <<<"$tline")"
+  ttot="$(sed -nE 's/.*total_MB=([0-9.]+).*/\1/p' <<<"$tline")"
   local csv="${SWEEP_CSV:-$outdir/summary_${role}.csv}"
-  [[ -f "$csv" ]] || echo "cache_mb,dir_threads,workload,offload,role,node_tput_mops,ops,p99_us,index_mb,cache_leaf,total_cache_mb,inner_cache_mb,leaf_cache_mb,leaf_hit_pct,log" > "$csv"
-  echo "${CACHE_CUR:-NA},${DIR_THREADS},${WORKLOAD},${mode},${role},${tput:-NA},${ops:-NA},${lat:-NA},${idx:-NA},${leaf},${ltotal:-NA},${linner:-NA},${lleaf:-NA},${lhit:-NA},${log}" >> "$csv"
+  [[ -f "$csv" ]] || echo "cache_mb,dir_threads,workload,offload,role,node_tput_mops,ops,p99_us,index_mb,cache_leaf,total_cache_mb,inner_cache_mb,leaf_cache_mb,leaf_hit_pct,log,tree_height,leaf_nodes,inner_nodes,inner_mb,leaf_mb,tree_mb" > "$csv"
+  echo "${CACHE_CUR:-NA},${DIR_THREADS},${WORKLOAD},${mode},${role},${tput:-NA},${ops:-NA},${lat:-NA},${idx:-NA},${leaf},${ltotal:-NA},${linner:-NA},${lleaf:-NA},${lhit:-NA},${log},${th:-NA},${tleaves:-NA},${tinner:-NA},${tinmb:-NA},${tlfmb:-NA},${ttot:-NA}" >> "$csv"
+  if [[ "$role" == "compute" ]]; then
+    echo ">> result: ${tput:-NA} Mops, p99 ${lat:-NA} us | cache ${ltotal:-?} MB = inner ${linner:-?} + leaf ${lleaf:-?} MB, inner nodes held ${idx:-?} MB"
+    # if/fi, not `[[ ]] && echo`: as the function's last command a false test
+    # would make run_one return 1 and stop the sweep under `set -e`.
+    if [[ -n "$tline" ]]; then
+      echo ">> tree: ${th:-?} levels | inner ${tinner:-?} nodes = ${tinmb:-?} MB | leaves ${tleaves:-?} = ${tlfmb:-?} MB | total ${ttot:-?} MB"
+    fi
+  fi
+  return 0
 }
 
 # One WORKLOADS x SEQUENCE matrix into $2.  $1 = role, $2 = outdir

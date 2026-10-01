@@ -7,7 +7,8 @@
 #   RUN_ID=fair1 ./fair/build.sh            # builds dex, chime, dart
 #   RUN_ID=fair1 ./fair/build.sh dex chime  # only some
 #
-# DEX   -> dex/build_fair/newbench    (separate dir; dex/build is untouched)
+# DEX   -> dex/build_<inner>_<leaf>_<placement>/newbench (one dir per geometry,
+#          from TREE_SETUP in params.sh; dex/build is untouched)
 # CHIME -> CHIME/build_fair/micro_test (separate dir; CHIME/build is untouched)
 # DART  -> DART/bin/{monitor,compute,memory} built by DART's own build.sh,
 #          exactly as shipped (no flags, no source changes).
@@ -18,15 +19,23 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/params.sh"
 targets=("$@"); [ ${#targets[@]} -eq 0 ] && targets=(dex chime dart)
 
 build_dex() {
-  echo "== DEX: inner=${DEX_INNER_PAGE}B leaf=${DEX_LEAF_PAGE}B, memory-node-only placement, manual pushdown"
+  local mn_only
+  case "$DEX_PLACEMENT" in
+    mn_only) mn_only=ON ;;
+    both)    mn_only=OFF ;;
+    *) echo "DEX_PLACEMENT must be mn_only or both (got '$DEX_PLACEMENT')" >&2; exit 1 ;;
+  esac
+  echo "== DEX ($TREE_SETUP): inner=${DEX_INNER_PAGE}B leaf=${DEX_LEAF_PAGE}B, placement=$DEX_PLACEMENT, manual pushdown"
   rm -rf "$DEX_BUILD" && mkdir -p "$DEX_BUILD" && cd "$DEX_BUILD"
   cmake -DCMAKE_BUILD_TYPE=Release \
         -DMANUAL_PUSHDOWN=ON \
-        -DMN_ONLY_PLACEMENT=ON \
+        -DMN_ONLY_PLACEMENT="$mn_only" \
         -DDEX_INNER_PAGE="$DEX_INNER_PAGE" -DDEX_LEAF_PAGE="$DEX_LEAF_PAGE" ..
   make -j"$(nproc)" newbench
   grep -q -- "-DMANUAL_PUSHDOWN" CMakeFiles/newbench.dir/flags.make
-  grep -q -- "-DMN_ONLY_PLACEMENT" CMakeFiles/newbench.dir/flags.make
+  if [ "$mn_only" = ON ]; then grep -q -- "-DMN_ONLY_PLACEMENT" CMakeFiles/newbench.dir/flags.make; fi
+  # Record what this binary was built for; run_dex.sh refuses a mismatch.
+  printf 'inner_page=%s leaf_page=%s placement=%s\n' "$DEX_INNER_PAGE" "$DEX_LEAF_PAGE" "$DEX_PLACEMENT" > build_stamp.txt
   echo "   ok: $DEX_BUILD/newbench"
 }
 

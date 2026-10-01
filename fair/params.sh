@@ -10,10 +10,8 @@
 # What "fair" fixes (see ARCHITECTURE.md §7):
 #   same data      50M keys, 8 B keys, 8 B values, in all three systems
 #   same clients   36 client threads, all on the compute node
-#   same tree      DEX and CHIME both use 16-entry inner nodes and 16-entry leaves,
-#                  AND the same fill: CHIME is built with DEX's measured 8 keys per
-#                  leaf and 7 children per inner node, so height (9), leaf count and
-#                  inner-node count match. Same node size alone is not enough.
+#   tree           see TREE_SETUP below: "stress" (default) gives each system the
+#                  tree that exposes its weak spot; "fair" gives both the same tree
 #   same cache     the TOTAL compute-side cache is the swept value in all three
 #                  (DART keeps no node cache, so for DART it has no effect)
 #   same run       10M warmup ops (DEX, CHIME; DART has no warmup phase) then
@@ -42,36 +40,55 @@
 # CHIME leaf cache arms run at every cell ("0 1"); CHIME+ is the better of the two.
 : "${CHIME_LEAF_SET:=0 1}"
 
-# Fair tree geometry (bytes). DEX: 64 B node header, 16 B per entry.
-#   inner 336 -> (336-8-64)/16 = 16 entries   leaf 352 -> (352-32-64)/16 = 16 entries
-# CHIME: leafSpanSize = 16 (fixed in Common.h); internalSpanSize set below.
+# ---------------------------------------------------------------------------
+# Tree setup. TREE_SETUP picks how each system's tree is shaped:
 #
-# Matching the TREE, not just the node capacity:
-#   DEX (fair3, measured): sorted inserts leave nodes half full -- 9 levels,
-#     6,249,999 leaves (8 keys each), 1,041,652 inner nodes (7 children each).
-#   CHIME inserting the same sorted keys got 8 levels and 772,006 inner nodes
-#     (its inner split keeps 9 children, not 7) and took 43 min to load.
-#   So CHIME is BUILT bottom-up from the sorted keys with DEX's fill
-#     (CHIME_BULK_BUILD=1, 8 keys per leaf, 7 children per inner node), same
-#     16-entry nodes as DEX: expected 9 levels, 6,250,000 leaves, ~1,041,667
-#     inner nodes (~333 MB at 335 B, against DEX's 350 MB at 352 B). Takes
-#     seconds. The workloads are read-only, so how the tree was built does not
-#     change what is measured.
-DEX_INNER_PAGE=336
-DEX_LEAF_PAGE=352
+#   stress (default)  each system in the setup that exposes its weak spot; the
+#                     two trees are NOT the same, and are not meant to be.
+#     DEX   old DEX geometry: 160 B inner pages (5 entries), 512 B leaf pages
+#           (26 entries), every node in a 512 B slot. DEX's sorted load leaves
+#           inner nodes with ~2 children, so the tree is 22 levels with as many
+#           inner nodes as leaves: ~3.85M inner (1,878 MB) + ~3.85M leaves
+#           (1,878 MB) = ~3.7 GB. The inner nodes alone exceed every cache size,
+#           so a lookup with offloading off still misses several levels and the
+#           leaf; one request to the memory node replaces all of those reads.
+#           (Measured in dex/build/results/*.log: height 22, 4.5 reads/lookup at
+#           256 MB.) Tree kept on the memory node only (DEX_PLACEMENT=mn_only);
+#           DEX_PLACEMENT=both is the original placement over both machines.
+#     CHIME stock CHIME tree: 16-entry nodes, keys inserted in shuffled order
+#           (~69% full): ~7 levels, inner nodes ~90-100 MB. They do not fit at 32
+#           and 64 MB, which is where offloading and the leaf cache should help.
+#
+#   fair              both trees the same shape (fair3/shape runs): DEX 336/352 B
+#                     pages (16 entries), CHIME bulk-built with DEX's fill
+#                     (8 keys per leaf, 7 children per inner node), 9 levels each.
+#
+# Every cell prints the tree it ran on (height, inner and leaf node counts and
+# MB, total MB) and writes it into the CSV.
+# ---------------------------------------------------------------------------
+: "${TREE_SETUP:=stress}"
+case "$TREE_SETUP" in
+  stress)
+    : "${DEX_INNER_PAGE:=160}" "${DEX_LEAF_PAGE:=512}"
+    : "${CHIME_BULK_BUILD:=0}" ;;
+  fair)
+    : "${DEX_INNER_PAGE:=336}" "${DEX_LEAF_PAGE:=352}"
+    : "${CHIME_BULK_BUILD:=1}" ;;
+  *) echo "TREE_SETUP must be stress or fair (got '$TREE_SETUP')" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
+: "${DEX_PLACEMENT:=mn_only}"          # mn_only | both
 CHIME_INTERNAL_SPAN=16
-: "${CHIME_BULK_BUILD:=1}"
-: "${CHIME_BUILD_LEAF_KEYS:=8}"
+: "${CHIME_BUILD_LEAF_KEYS:=8}"        # bulk build only (fair)
 : "${CHIME_BUILD_INNER_FANOUT:=7}"
-# Insert-based loads, only used with CHIME_BULK_BUILD=0:
-# CHIME_SORTED_LOAD=1 inserts in sorted order (slow, see above); 0 = stock shuffled.
-: "${CHIME_SORTED_LOAD:=0}"
+: "${CHIME_SORTED_LOAD:=0}"            # insert load order when not bulk-building; 0 = shuffled
 
 # Paths (same layout on both servers).
 REV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAIR_DIR="$REV_DIR/fair"
 RESULTS_DIR="$FAIR_DIR/results/$RUN_ID"
-DEX_BUILD="$REV_DIR/dex/build_fair"
+# one DEX build per geometry/placement, so switching TREE_SETUP never runs a
+# binary built for the other geometry (run_dex.sh also checks [GEOMETRY]).
+DEX_BUILD="$REV_DIR/dex/build_${DEX_INNER_PAGE}_${DEX_LEAF_PAGE}_${DEX_PLACEMENT}"
 CHIME_BUILD="$REV_DIR/CHIME/build_fair"
 DART_DIR="$REV_DIR/DART"
 
