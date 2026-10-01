@@ -104,9 +104,14 @@ wl_dist()  { case "$1" in *-uniform) echo uniform ;; *) echo zipf ;; esac; }
 wl_op()    { case "$1" in point-*) echo point ;; *) echo range ;; esac; }
 
 # memcached text protocol over /dev/tcp (no nc needed).
+# The open is wrapped in { ...; } 2>/dev/null on purpose: `exec 3<>X 2>/dev/null`
+# makes BOTH redirections permanent, so the first successful call silently sent
+# the calling script's stderr (all its warnings) to /dev/null for the rest of the
+# run, while a failed call (memcached not up yet) still printed "Connection
+# refused". The group limits the 2>/dev/null to the open itself.
 memc_get() {   # host port key -> value (empty if missing/unreachable)
   local host=$1 port=$2 key=$3 line val=""
-  exec 3<>"/dev/tcp/${host}/${port}" 2>/dev/null || { echo ""; return 1; }
+  { exec 3<>"/dev/tcp/${host}/${port}"; } 2>/dev/null || { echo ""; return 1; }
   printf 'get %s\r\n' "$key" >&3
   while IFS= read -r -t 2 line <&3; do
     line=${line%$'\r'}
@@ -119,7 +124,7 @@ memc_get() {   # host port key -> value (empty if missing/unreachable)
   echo "$val"
 }
 memc_set_zero() {   # host port key
-  exec 3<>"/dev/tcp/$1/$2" 2>/dev/null || return 1
+  { exec 3<>"/dev/tcp/$1/$2"; } 2>/dev/null || return 1
   printf 'set %s 0 0 1\r\n0\r\n' "$3" >&3
   IFS= read -r -t 2 _ <&3
   exec 3>&- 3<&-
