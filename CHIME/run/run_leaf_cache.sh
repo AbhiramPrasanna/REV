@@ -112,8 +112,8 @@ fi
 # phase is still valid, just noisier -- keep it identical across compared cells.
 case "${PROFILE:-}" in
   quick) : "${BULK:=10}"; : "${WARMUP:=2}"; : "${POINT_OP:=10}"; : "${RANGE_OP:=10}" ;;
-  final|"") : "${BULK:=50}"; : "${WARMUP:=10}"; : "${POINT_OP:=30}"; : "${RANGE_OP:=30}" ;;
-  *) echo "unknown PROFILE=$PROFILE (use quick|final)" >&2; exit 1 ;;
+  final|full|"") : "${BULK:=50}"; : "${WARMUP:=10}"; : "${POINT_OP:=30}"; : "${RANGE_OP:=30}" ;;
+  *) echo "unknown PROFILE=$PROFILE (use quick|final|full)" >&2; exit 1 ;;
 esac
 
 # leaf OFF first so every plot reads "inner nodes only, then inner + leaves".

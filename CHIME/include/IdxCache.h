@@ -107,8 +107,13 @@ inline bool IdxCache::add_to_cache(const GlobalAddress& leaf_addr, int kv_idx, c
   }
   // evict the lfu one
   auto& e = bucket[min_idx];
-  if (__sync_bool_compare_and_swap(&e, e, new_entry)) {
-    safely_delete(e);
+  // Snapshot the victim BEFORE the CAS: after it succeeds `e` (a reference to the
+  // slot) reads back new_entry, and the old code retired the entry it had just
+  // installed (use-after-free on later hits -> heap corruption) and leaked the
+  // victim.
+  auto victim = e;
+  if (__sync_bool_compare_and_swap(&e, victim, new_entry)) {
+    if (victim) safely_delete(victim);
     return true;
   }
   delete new_entry;
@@ -187,8 +192,9 @@ inline void IdxCache::evict_one() {
 
   // erase an entry
   auto& entry = (min_freq_1 < min_freq_2 ? bucket_1[min_idx_1] : bucket_2[min_idx_2]);
-  if (entry && __sync_bool_compare_and_swap(&entry, entry, 0ULL)) {
-    safely_delete(entry);
+  auto victim = entry;  // snapshot: after the CAS `entry` reads back 0
+  if (victim && __sync_bool_compare_and_swap(&entry, victim, 0ULL)) {
+    safely_delete(victim);
     free_size.fetch_add(sizeof(IdxCacheEntry));
   }
   return;

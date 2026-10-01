@@ -70,10 +70,15 @@
 case "$TREE_SETUP" in
   stress)
     : "${DEX_INNER_PAGE:=160}" "${DEX_LEAF_PAGE:=512}"
-    : "${CHIME_BULK_BUILD:=0}" ;;
+    : "${CHIME_BULK_BUILD:=0}"
+    # Scans go to the memory node only when the cache cannot place them (CHIME's
+    # own miss-gated rule), so cached inner nodes and the leaf cache still serve
+    # scans where they can -- the regime this setup is meant to show.
+    : "${CHIME_SCAN_OFFLOAD_ALWAYS:=0}" ;;
   fair)
     : "${DEX_INNER_PAGE:=336}" "${DEX_LEAF_PAGE:=352}"
-    : "${CHIME_BULK_BUILD:=1}" ;;
+    : "${CHIME_BULK_BUILD:=1}"
+    : "${CHIME_SCAN_OFFLOAD_ALWAYS:=1}" ;;   # every scan to the memory node, like DEX+
   *) echo "TREE_SETUP must be stress or fair (got '$TREE_SETUP')" >&2; return 1 2>/dev/null || exit 1 ;;
 esac
 : "${DEX_PLACEMENT:=mn_only}"          # mn_only | both

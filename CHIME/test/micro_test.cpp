@@ -252,6 +252,12 @@ std::atomic<int64_t> bulk_cnt{0};      // bulk-load completion barrier (see thre
 std::atomic<int64_t> warmup_cnt{0};
 std::atomic_bool ready{false};
 std::atomic<int> done_cnt{0};   // threads that finished their op quota
+// Measured-phase window for [RESULT] in op-bounded mode: from the moment the
+// threads are released into the measured loop to the moment the LAST one
+// finishes. (main's own clock only notices completion at its next 0.5 s tick,
+// which added up to 0.5 s of idle time and understated fast cells.)
+std::atomic<uint64_t> g_meas_start_ns{0};
+std::atomic<uint64_t> g_meas_end_ns{0};
 // 0 = op-bounded: run exactly opM*1e6 ops per node (DEX's time_based=0).
 // 1 = time-bounded: cycle the array for TEST_EPOCH*TIME_INTERVAL seconds.
 int g_time_based = 0;
@@ -389,6 +395,7 @@ void thread_run(int id) {
     std::fill(g_scan_rows, g_scan_rows + MAX_APP_THREAD, 0);
     std::fill(need_clear, need_clear + MAX_APP_THREAD, true);
     ready = true;
+    g_meas_start_ns.store(Timer::get_time_ns());
     warmup_cnt.store(-1);
   }
   while (warmup_cnt.load() != -1) ;
@@ -428,6 +435,10 @@ void thread_run(int id) {
 #endif
     my_stats.record(lat_op, cls, ns);
     tp[tid][0]++;
+  }
+  {  // record the latest finish time (atomic max)
+    uint64_t now = Timer::get_time_ns(), prev = g_meas_end_ns.load();
+    while (now > prev && !g_meas_end_ns.compare_exchange_weak(prev, now)) {}
   }
   done_cnt.fetch_add(1);   // op-bounded: tell main this thread finished its quota
 }
@@ -761,6 +772,9 @@ int main(int argc, char *argv[]) {
   clock_gettime(CLOCK_REALTIME, &e2);
   double meas_s = (e2.tv_sec - t0_meas.tv_sec) +
                   (double)(e2.tv_nsec - t0_meas.tv_nsec) / 1e9;
+  // Op-bounded: time exactly the measured loop (release -> last thread done).
+  if (!g_time_based && g_meas_start_ns.load() && g_meas_end_ns.load() > g_meas_start_ns.load())
+    meas_s = (g_meas_end_ns.load() - g_meas_start_ns.load()) / 1e9;
   uint64_t total_ops = 0;
   for (int i = 0; i < MAX_APP_THREAD; ++i) total_ops += tp[i][0];
   printf("[RESULT node %d] ops=%lu elapsed=%.3fs throughput=%.4f Mops mode=%s\n",
@@ -768,12 +782,15 @@ int main(int argc, char *argv[]) {
          meas_s > 0 ? total_ops / meas_s / 1e6 : 0.0,
          g_time_based ? "time-bounded" : "op-bounded");
 
-  bench::Reporter::print(bench::g_stats, kThreadCount, dsm->getMyNodeID());
+  // All MAX_APP_THREAD slots: stats are indexed by DSM thread id, and main
+  // registered first (id 0), so the workers are ids 1..kThreadCount -- reading
+  // only 0..kThreadCount-1 dropped the last worker. Unused slots are zero.
+  bench::Reporter::print(bench::g_stats, MAX_APP_THREAD, dsm->getMyNodeID());
 
   // Correctness signal (compare across OFFLOAD off vs on -- must be identical on
   // a static tree). Lookup found-ratio and scan rows/op.
   uint64_t lf = 0, lt = 0, sr = 0;
-  for (int i = 0; i < kThreadCount; ++i) { lf += g_lk_found[i]; lt += g_lk_total[i]; sr += g_scan_rows[i]; }
+  for (int i = 0; i < MAX_APP_THREAD; ++i) { lf += g_lk_found[i]; lt += g_lk_total[i]; sr += g_scan_rows[i]; }
   if (lt) printf("[CORRECTNESS node %d] lookup found %lu / %lu = %.4f%%\n",
                  dsm->getMyNodeID(), (unsigned long)lf, (unsigned long)lt, 100.0 * lf / lt);
   if (sr) printf("[CORRECTNESS node %d] scan rows returned = %lu\n",

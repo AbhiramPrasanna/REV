@@ -8,7 +8,7 @@
 # CHIME+ settings used for every "on" cell (see ARCHITECTURE.md §6):
 #   CHIME_MN_CLIENTS=0           clients only on the compute node (like DEX/DART)
 #   CHIME_SCAN_FROM_CACHE=1      scan requests start from the deepest cached node
-#   CHIME_SCAN_OFFLOAD_ALWAYS=1  every scan goes to the memory node (like DEX+)
+#   CHIME_SCAN_OFFLOAD_ALWAYS    stress: 0 (scans offload only on a cache miss); fair: 1 (every scan, like DEX+)
 # Tree: TREE_SETUP=stress (default) = stock shuffled insert load; TREE_SETUP=fair
 # = CHIME_BULK_BUILD=1, built with DEX's fill (same shape as DEX). See params.sh.
 # With memory threads 0 the two scan switches have no effect (offloading is off).

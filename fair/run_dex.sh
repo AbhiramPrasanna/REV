@@ -69,7 +69,7 @@ wait_for_compute() {    # memory server only: compute has registered as node 0
 
 csv_c="$OUT/dex_compute.csv"; csv_m="$OUT/dex_memory.csv"
 [ "$role" = compute ] && [ ! -f "$csv_c" ] && \
-  echo "system,workload,dist,cache_mb,memthreads,offload,leaf,tput_mops,p99_us,rdma_read_per_op,rpc_per_op,tree_height,inner_entries,leaf_entries,placement,log,inner_page_b,leaf_page_b,slot_b,inner_nodes,inner_mb,leaf_nodes,leaf_mb,tree_mb,cache_slots" > "$csv_c"
+  echo "system,workload,dist,cache_mb,memthreads,offload,leaf,tput_mops,p99_us,rdma_read_per_op,rpc_per_op,tree_height,inner_entries,leaf_entries,placement,log,inner_page_b,leaf_page_b,slot_b,inner_nodes,inner_mb,leaf_nodes,leaf_mb,tree_mb,cache_slots,cache_full_before_measure" > "$csv_c"
 [ "$role" = memory ] && [ ! -f "$csv_m" ] && \
   echo "system,workload,cache_mb,memthreads,mn_peak_active_pct,mn_peak_per_thread_pct,log" > "$csv_m"
 
@@ -115,7 +115,20 @@ for mt in $MEMTHREADS; do
         lfmb=$(awk -F'= ' '/^leaf size\(MB\) =/{v=$2} END{print v}' "$log")
         slots=$(awk -F'= ' '/^Cache capacity =/{v=$2} END{print v}' "$log")
         tot=$(awk -v a="$inmb" -v b="$lfmb" 'BEGIN{ if (a!="" && b!="") printf "%.1f", a+b; else print "NA" }')
-        echo "dex,$wl,$(wl_dist "$wl"),$cache,$mt,$off,NA,$thr,$p99,$rr,$rp,${h:-NA},${ie:-NA},${le:-NA},${pl:-NA},$log,${ip:-NA},${lp:-NA},${sl:-NA},${inn:-NA},${inmb:-NA},${lfn:-NA},${lfmb:-NA},${tot},${slots:-NA}" >> "$csv_c"
+        # DEX only offloads once its cache is full ("entering dynamic phase",
+        # leanstore_cache.h state==1). The pool is reset before warmup, so the
+        # cache must refill DURING warmup -- between the first "I am" line
+        # (threads start) and "finish warmup" -- or the first part of an
+        # offload-on measurement runs without offloading.
+        iam=$(grep -n -m1 '^I am' "$log" | cut -d: -f1)
+        fw=$(grep -n -m1 'finish warmup' "$log" | cut -d: -f1)
+        full=$(awk -v a="$iam" -v b="$fw" '/entering dynamic phase/ && NR>a+0 && NR<b+0 {f=1}
+               END{ if (a=="" || b=="") print "NA"; else print (f ? "yes" : "no") }' "$log")
+        if [ "$full" = no ] && [ "$mt" -gt 0 ]; then
+          echo "    !! WARNING: cache was not full when the measured phase began, so offloading" >&2
+          echo "    !!          started late in this cell. Raise WARMUP_M and rerun it." >&2
+        fi
+        echo "dex,$wl,$(wl_dist "$wl"),$cache,$mt,$off,NA,$thr,$p99,$rr,$rp,${h:-NA},${ie:-NA},${le:-NA},${pl:-NA},$log,${ip:-NA},${lp:-NA},${sl:-NA},${inn:-NA},${inmb:-NA},${lfn:-NA},${lfmb:-NA},${tot},${slots:-NA},${full}" >> "$csv_c"
         echo "    -> ${thr} Mops  p99 ${p99} us  reads/op ${rr}  requests/op ${rp}"
         echo "    -> tree: ${h:-?} levels | inner ${inn:-?} nodes = ${inmb:-?} MB (${ie:-?} entries, ${ip:-?} B page) | leaves ${lfn:-?} = ${lfmb:-?} MB (${le:-?} entries, ${lp:-?} B page) | total ${tot} MB | cache ${cache} MB = ${slots:-?} slots of ${sl:-?} B"
         sleep 3

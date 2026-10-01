@@ -86,7 +86,13 @@ def load(results):
                              mn_active=peak_mn_active(ml) if ml else None, log=r.get("log"),
                              inner_mb=r.get("inner_cache_mb"), leaf_mb=r.get("leaf_cache_mb"),
                              leaf_hit=r.get("leaf_hit_pct")))
-    return rows
+    # The run scripts append to their CSVs, so rerunning a cell under the same
+    # RUN_ID leaves two rows. Keep the LAST row per cell (the rerun), so nothing
+    # downstream double-counts a cell or picks the better of two attempts.
+    last = {}
+    for r in rows:
+        last[(r["system"], r["workload"], r["cache_mb"], r["memthreads"], r["leaf"])] = r
+    return list(last.values())
 
 
 def best_chime(rows):

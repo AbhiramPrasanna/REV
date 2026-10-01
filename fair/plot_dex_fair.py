@@ -67,9 +67,16 @@ def load(path):
     with open(path, newline="") as f:
         for r in csv.DictReader(f):
             try:
-                data[(r["workload"], int(r["cache_mb"]), int(r["memthreads"]))] = float(r["tput_mops"])
+                cell = (r["workload"], int(r["cache_mb"]), int(r["memthreads"]))
             except (KeyError, ValueError):
-                continue          # NA or a malformed row: leave the cell empty
+                continue          # malformed row
+            try:
+                data[cell] = float(r["tput_mops"])
+            except ValueError:
+                # The latest run of this cell failed (NA): drop any older value
+                # rather than plot a result the rerun did not reproduce (same
+                # rule as collect.py: the last row for a cell wins).
+                data.pop(cell, None)
     if not data:
         sys.exit(f"no usable rows in {path}")
     return data
