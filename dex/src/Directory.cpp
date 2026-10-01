@@ -7,6 +7,8 @@
 
 #include <gperftools/profiler.h>
 #include <unistd.h>  // sysconf(_SC_NPROCESSORS_ONLN) for dir-thread pinning
+#include <cstdlib>   // getenv/strtol for REV_DIR_CPUS
+#include <vector>
 
 GlobalAddress g_root_ptr = GlobalAddress::Null();
 int g_root_level = -1;
@@ -60,6 +62,20 @@ void Directory::dirThread() {
   if (ncpu <= 0) ncpu = 40;  // what the old constant assumed
   int dir_core = (int)(ncpu - 1 - (long)dirID);
   if (dir_core < 0) dir_core = (int)(ncpu - 1);
+  // REV_DIR_CPUS (set by fair/params.sh from lscpu): CPUs whose physical core no
+  // client uses. The top-down rule above puts dir threads 4..7 on the
+  // hyperthreads of clients 35..32 on the 80-CPU servers; this list avoids them.
+  if (const char *list = getenv("REV_DIR_CPUS")) {
+    std::vector<int> cpus;
+    for (const char *p = list; *p;) {
+      char *end;
+      long v = strtol(p, &end, 10);
+      if (end == p) { ++p; continue; }
+      if (v >= 0 && v < ncpu) cpus.push_back((int)v);
+      p = end;
+    }
+    if (!cpus.empty()) dir_core = cpus[dirID % cpus.size()];
+  }
   bindCore((uint16_t)dir_core);
   Debug::notifyInfo("dir %d launch! (core %d of %ld)\n", dirID, dir_core, ncpu);
 

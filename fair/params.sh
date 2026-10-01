@@ -152,6 +152,46 @@ cleanup_node() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# CPU pinning, the same rule for DEX and CHIME on every server:
+#   client thread i -> CPU i (CPUs 0..THREADS-1, one physical core each on the
+#                      6/8 servers: CPU c and c+40 are the two hyperthreads of
+#                      core c);
+#   directory threads -> REV_DIR_CPUS, the CPUs whose PHYSICAL core no client
+#                      uses, one per free core first, then their second
+#                      hyperthreads. On server 6: 79,78,77,76,39,38,37,36.
+# Before this, DEX's compute-node dir threads (which busy-poll even when idle)
+# sat on the hyperthreads of clients 32..35 once memory threads >= 5, and CHIME's
+# clients (pinned 2*id+1, i.e. odd CPUs) were packed two per core on 16 of the 20
+# cores of one socket. Both binaries read REV_DIR_CPUS; CHIME also reads
+# REV_CLIENT_PIN=linear.
+# ---------------------------------------------------------------------------
+dir_cpu_list() {   # -> comma list of CPUs free of client cores (needs lscpu)
+  command -v lscpu >/dev/null || return 0
+  lscpu -p=CPU,CORE,SOCKET | grep -v '^#' | awk -F, -v T="$THREADS" '
+    { cpu[NR]=$1; key[$1]=$3 ":" $2; n=NR }
+    END {
+      for (c = 0; c < T; c++) used[key[c]] = 1
+      m = 0
+      for (i = n; i >= 1; i--) { c = cpu[i]; if (!(key[c] in used)) free_[++m] = c }   # highest first
+      out = ""
+      for (i = 1; i <= m; i++) { c = free_[i]; if (!(key[c] in seen)) { seen[key[c]] = 1; out = out (out ? "," : "") c; taken[c] = 1 } }
+      for (i = 1; i <= m; i++) { c = free_[i]; if (!(c in taken)) out = out (out ? "," : "") c }
+      print out
+    }'
+}
+pin_report() {   # print the plan and warn if two clients share a physical core
+  command -v lscpu >/dev/null || { echo "pinning: lscpu missing, binaries fall back to their own rule"; return 0; }
+  local shared
+  shared=$(lscpu -p=CPU,CORE,SOCKET | grep -v '^#' | awk -F, -v T="$THREADS" '$1 < T { k = $3 ":" $2; if (k in s) d++; s[k] = 1 } END { print d + 0 }')
+  echo "pinning ($(hostname -s)): clients -> CPUs 0..$((THREADS - 1)); directory threads -> ${REV_DIR_CPUS:-<binary default>}"
+  [ "$shared" -gt 0 ] && echo "WARNING: $shared client CPUs share a physical core with another client" >&2
+  return 0
+}
+REV_DIR_CPUS="$(dir_cpu_list)"
+REV_CLIENT_PIN=linear
+export REV_DIR_CPUS REV_CLIENT_PIN
+
 preflight_cores() {   # warn if client + memory threads cannot each get a core
   local need=$1 have
   have=$(nproc 2>/dev/null || echo 0)

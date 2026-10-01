@@ -50,6 +50,7 @@ else
   echo "CHIME setup ($TREE_SETUP): 16-entry nodes, keys inserted $( [ "$CHIME_SORTED_LOAD" = 1 ] && echo sorted || echo shuffled ) (stock load)"
 fi
 echo "  each cell prints '>> tree:' (levels, inner and leaf nodes and MB) and '>> result:'"
+pin_report
 
 for mt in $MEMTHREADS; do
   if [ "$mt" -eq 0 ]; then

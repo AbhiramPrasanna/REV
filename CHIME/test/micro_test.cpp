@@ -311,8 +311,31 @@ void thread_bulk_load(int id) {
 }
 
 
+// REV_CLIENT_PIN=linear (set by fair/params.sh): client thread i on CPU i, one
+// physical core each, the same rule as DEX. Default (unset) keeps CHIME's own
+// odd-CPU rule (2*id+1), which on the 80-CPU servers packs two clients per core.
+static bool linear_pin() {
+  const char *s = getenv("REV_CLIENT_PIN");
+  return s && std::string(s) == "linear";
+}
+// Main thread under linear pinning: the last CPU in REV_DIR_CPUS (clear of every
+// client; only shared with a dir thread at the highest memory-thread count, and
+// main only spins before the measured phase).
+static int main_cpu_linear() {
+  int cpu = 0;
+  if (const char *list = getenv("REV_DIR_CPUS"))
+    for (const char *p = list; *p;) {
+      char *end;
+      long v = strtol(p, &end, 10);
+      if (end == p) { ++p; continue; }
+      cpu = (int)v;
+      p = end;
+    }
+  return cpu;
+}
+
 void thread_run(int id) {
-  bindCore(id * 2 + 1);
+  bindCore(linear_pin() ? id : id * 2 + 1);
   dsm->registerThread();
   auto tid = dsm->getMyThreadID();
   printf("I am %lu\n", (uint64_t)(kThreadCount * dsm->getMyNodeID() + id));
@@ -494,7 +517,7 @@ int main(int argc, char *argv[]) {
   config.machineNR = kNodeCount;
   config.threadNR = kThreadCount;
   dsm = DSM::getInstance(config);
-  bindCore(kThreadCount * 2 + 1);
+  bindCore(linear_pin() ? main_cpu_linear() : kThreadCount * 2 + 1);
   dsm->registerThread();
   // Runtime index-cache size (MB) for a rebuild-free cache sweep (DEX-style).
   if (const char *cm = getenv("CHIME_CACHE_MB")) g_index_cache_mb = atoi(cm);
@@ -592,7 +615,11 @@ int main(int argc, char *argv[]) {
   // cannot finish until it does -- which shows up as one node running at a
   // fraction of the other's throughput and the two drifting out of lockstep.
   // Silent before; now it is a line you can grep.
-  {
+  if (linear_pin()) {
+    printf("[CORES node %d] linear pinning: app threads -> CPUs 0..%d, main -> %d, dir threads -> %s (REV_DIR_CPUS)\n",
+           dsm->getMyNodeID(), kThreadCount - 1, main_cpu_linear(),
+           getenv("REV_DIR_CPUS") ? getenv("REV_DIR_CPUS") : "<CHIME default>");
+  } else {
     long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
     int app_top = kThreadCount * 2 + 1;                      // main thread's core
     int dir_bot = (int)(ncpu - 1 - 2 * (long)(chime::num_dir() - 1));

@@ -4,6 +4,8 @@
 #include "Connection.h"
 
 #include <unistd.h>   // sysconf(_SC_NPROCESSORS_ONLN) for dir-thread core pinning
+#include <cstdlib>    // getenv/strtol for REV_DIR_CPUS
+#include <vector>
 
 #ifdef ENABLE_OFFLOAD
 #include "chime_rpc.h"   // memory-node lookup/scan pushdown handlers
@@ -77,6 +79,21 @@ void Directory::dirThread() {
   if (ncpu <= 0) ncpu = CPU_PHYSICAL_CORE_NUM * 2;
   int dir_core = (int)(((ncpu - 1) & ~1L) - 2 * (long)dirID);
   if (dir_core < 0) dir_core = (int)((ncpu - 1) & ~1L);
+  // REV_DIR_CPUS (fair/params.sh, from lscpu): CPUs whose physical core no client
+  // uses -- the same rule DEX gets. Used together with REV_CLIENT_PIN=linear
+  // (clients on CPUs 0..T-1, see micro_test.cpp), which replaces the odd-CPU
+  // rule above that packs two clients per core on the 80-CPU servers.
+  if (const char *list = getenv("REV_DIR_CPUS")) {
+    std::vector<int> cpus;
+    for (const char *p = list; *p;) {
+      char *end;
+      long v = strtol(p, &end, 10);
+      if (end == p) { ++p; continue; }
+      if (v >= 0 && v < ncpu) cpus.push_back((int)v);
+      p = end;
+    }
+    if (!cpus.empty()) dir_core = cpus[dirID % cpus.size()];
+  }
   bindCore((uint16_t)dir_core);
   Debug::notifyInfo("dir %d launch! (core %d of %ld)\n", dirID, dir_core, ncpu);
 
