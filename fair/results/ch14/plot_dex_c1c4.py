@@ -149,11 +149,18 @@ def fig_c1(rows, mem):
     style(ax, "Challenge 1 · DEX: lookup throughput vs memory cores",
           "memory-node cores", "Mops (40 clients)")
     ax.legend(fontsize=7.5, frameon=False, loc="upper left")
-    per_core = [p["tput_mops"] / c for p, c in zip(push, cores) if p]
+    # per-core rate from the linear part (1-2 cores); larger counts can level off
+    per_core = [p["tput_mops"] / c for p, c in zip(push, cores) if p and c <= 2]
     if per_core:
         pc = sum(per_core) / len(per_core)
-        ax.text(8.3, ymax * 0.04, f"cores to match pull: {pull['tput_mops'] / pc:.1f} measured, "
-                f"{xp / model_push(1, 1)[1]:.1f} model", ha="right", fontsize=8, color=MUTED)
+        top = max((p["tput_mops"], c) for p, c in zip(push, cores) if p)
+        msg = (f"push per core {pc:.2f} Mops (model {model_push(1, 1)[1]:.2f}); "
+               f"cores to match pull: {pull['tput_mops'] / pc:.1f} at that rate, {xp / model_push(1, 1)[1]:.1f} model")
+        if top[0] < 0.85 * pc * top[1]:
+            msg += f"\npush levels off: {top[0]:.2f} Mops at {top[1]} cores ({top[0] / pull['tput_mops']:.0%} of pull)"
+        ax.text(8.3, (pull["tput_mops"] + top[0]) / 2, msg, ha="right", va="center",
+                fontsize=7.5, color=MUTED,
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=2))
         note("1", "C1", "push per core (Mops)", model_push(1, 1)[1], pc)
         note("1", "C1", "cores for push to match pull", xp / model_push(1, 1)[1], pull["tput_mops"] / pc)
     note("1", "C1", "warm pull (Mops)", xp, pull["tput_mops"])
