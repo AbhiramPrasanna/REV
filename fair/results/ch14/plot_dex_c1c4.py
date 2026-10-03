@@ -128,82 +128,123 @@ def note(fig, ch, what, model, meas):
 
 
 # ---- figures -----------------------------------------------------------------
-def fig_c1(rows, mem):
-    blk = "c1_dexr_model_warm"
-    pull = pick(rows, blk, mt=0)
-    cores = [1, 2, 4, 8]
-    push = [pick(rows, blk, mt=c) for c in cores]
-    if not pull:
-        return None
-    fig, axes = plt.subplots(1, 2 if mem else 1, figsize=(11 if mem else 6.2, 4))
-    ax = axes[0] if mem else axes
-    # The PDF's Fig. 1 (page B+tree): warm pull = one 1 KB leaf read; push-only =
-    # the memory node walks the whole tree (5 inner levels + leaf). Our push is one
-    # request per lookup that reads only the leaf there, so the model's line for
-    # that path (1 level) is drawn too, lighter.
-    L_WALK = 6
-    mc = [0, 1, 2, 4, 8, 16]
-    _, xp = model_pull(1)
-    ax.axhline(pull["tput_mops"], color=PULL, lw=2, label="pull, warm cache (measured)")
-    ax.axhline(xp, color=PULL, lw=1.5, ls="--", alpha=0.75, label=f"pull, warm (model: {xp:.1f})")
-    line(ax, cores, [p["tput_mops"] if p else None for p in push], PUSH2, "push, every lookup (measured)")
-    line(ax, mc, [model_push(L_WALK, c)[1] for c in mc], PUSH2,
-         f"push-only from the root (model, PDF Fig. 1: {model_push(L_WALK, 1)[1]:.2f}/core)", model=True)
-    leaf = [model_push(1, c)[1] for c in mc]
-    ax.plot(mc, leaf, color=MODEL, lw=1.2, ls=":", label=f"push of the leaf only (model: {leaf[1]:.2f}/core)")
-    ymax = nice_max(max(pull["tput_mops"], xp, model_push(L_WALK, 16)[1],
-                        *[p["tput_mops"] for p in push if p]) * 1.05)
-    ax.set_ylim(0, ymax); ax.set_xlim(0, 16.5); ax.set_xticks(mc)
-    style(ax, "Challenge 1 · DEX (page B+tree): lookup throughput vs memory cores",
-          "memory-node cores", "Mops (40 clients)")
-    ax.legend(fontsize=7.2, frameon=False, loc="upper left")
-    par_model = xp / model_push(L_WALK, 1)[1]
-    ax.axvline(par_model, color=MODEL, lw=0.8, ls="--", alpha=0.5)
-    ax.annotate(f"model parity\n{par_model:.1f} cores", (par_model, ymax * 0.6), xytext=(4, 0),
-                textcoords="offset points", fontsize=7, color=MUTED)
-    # per-core rate from the linear part (1-2 cores); larger counts can level off
-    per_core = [p["tput_mops"] / c for p, c in zip(push, cores) if p and c <= 2]
-    if per_core:
-        pc = sum(per_core) / len(per_core)
-        top = max((p["tput_mops"], c) for p, c in zip(push, cores) if p)
-        # what the memory cores could carry at the measured cost per request, and
-        # the ceiling 40 waiting clients put on push at the measured latency
-        ax.plot(mc, [pc * c for c in mc], color=PUSH8, lw=1.3, ls="-.",
+# The PDF's Fig. 1: warm pull = one leaf read; push-only = the memory node walks
+# the whole tree (inner levels + leaf). Our push is one request per lookup that
+# starts at the deepest cached node (here the leaf's parent).
+C1_SYSTEMS = [
+    # name, title, pull block, push block, levels walked by push-only, leaf bytes pulled, extra pull block
+    ("dex", "DEX (page B+tree)", "c1_dexr_model_warm", "c1_dexr_model_warm", 6, PAGE, None),
+    ("chime", "CHIME (hashed-leaf B+tree)", "c1_chime_model_pull", "c1_chime_model_push", 5, 180,
+     "c1_chime_model_pull_nohot"),
+]
+C1_CORES = [1, 2, 4, 8]
+C1_MC = [0, 1, 2, 4, 8, 16]
+
+
+def c1_data(rows, spec):
+    _, _, pblk, sblk, walk, leaf_b, extra = spec
+    pull = pick(rows, pblk, mt=0)
+    push = [pick(rows, sblk, mt=c) for c in C1_CORES]
+    nohot = pick(rows, extra, mt=0) if extra else None
+    return pull, push, nohot
+
+
+def c1_panel(ax, rows, spec, ymax):
+    name, title, _, _, walk, leaf_b, _ = spec
+    pull, push, nohot = c1_data(rows, spec)
+    _, xp = model_pull(1, leaf_b)
+    cap = []
+    if pull:
+        ax.axhline(pull["tput_mops"], color=PULL, lw=2, label=f"pull, warm cache (measured: {pull['tput_mops']:.1f})")
+    if nohot:
+        ax.axhline(nohot["tput_mops"], color=PULL, lw=1.4, ls=(0, (6, 2)), alpha=0.9,
+                   label=f"pull without hotspot buffer (measured: {nohot['tput_mops']:.1f})")
+    if xp <= ymax:
+        ax.axhline(xp, color=PULL, lw=1.5, ls="--", alpha=0.6, label=f"pull, warm (model: {xp:.1f})")
+    else:
+        ax.annotate(f"↑ pull, warm (model): {xp:.0f} Mops, above this chart",
+                    (16.3, ymax), xytext=(0, -12), textcoords="offset points",
+                    ha="right", fontsize=7.5, color=PULL)
+    line(ax, C1_CORES, [p["tput_mops"] if p else None for p in push], PUSH2, "push, every lookup (measured)")
+    line(ax, C1_MC, [model_push(walk, c)[1] for c in C1_MC], PUSH2,
+         f"push-only from the root (model: {model_push(walk, 1)[1]:.2f}/core)", model=True)
+    per_core = [p["tput_mops"] / c for p, c in zip(push, C1_CORES) if p and c <= 2]
+    pc = sum(per_core) / len(per_core) if per_core else None
+    if pc:
+        ax.plot(C1_MC, [pc * c for c in C1_MC], color=PUSH8, lw=1.3, ls="-.",
                 label=f"memory cores' capacity (cores ÷ {1 / pc:.2f} µs per request)")
-        ptop = next(p for p in push if p and p["tput_mops"] == top[0])
-        if ptop["mean_us"] == ptop["mean_us"] and ptop["mean_us"] > 0:
-            ceil_ = CLIENTS / ptop["mean_us"]
-            ax.axhline(ceil_, color=PUSH8, lw=1, ls=":", xmin=0, xmax=1)
-            ax.annotate(f"{CLIENTS} clients ÷ {ptop['mean_us']:.1f} µs per push = {ceil_:.1f} Mops",
+        top = max((p["tput_mops"], c, p["mean_us"]) for p, c in zip(push, C1_CORES) if p)
+        if top[2] == top[2] and top[2] > 0:
+            ceil_ = CLIENTS / top[2]
+            ax.axhline(ceil_, color=PUSH8, lw=1, ls=":")
+            ax.annotate(f"{CLIENTS} clients ÷ {top[2]:.1f} µs per push = {ceil_:.1f} Mops",
                         (16.3, ceil_), xytext=(0, 3), textcoords="offset points",
                         ha="right", fontsize=7, color=PUSH8)
-        ax.legend(fontsize=7.2, frameon=False, loc="upper left")
-        msg = (f"measured: {pc:.2f} Mops per core up to 2 cores -> would match pull at "
-               f"{pull['tput_mops'] / pc:.1f} cores")
-        if top[0] < 0.85 * pc * top[1]:
-            msg += f"\nbut levels off: {top[0]:.2f} Mops at {top[1]} cores ({top[0] / pull['tput_mops']:.0%} of pull)"
-        fig._c1_caption = msg.replace("\n", "; ")
-        note("1", "C1", "push per core, vs PDF push-only (Mops)", model_push(L_WALK, 1)[1], pc)
-        note("1", "C1", "cores for push to match pull, vs PDF", par_model, pull["tput_mops"] / pc)
-        note("1", "C1", "push at 8 cores, vs PDF push-only (Mops)", model_push(L_WALK, 8)[1], top[0])
-    note("1", "C1", "warm pull (Mops)", xp, pull["tput_mops"])
-    if mem:
-        ax2 = axes[1]
-        cpu = [pick(mem, blk, mt=c) for c in cores]
-        line(ax2, cores, [c["mn_peak_per_thread_pct"] if c else None for c in cpu], PUSH2,
+        ref = pull["tput_mops"] if pull else None
+        cap.append(f"{name.upper()}: push {pc:.2f} Mops per core up to 2 cores" +
+                   (f" -> would match pull at {ref / pc:.1f} cores" if ref else "") +
+                   (f"; at {top[1]} cores {top[0]:.2f} Mops ({top[0] / ref:.0%} of pull)" if ref else ""))
+        note("1", f"C1 {name}", "push per core, vs PDF push-only (Mops)", model_push(walk, 1)[1], pc)
+        if ref:
+            note("1", f"C1 {name}", "cores for push to match pull", xp / model_push(walk, 1)[1], ref / pc)
+        note("1", f"C1 {name}", "push at 8 cores (Mops)", model_push(walk, 8)[1], top[0])
+    if pull:
+        note("1", f"C1 {name}", "warm pull (Mops)", xp, pull["tput_mops"])
+    par = xp / model_push(walk, 1)[1]
+    if xp > I_NIC / 2:
+        ax.text(16.3, ymax * 0.55, "model: push never reaches pull\n(NIC message cap 40 Mops)",
+                ha="right", fontsize=7, color=MUTED)
+    elif par <= 16:
+        ax.axvline(par, color=MODEL, lw=0.8, ls="--", alpha=0.5)
+        ax.annotate(f"model parity\n{par:.1f} cores", (par, ymax * 0.6), xytext=(4, 0),
+                    textcoords="offset points", fontsize=7, color=MUTED)
+    ax.set_ylim(0, ymax); ax.set_xlim(0, 16.5); ax.set_xticks(C1_MC)
+    style(ax, f"Challenge 1 · {title}", "memory-node cores", "Mops (40 clients)")
+    ax.legend(fontsize=6.8, frameon=False, loc="upper left")
+    return cap
+
+
+def fig_c1(rows, mem):
+    def has(s):
+        pull, push, nohot = c1_data(rows, s)
+        return any(r for r in [pull, nohot] + push)
+    specs = [s for s in C1_SYSTEMS if has(s)]
+    if not specs:
+        return None
+    # one shared scale: everything measured, the model's push lines up to 16 cores,
+    # and model pull where it fits (CHIME's 51 Mops model pull is annotated instead)
+    vals = [model_push(s[4], 16)[1] for s in specs] + [model_pull(1, PAGE)[1]]
+    for s in specs:
+        pull, push, nohot = c1_data(rows, s)
+        vals += [r["tput_mops"] for r in [pull, nohot] + push if r]
+    ymax = nice_max(max(vals) * 1.05)
+    dex_mem = mem and "dex" in [s[0] for s in specs]
+    n = len(specs) + (1 if dex_mem else 0)
+    fig, axes = plt.subplots(1, n, figsize=(6.2 * n, 4.4))
+    axes = [axes] if n == 1 else list(axes)
+    caption = []
+    for ax, s in zip(axes, specs):
+        caption += c1_panel(ax, rows, s, ymax)
+    if dex_mem:
+        ax2 = axes[-1]
+        spec = next(s for s in specs if s[0] == "dex")
+        _, push, _ = c1_data(rows, spec)
+        cpu = [pick(mem, spec[3], mt=c) for c in C1_CORES]
+        line(ax2, C1_CORES, [c["mn_peak_per_thread_pct"] if c else None for c in cpu], PUSH2,
              "counted by DEX (request handling only)")
+        per_core = [p["tput_mops"] / c for p, c in zip(push, C1_CORES) if p and c <= 2]
         if per_core:
-            s = 1 / pc   # us of memory CPU per request, from the saturated 1-2 core points
-            line(ax2, cores, [min(100, p["tput_mops"] * s / c * 100) if p else None
-                              for p, c in zip(push, cores)], PUSH8,
-                 f"real: throughput × {s:.2f} µs ÷ cores (incl. receiving)", marker="s")
-        ax2.set_ylim(0, 110); ax2.set_xlim(0, 8.4); ax2.set_xticks([0] + cores)
-        style(ax2, "memory-node CPU per thread while pushing", "memory-node cores", "busy % per thread")
+            sreq = 1 / (sum(per_core) / len(per_core))
+            line(ax2, C1_CORES, [min(100, p["tput_mops"] * sreq / c * 100) if p else None
+                                 for p, c in zip(push, C1_CORES)], PUSH8,
+                 f"real: throughput × {sreq:.2f} µs ÷ cores (incl. receiving)", marker="s")
+        ax2.set_ylim(0, 110); ax2.set_xlim(0, 8.4); ax2.set_xticks([0] + C1_CORES)
+        style(ax2, "DEX memory-node CPU per thread while pushing", "memory-node cores", "busy % per thread")
         ax2.legend(fontsize=7.5, frameon=False, loc="lower left")
     fig.tight_layout()
-    if getattr(fig, "_c1_caption", None):
-        fig.subplots_adjust(bottom=0.2)
-        fig.text(0.01, 0.015, fig._c1_caption, fontsize=8, color=MUTED, ha="left", va="bottom")
+    if caption:
+        fig.subplots_adjust(bottom=0.12 + 0.05 * len(caption))
+        fig.text(0.01, 0.015, "\n".join(caption), fontsize=8, color=MUTED, ha="left", va="bottom")
     return fig
 
 
@@ -338,8 +379,16 @@ def fig_c4(rows):
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
-    rows = load(sys.argv[1])
-    mem = load(sys.argv[2]) if len(sys.argv) > 2 else None
+    # any number of CSVs: result rows (DEX and/or CHIME, same columns) and the
+    # memory-node CPU CSV (recognised by its mn_peak_* columns)
+    rows, mem = [], None
+    for path in sys.argv[1:]:
+        with open(path) as f:
+            head = f.readline()
+        if "mn_peak" in head:
+            mem = (mem or []) + load(path)
+        else:
+            rows += load(path)
     out = os.path.dirname(os.path.abspath(sys.argv[1]))
     figs = [("fig_c1", fig_c1(rows, mem)), ("fig_c2", fig_c2(rows)),
             ("fig_c3", fig_c3(rows)), ("fig_c4", fig_c4(rows))]
@@ -361,7 +410,14 @@ def main():
             if f is None:
                 print(f"{name}: no data yet")
                 continue
-            f.savefig(free(os.path.join(out, name + ".png")), dpi=150)
+            target = os.path.join(out, name + ".png")
+            for i in range(1, 50):
+                try:
+                    f.savefig(target, dpi=150)
+                    break
+                except OSError:   # open in an image viewer -> next free name
+                    target = os.path.join(out, f"{name}_v{i + 1}.png")
+                    print(f"{name}.png is open in another program; writing {os.path.basename(target)}")
             pdf.savefig(f)
             plt.close(f)
     print(f"\n{'challenge':<10}{'quantity':<46}{'model':>10}{'measured':>10}{'meas/model':>12}")
