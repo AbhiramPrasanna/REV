@@ -35,6 +35,7 @@ if [ "$have" != "$want" ]; then
 fi
 pin_report
 echo "DEX setup ($TREE_SETUP): inner page ${DEX_INNER_PAGE} B, leaf page ${DEX_LEAF_PAGE} B, placement ${DEX_PLACEMENT}"
+echo "DEX-R (reads pushed from the deepest cached node): ${DEX_PUSH_READS_DEEPEST:-0} (DEX_PUSH_READS_DEEPEST; 0 = stock DEX)"
 
 # newbench reads ../memcached.conf relative to its working directory.
 cd "$DEX_BUILD"
@@ -82,7 +83,9 @@ i=0
 for mt in $MEMTHREADS; do
   if [ "$mt" -eq 0 ]; then rpc=0; dir=1; off=off; else rpc=1; dir=$mt; off=on; fi
   for wl in $WORKLOADS; do
-    if [ "$(wl_op "$wl")" = point ]; then r=100; rg=0; else r=0; rg=100; fi
+    # UPDATE_PCT (default 0): point workloads become (100-U)% lookups + U% updates
+    upd=0
+    if [ "$(wl_op "$wl")" = point ]; then upd=${UPDATE_PCT:-0}; r=$((100 - upd)); rg=0; else r=0; rg=100; fi
     if [ "$(wl_dist "$wl")" = uniform ]; then uni=1; else uni=0; fi
     for cache in $CACHES; do
       i=$((i+1))
@@ -91,12 +94,12 @@ for mt in $MEMTHREADS; do
       echo ">>> [$(date +%H:%M:%S)] ($i/$cells) $tag"
       #  args: nodes r ins upd del range threads memthreads cache uniform theta
       #        bulkM warmupM opM check time_based early_stop index rpc admit tune kmax
-      args=(2 "$r" 0 0 0 "$rg" "$THREADS" "$dir" "$cache" "$uni" "$ZIPF_THETA"
+      args=(2 "$r" 0 "$upd" 0 "$rg" "$THREADS" "$dir" "$cache" "$uni" "$ZIPF_THETA"
             "$KEYS_M" "$WARMUP_M" "$OPS_M" 0 0 1 0 "$rpc" 0.1 0 "$THREADS")
 
       if [ "$role" = compute ]; then
         restart_memcached || { echo "memcached restart failed" >&2; exit 1; }
-        sudo env REV_DIR_CPUS="$REV_DIR_CPUS" stdbuf -oL "$BIN" "${args[@]}" 2>&1 | tee "$log" | quiet_filter
+        sudo env REV_DIR_CPUS="$REV_DIR_CPUS" DEX_PUSH_READS_DEEPEST="${DEX_PUSH_READS_DEEPEST:-0}" stdbuf -oL "$BIN" "${args[@]}" 2>&1 | tee "$log" | quiet_filter
         thr=$(awk '/Final throughput =/{v=$NF} END{print (v!=""?v:"NA")}' "$log")
         p99=$(awk '/^[[:space:]]*ALL[[:space:]]/{ if(match($0,/p99=[ ]*[0-9.]+/)){s=substr($0,RSTART,RLENGTH);gsub(/p99=[ ]*/,"",s);v=s} } END{print (v!=""?v:"NA")}' "$log")
         rr=$(awk '/Avg. rdma read \/ op =/{v=$NF} END{print (v!=""?v:"NA")}' "$log")
@@ -135,7 +138,7 @@ for mt in $MEMTHREADS; do
         sleep 3
       else
         wait_for_compute || exit 1
-        sudo env REV_DIR_CPUS="$REV_DIR_CPUS" stdbuf -oL "$BIN" "${args[@]}" 2>&1 | tee "$log" | quiet_filter
+        sudo env REV_DIR_CPUS="$REV_DIR_CPUS" DEX_PUSH_READS_DEEPEST="${DEX_PUSH_READS_DEEPEST:-0}" stdbuf -oL "$BIN" "${args[@]}" 2>&1 | tee "$log" | quiet_filter
         pk=$(sed -nE 's/.*AGGREGATE active = ([0-9.]+)%.*/\1/p' "$log" | sort -g | tail -1)
         pt=$(sed -nE 's/.*AGGREGATE active = [0-9.]+% \(of [0-9]+ dir-threads; ([0-9.]+)% per-thread.*/\1/p' "$log" | sort -g | tail -1)
         echo "dex,$wl,$cache,$mt,${pk:-NA},${pt:-NA},$log" >> "$csv_m"
