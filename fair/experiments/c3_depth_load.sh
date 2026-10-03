@@ -25,7 +25,7 @@
 # ===========================================================================
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-: "${SYSTEMS_C:=dexr dex chime}"
+: "${SYSTEMS_C:=dexr chime}"            # add "dex" for stock DEX
 : "${TREES:=stress fair}"
 : "${C2_DEX_STRESS:=8 32 128 512 1024 2600}"
 : "${C2_DEX_FAIR:=8 32 64 128 256 640}"

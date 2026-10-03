@@ -127,6 +127,12 @@ inline Key to_partition_key(uint64_t k) {
 std::atomic<int64_t> warmup_cnt{0};
 std::atomic<uint64_t> worker{0};
 std::atomic<uint64_t> execute_op{0};
+// Correctness signal (measured phase only), like CHIME's [CORRECTNESS] line: on
+// a read-only tree, pull and push must find the same share of keys and return
+// the same rows per scan; a difference means a push path returned wrong results.
+std::atomic<uint64_t> g_ok_ops{0};
+std::atomic<uint64_t> g_scans{0};
+std::atomic<uint64_t> g_scan_rows{0};
 std::atomic_bool ready{false};
 std::atomic_bool one_finish{false};
 std::atomic_bool ready_to_report{false};
@@ -252,6 +258,7 @@ void thread_run(int id) {
   // Start the real execution of the workload
   counter = 0;
   success_counter = 0;
+  uint64_t scans = 0, scan_rows = 0;
 #ifdef BENCH_LATENCY
   bench::ThreadStats &my_stats = bench::g_stats[id];
 #ifdef COUNT_RDMA
@@ -328,6 +335,8 @@ void thread_run(int id) {
       auto flag = tree->range_scan(key, scan_num, result);
       if (flag)
         ++success_counter;
+      ++scans;
+      scan_rows += static_cast<uint64_t>(flag);
 #ifdef BENCH_LATENCY
       lat_op = bench::OP_RANGE;
 #endif
@@ -396,6 +405,9 @@ void thread_run(int id) {
   // std::cout << "Success ratio = "
   //           << success_counter / static_cast<double>(counter) << std::endl;
   execute_op.fetch_add(counter);
+  g_ok_ops.fetch_add(success_counter);
+  g_scans.fetch_add(scans);
+  g_scan_rows.fetch_add(scan_rows);
   // if (cachepush::total_sample_times != 0) {
   //   std::cout << "Node search time(ns) = "
   //             << cachepush::total_nanoseconds / cachepush::total_sample_times
@@ -1267,6 +1279,12 @@ int main(int argc, char *argv[]) {
                   << straggler_cluster_tp / std::pow(10, 6) << std::endl;
         std::cout << "Final throughput = "
                   << straggler_cluster_tp / std::pow(10, 6) << std::endl;
+        uint64_t done = execute_op.load(), ok = g_ok_ops.load();
+        uint64_t sc = g_scans.load(), rows = g_scan_rows.load();
+        printf("[CORRECTNESS node %d] ops ok %lu / %lu = %.4f%%; scans %lu, rows "
+               "%lu (%.2f per scan)\n",
+               static_cast<int>(node_id), ok, done, done ? 100.0 * ok / done : 0.0, sc, rows,
+               sc ? static_cast<double>(rows) / sc : 0.0);
       }
       std::cout << "------------------------------------------" << std::endl;
     }
