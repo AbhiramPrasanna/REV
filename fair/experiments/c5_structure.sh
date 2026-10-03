@@ -19,7 +19,7 @@
 # ===========================================================================
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-: "${SYSTEMS_C:=dex dexr chime dart}"
+: "${SYSTEMS_C:=dexr chime dart}"       # add "dex" for stock DEX
 : "${TREES:=stress fair}"
 : "${C5_CACHE:=1024}"
 : "${C5_WORKLOADS:=point-uniform range-uniform}"

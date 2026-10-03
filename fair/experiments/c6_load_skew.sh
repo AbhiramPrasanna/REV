@@ -21,7 +21,7 @@
 # ===========================================================================
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-: "${SYSTEMS_C:=dexr dex chime}"
+: "${SYSTEMS_C:=dexr chime}"            # add "dex" for stock DEX
 : "${TREES:=stress}"
 : "${C6_CLIENTS:=1 2 4 8 16 24 36}"
 : "${C6_THETAS:=0.5 0.8 0.99 1.2}"
