@@ -26,11 +26,20 @@ set -uo pipefail
 role="${1:?usage: run_chime.sh <memory|compute>}"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/params.sh"
 
-[ -x "$CHIME_BUILD/micro_test" ] || { echo "build first: RUN_ID=$RUN_ID ./fair/build.sh chime" >&2; exit 1; }
+[ -x "$CHIME_BUILD/micro_test" ] || { echo "build first: RUN_ID=$RUN_ID TREE_SETUP=$TREE_SETUP ./fair/build.sh chime" >&2; exit 1; }
+want="inner_span=$CHIME_INTERNAL_SPAN leaf_span=$CHIME_LEAF_SPAN value=$VALUE_B"
+have="$(cat "$CHIME_BUILD/build_stamp.txt" 2>/dev/null || echo none)"
+# builds made before the stamp existed are the 16/16 ones in build_fair
+[ "$have" = none ] && [ "$CHIME_INTERNAL_SPAN:$CHIME_LEAF_SPAN" = 16:16 ] && have="$want"
+if [ "$have" != "$want" ]; then
+  echo "CHIME binary in $CHIME_BUILD was built for [$have], this run wants [$want]." >&2
+  echo "Rebuild on BOTH servers: RUN_ID=$RUN_ID TREE_SETUP=$TREE_SETUP ./fair/build.sh chime" >&2
+  exit 1
+fi
 
 max_mt=0; for m in $MEMTHREADS; do [ "$m" -gt "$max_mt" ] && max_mt=$m; done
-# CHIME pins app thread i to core 2i+1 and dir threads to the top cores.
-if [ "$role" = compute ]; then preflight_cores $((2 * THREADS + 2)); else preflight_cores $((2 * THREADS + 2 + 2 * max_mt)); fi
+# Clients on CPUs 0..THREADS-1 (REV_CLIENT_PIN=linear), dir threads on REV_DIR_CPUS.
+if [ "$role" = compute ]; then preflight_cores $((THREADS + 2)); else preflight_cores $((THREADS + 2 + max_mt)); fi
 
 export MEM_IP CMP_IP MEMC_PORT THREADS
 export BUILD_DIR="$CHIME_BUILD"
@@ -45,9 +54,9 @@ export CHIME_SCAN_OFFLOAD_ALWAYS="${CHIME_SCAN_OFFLOAD_ALWAYS:-1}"
 export CHIME_SORTED_LOAD CHIME_BULK_BUILD CHIME_BUILD_LEAF_KEYS CHIME_BUILD_INNER_FANOUT
 mkdir -p "$LOG_DIR"
 if [ "$CHIME_BULK_BUILD" = 1 ]; then
-  echo "CHIME setup ($TREE_SETUP): 16-entry nodes, tree bulk-built with $CHIME_BUILD_LEAF_KEYS keys per leaf and $CHIME_BUILD_INNER_FANOUT children per inner node"
+  echo "CHIME setup ($TREE_SETUP): ${CHIME_INTERNAL_SPAN}/${CHIME_LEAF_SPAN}-entry inner/leaf nodes, tree bulk-built with $CHIME_BUILD_LEAF_KEYS keys per leaf and $CHIME_BUILD_INNER_FANOUT children per inner node"
 else
-  echo "CHIME setup ($TREE_SETUP): 16-entry nodes, keys inserted $( [ "$CHIME_SORTED_LOAD" = 1 ] && echo sorted || echo shuffled ) (stock load)"
+  echo "CHIME setup ($TREE_SETUP): ${CHIME_INTERNAL_SPAN}/${CHIME_LEAF_SPAN}-entry inner/leaf nodes, keys inserted $( [ "$CHIME_SORTED_LOAD" = 1 ] && echo sorted || echo shuffled ) (stock load)"
 fi
 echo "  each cell prints '>> tree:' (levels, inner and leaf nodes and MB) and '>> result:'"
 pin_report

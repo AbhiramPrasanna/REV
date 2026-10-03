@@ -9,7 +9,9 @@
 #
 # DEX   -> dex/build_<inner>_<leaf>_<placement>/newbench (one dir per geometry,
 #          from TREE_SETUP in params.sh; dex/build is untouched)
-# CHIME -> CHIME/build_fair/micro_test (separate dir; CHIME/build is untouched)
+# CHIME -> CHIME/build_fair/micro_test for 16-entry nodes (stress, fair),
+#          CHIME/build_span64_64/micro_test for stock nodes (model); CHIME/build
+#          is untouched
 # DART  -> DART/bin/{monitor,compute,memory} built by DART's own build.sh,
 #          exactly as shipped (no flags, no source changes).
 # ===========================================================================
@@ -40,13 +42,16 @@ build_dex() {
 }
 
 build_chime() {
-  echo "== CHIME: inner span=${CHIME_INTERNAL_SPAN}, leaf span=16, value=${VALUE_B}B, offload + leaf cache compiled in"
+  echo "== CHIME ($TREE_SETUP): inner span=${CHIME_INTERNAL_SPAN}, leaf span=${CHIME_LEAF_SPAN}, value=${VALUE_B}B, offload + leaf cache compiled in"
   echo "   (CHIME's NIC macros live in include/Rdma.h; if this server was never set up,"
   echo "    run CHIME/run/configure_nic.sh on it first)"
   rm -rf "$CHIME_BUILD" && mkdir -p "$CHIME_BUILD" && cd "$CHIME_BUILD"
   cmake -DENABLE_OFFLOAD=ON -DCACHE_LEAF_NODE=ON \
-        -DCHIME_VALUE_LEN="$VALUE_B" -DCHIME_INTERNAL_SPAN="$CHIME_INTERNAL_SPAN" ..
+        -DCHIME_VALUE_LEN="$VALUE_B" -DCHIME_INTERNAL_SPAN="$CHIME_INTERNAL_SPAN" \
+        -DCHIME_LEAF_SPAN="$CHIME_LEAF_SPAN" ..
   make -j"$(nproc)" micro_test
+  # Record what this binary was built for; run_chime.sh refuses a mismatch.
+  printf 'inner_span=%s leaf_span=%s value=%s\n' "$CHIME_INTERNAL_SPAN" "$CHIME_LEAF_SPAN" "$VALUE_B" > build_stamp.txt
   echo "   ok: $CHIME_BUILD/micro_test"
 }
 
