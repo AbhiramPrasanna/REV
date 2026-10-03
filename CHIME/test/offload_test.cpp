@@ -53,10 +53,10 @@ extern volatile bool need_stop;
 extern volatile bool need_clear[MAX_APP_THREAD];
 
 #ifdef ENABLE_OFFLOAD
-extern uint64_t offload_lookup_cnt[MAX_APP_THREAD];
-extern uint64_t offload_scan_cnt[MAX_APP_THREAD];
-extern uint64_t offload_scan_kv[MAX_APP_THREAD];
-extern uint64_t offload_scan_leaf[MAX_APP_THREAD];
+extern PerThread<uint64_t> offload_lookup_cnt;
+extern PerThread<uint64_t> offload_scan_cnt;
+extern PerThread<uint64_t> offload_scan_kv;
+extern PerThread<uint64_t> offload_scan_leaf;
 #endif
 
 // bench_stats histogram storage (defined exactly once here).

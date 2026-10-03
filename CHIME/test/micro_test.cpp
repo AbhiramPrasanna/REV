@@ -70,31 +70,31 @@ int LOADER_NUM = 8;
 
 extern volatile bool need_stop;
 extern volatile bool need_clear[MAX_APP_THREAD];
-extern uint64_t split_node[MAX_APP_THREAD];       // leaf + internal splits (Tree.cpp)
-extern uint64_t split_hopscotch[MAX_APP_THREAD];  // leaf splits only
+extern PerThread<uint64_t> split_node;       // leaf + internal splits (Tree.cpp)
+extern PerThread<uint64_t> split_hopscotch;  // leaf splits only
 extern int g_index_cache_mb;   // runtime index-cache size (MB); see Tree.cpp
 // Read-path counters kept by Tree.cpp (cleared per thread at the start of the
 // measured phase through need_clear[]); printed as the [READPATH] line.
-extern uint64_t try_read_op[MAX_APP_THREAD];
-extern uint64_t try_read_leaf[MAX_APP_THREAD];
-extern uint64_t try_read_hopscotch[MAX_APP_THREAD];
-extern uint64_t read_two_segments[MAX_APP_THREAD];
-extern uint64_t try_speculative_read[MAX_APP_THREAD];
-extern uint64_t correct_speculative_read[MAX_APP_THREAD];
-extern uint64_t read_leaf_retry[MAX_APP_THREAD];
-extern uint64_t leaf_cache_invalid[MAX_APP_THREAD];
-extern uint64_t leaf_read_sibling[MAX_APP_THREAD];
-extern double cache_hit[MAX_APP_THREAD];
-extern double cache_miss[MAX_APP_THREAD];
+extern PerThread<uint64_t> try_read_op;
+extern PerThread<uint64_t> try_read_leaf;
+extern PerThread<uint64_t> try_read_hopscotch;
+extern PerThread<uint64_t> read_two_segments;
+extern PerThread<uint64_t> try_speculative_read;
+extern PerThread<uint64_t> correct_speculative_read;
+extern PerThread<uint64_t> read_leaf_retry;
+extern PerThread<uint64_t> leaf_cache_invalid;
+extern PerThread<uint64_t> leaf_read_sibling;
+extern PerThread<double> cache_hit;
+extern PerThread<double> cache_miss;
 #ifdef CACHE_LEAF_NODE
 extern int g_leaf_cache_mb;    // runtime leaf-cache size (MB); see LeafCache.h
 #endif
 
 #ifdef ENABLE_OFFLOAD
-extern uint64_t offload_lookup_cnt[MAX_APP_THREAD];
-extern uint64_t offload_scan_cnt[MAX_APP_THREAD];
-extern uint64_t offload_scan_kv[MAX_APP_THREAD];
-extern uint64_t offload_scan_leaf[MAX_APP_THREAD];
+extern PerThread<uint64_t> offload_lookup_cnt;
+extern PerThread<uint64_t> offload_scan_cnt;
+extern PerThread<uint64_t> offload_scan_kv;
+extern PerThread<uint64_t> offload_scan_leaf;
 #endif
 
 namespace bench { ThreadStats g_stats[MAX_APP_THREAD]; }
@@ -134,7 +134,7 @@ uint64_t *warmup_array = nullptr;   // node-local warmup items (op<<56 | key)
 uint64_t *workload_array = nullptr; // node-local measured items
 
 std::thread th[MAX_APP_THREAD];
-uint64_t tp[MAX_APP_THREAD][MAX_CORO_NUM];
+alignas(64) uint64_t tp[MAX_APP_THREAD][MAX_CORO_NUM];   // 64 B per thread, line-aligned
 
 std::default_random_engine e;
 std::uniform_int_distribution<Value> randval(define::kValueMin, define::kValueMax);
@@ -223,9 +223,9 @@ void generate_workload() {
 // Correctness signal: lookups found and scan rows returned, per thread. On a
 // static (read-only) tree these MUST match between OFFLOAD off and on -- a
 // mismatch means the offload traversal returned wrong results.
-uint64_t g_lk_found[MAX_APP_THREAD] = {0};
-uint64_t g_lk_total[MAX_APP_THREAD] = {0};
-uint64_t g_scan_rows[MAX_APP_THREAD] = {0};
+PerThread<uint64_t> g_lk_found;
+PerThread<uint64_t> g_lk_total;
+PerThread<uint64_t> g_scan_rows;
 
 // Execute one packed item.
 inline void run_item(uint64_t item, CoroPull *sink) {
@@ -426,9 +426,9 @@ void thread_run(int id) {
     // still untimed cache-fill.) Reset here so [CORRECTNESS]/latency reflect only
     // the measured phase.
     bench::clear_all();
-    std::fill(g_lk_found, g_lk_found + MAX_APP_THREAD, 0);
-    std::fill(g_lk_total, g_lk_total + MAX_APP_THREAD, 0);
-    std::fill(g_scan_rows, g_scan_rows + MAX_APP_THREAD, 0);
+    g_lk_found.clear();
+    g_lk_total.clear();
+    g_scan_rows.clear();
     std::fill(need_clear, need_clear + MAX_APP_THREAD, true);
     ready = true;
     g_meas_start_ns.store(Timer::get_time_ns());
