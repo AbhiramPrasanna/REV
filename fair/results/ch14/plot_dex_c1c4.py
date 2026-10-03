@@ -166,12 +166,23 @@ def fig_c1(rows, mem):
     if per_core:
         pc = sum(per_core) / len(per_core)
         top = max((p["tput_mops"], c) for p, c in zip(push, cores) if p)
+        # what the memory cores could carry at the measured cost per request, and
+        # the ceiling 40 waiting clients put on push at the measured latency
+        ax.plot(mc, [pc * c for c in mc], color=PUSH8, lw=1.3, ls="-.",
+                label=f"memory cores' capacity (cores ÷ {1 / pc:.2f} µs per request)")
+        ptop = next(p for p in push if p and p["tput_mops"] == top[0])
+        if ptop["mean_us"] == ptop["mean_us"] and ptop["mean_us"] > 0:
+            ceil_ = CLIENTS / ptop["mean_us"]
+            ax.axhline(ceil_, color=PUSH8, lw=1, ls=":", xmin=0, xmax=1)
+            ax.annotate(f"{CLIENTS} clients ÷ {ptop['mean_us']:.1f} µs per push = {ceil_:.1f} Mops",
+                        (16.3, ceil_), xytext=(0, 3), textcoords="offset points",
+                        ha="right", fontsize=7, color=PUSH8)
+        ax.legend(fontsize=7.2, frameon=False, loc="upper left")
         msg = (f"measured: {pc:.2f} Mops per core up to 2 cores -> would match pull at "
                f"{pull['tput_mops'] / pc:.1f} cores")
         if top[0] < 0.85 * pc * top[1]:
             msg += f"\nbut levels off: {top[0]:.2f} Mops at {top[1]} cores ({top[0] / pull['tput_mops']:.0%} of pull)"
-        ax.text(16.3, ymax * 0.1, msg, ha="right", va="center", fontsize=7.5, color=MUTED,
-                bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=2))
+        fig._c1_caption = msg.replace("\n", "; ")
         note("1", "C1", "push per core, vs PDF push-only (Mops)", model_push(L_WALK, 1)[1], pc)
         note("1", "C1", "cores for push to match pull, vs PDF", par_model, pull["tput_mops"] / pc)
         note("1", "C1", "push at 8 cores, vs PDF push-only (Mops)", model_push(L_WALK, 8)[1], top[0])
@@ -179,11 +190,20 @@ def fig_c1(rows, mem):
     if mem:
         ax2 = axes[1]
         cpu = [pick(mem, blk, mt=c) for c in cores]
-        line(ax2, cores, [c["mn_peak_active_pct"] if c else None for c in cpu], PUSH2, "memory-node CPU, all threads")
-        ax2.set_ylim(0, 100); ax2.set_xlim(0, 8.4); ax2.set_xticks(xs)
-        style(ax2, "memory-node CPU while pushing", "memory-node cores", "busy %")
-        ax2.legend(fontsize=7.5, frameon=False)
+        line(ax2, cores, [c["mn_peak_per_thread_pct"] if c else None for c in cpu], PUSH2,
+             "counted by DEX (request handling only)")
+        if per_core:
+            s = 1 / pc   # us of memory CPU per request, from the saturated 1-2 core points
+            line(ax2, cores, [min(100, p["tput_mops"] * s / c * 100) if p else None
+                              for p, c in zip(push, cores)], PUSH8,
+                 f"real: throughput × {s:.2f} µs ÷ cores (incl. receiving)", marker="s")
+        ax2.set_ylim(0, 110); ax2.set_xlim(0, 8.4); ax2.set_xticks([0] + cores)
+        style(ax2, "memory-node CPU per thread while pushing", "memory-node cores", "busy % per thread")
+        ax2.legend(fontsize=7.5, frameon=False, loc="lower left")
     fig.tight_layout()
+    if getattr(fig, "_c1_caption", None):
+        fig.subplots_adjust(bottom=0.2)
+        fig.text(0.01, 0.015, fig._c1_caption, fontsize=8, color=MUTED, ha="left", va="bottom")
     return fig
 
 
@@ -324,13 +344,18 @@ def main():
     figs = [("fig_c1", fig_c1(rows, mem)), ("fig_c2", fig_c2(rows)),
             ("fig_c3", fig_c3(rows)), ("fig_c4", fig_c4(rows))]
     def free(path):   # a file held open by a viewer (Windows) -> write next to it
-        try:
-            with open(path, "ab"):
-                return path
-        except OSError:
-            base, ext = os.path.splitext(path)
-            print(f"{os.path.basename(path)} is open in another program; writing {os.path.basename(base)}_new{ext}")
-            return base + "_new" + ext
+        base, ext = os.path.splitext(path)
+        for i in range(0, 50):
+            cand = path if i == 0 else f"{base}_v{i + 1}{ext}"
+            try:
+                with open(cand, "ab"):
+                    pass
+                if i:
+                    print(f"{os.path.basename(path)} is open in another program; writing {os.path.basename(cand)}")
+                return cand
+            except OSError:
+                continue
+        return path
     with PdfPages(free(os.path.join(out, "dex_c1c4.pdf"))) as pdf:
         for name, f in figs:
             if f is None:
