@@ -59,6 +59,13 @@ static inline bool should_offload(int tid) {
 // the benchmark app overrides it (e.g. from CHIME_CACHE_MB) before `new Tree`.
 int g_index_cache_mb = define::kIndexCacheSize;
 
+// CHIME_HOTSPOT (default 1 = stock): 0 turns the hotspot buffer and speculative
+// read off at every cache size (see Tree::Tree).
+static bool hotspot_enabled() {
+  const char *s = getenv("CHIME_HOTSPOT");
+  return !(s && atoi(s) == 0);
+}
+
 #ifdef CACHE_LEAF_NODE
 // Leaf-cache budget (MB), carved OUT of the same total the index cache spends
 // from: g_index_cache_mb + g_leaf_cache_mb == CHIME_CACHE_MB, always. The total
@@ -130,6 +137,14 @@ Tree::Tree(DSM *dsm, uint16_t tree_id, bool init_root) : dsm(dsm), tree_id(tree_
 #ifdef CACHE_LEAF_NODE
   if (leafcache::enabled() && !leafcache::keep_speculative()) hotspot_on = false;
 #endif
+  // CHIME_HOTSPOT=0: no hotspot buffer (and so no speculative read) at ANY cache
+  // size; the whole budget is tree cache. Stock CHIME turns the buffer on by
+  // itself above 50 MB. Measured (model tree, 40 clients, warm, uniform): with
+  // the 30 MB buffer full, a lookup costs 11.4 us; without it 5.2 us, both at
+  // 1.000 round trips -- every lookup churns the full buffer. Default 1 = stock.
+  if (!hotspot_enabled()) hotspot_on = false;
+  printf("[CONFIG] hotspot buffer + speculative read: %s (CHIME_HOTSPOT; stock CHIME: on above %d MB)\n",
+         hotspot_on ? "on" : "off", define::kHotspotBufSize + 20);
   if (hotspot_on) tree_cache = new TreeCache(g_index_cache_mb - define::kHotspotBufSize, dsm);  // enable hotspot idx cache
   else tree_cache = new TreeCache(g_index_cache_mb, dsm);
 #else
@@ -147,6 +162,7 @@ Tree::Tree(DSM *dsm, uint16_t tree_id, bool init_root) : dsm(dsm), tree_id(tree_
 #ifdef CACHE_LEAF_NODE
   spec_on = !leafcache::enabled() || leafcache::keep_speculative();
 #endif
+  if (!hotspot_enabled()) spec_on = false;
   if (spec_on && g_index_cache_mb > define::kHotspotBufSize + 20) idx_cache = new IdxCache(define::kHotspotBufSize, dsm);
   else idx_cache = new IdxCache(0, dsm);
 #endif
