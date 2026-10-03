@@ -51,6 +51,7 @@ export LEAF_SET="$CHIME_LEAF_SET" LEAF_CACHE_PCT="${LEAF_CACHE_PCT:-50}"
 export CHIME_MN_CLIENTS=0
 export CHIME_SCAN_FROM_CACHE="${CHIME_SCAN_FROM_CACHE:-1}"
 export CHIME_SCAN_OFFLOAD_ALWAYS="${CHIME_SCAN_OFFLOAD_ALWAYS:-1}"
+export CHIME_HOTSPOT="${CHIME_HOTSPOT:-1}"   # 0: no hotspot buffer at any cache size (stock: on above 50 MB)
 export CHIME_SORTED_LOAD CHIME_BULK_BUILD CHIME_BUILD_LEAF_KEYS CHIME_BUILD_INNER_FANOUT
 mkdir -p "$LOG_DIR"
 if [ "$CHIME_BULK_BUILD" = 1 ]; then
@@ -58,6 +59,7 @@ if [ "$CHIME_BULK_BUILD" = 1 ]; then
 else
   echo "CHIME setup ($TREE_SETUP): ${CHIME_INTERNAL_SPAN}/${CHIME_LEAF_SPAN}-entry inner/leaf nodes, keys inserted $( [ "$CHIME_SORTED_LOAD" = 1 ] && echo sorted || echo shuffled ) (stock load)"
 fi
+echo "  hotspot buffer + speculative read: $( [ "$CHIME_HOTSPOT" = 0 ] && echo "off (CHIME_HOTSPOT=0)" || echo "stock (on above 50 MB)" )"
 echo "  each cell prints '>> tree:' (levels, inner and leaf nodes and MB) and '>> result:'"
 pin_report
 

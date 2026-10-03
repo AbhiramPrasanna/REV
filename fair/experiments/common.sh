@@ -54,9 +54,12 @@ min_per_cell() {   # system tree
 # model = each system's original node format (TREE_SETUP=model in params.sh).
 # Estimates for 50M keys until the first cells print the tree:
 #   DEX 1 KB pages: inner ~60 MB (bottom inner level ~97% of it), whole ~1.8 GB
-#   CHIME 64-entry nodes: inner ~25-30 MB. 100 MB = CHIME's shipped cache
-#   (70 MB tree cache + 30 MB hotspot buffer; CHIME adds the hotspot buffer only
-#   above 50 MB, so a total of 64 MB is a 34 MB tree cache + 30 MB buffer).
+#   CHIME 64-entry nodes: inner 35 MB, of which the tree cache holds 23 MB
+#   (measured, m_check). Stock CHIME (kept as designed) carves a 30 MB hotspot
+#   buffer out of any cache above 50 MB: 100 MB = 70 MB tree cache + 30 MB
+#   buffer, 64 MB = 34 + 30. Measured with uniform keys, 40 clients, warm: the
+#   full buffer makes a lookup 11.4 us vs 5.2 us without it (CHIME_HOTSPOT=0,
+#   not used by these scripts).
 : "${DEX_MODEL_INNER:=128}"    ; : "${DEX_MODEL_M1:=4}"       # M1: only levels above the bottom one fit
 : "${CHIME_MODEL_INNER:=100}"  ; : "${CHIME_MODEL_M1:=2}"
 : "${DEX_MODEL_WHOLE:=2600}"
@@ -85,7 +88,7 @@ add_block() {
 
 # One-client ("idle") cells, the closest a closed loop gets to the model's idle
 # latency. One client is slow, so fewer ops; warmup still has to fill the cache.
-IDLE_ENV=("THREADS=1" "OPS_M=1" "WARMUP_M=10")
+IDLE_ENV=("THREADS=1" "OPS_M=1" "WARMUP_M=2")   # 2M lookups fill the inner nodes (m_t1, m_t1dex)
 
 PLAN=()        # "run_id|system|tree|cells|VAR=value;VAR=value;..."
 plan_block() { # run_id system tree cells [VAR=value ...]  (values may contain spaces)
