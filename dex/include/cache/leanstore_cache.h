@@ -756,6 +756,54 @@ public:
                                                scan_num, max_key);
   }
 
+  // DEX-R: scan pushdown from an INNER node (the deepest cached node on the
+  // path), used only when DEX_PUSH_READS_DEEPEST is on. The memory node walks
+  // down from global_node to the covering leaf, then along the leaf chain
+  // (cachepush::range_scan already starts from any node). Same rules as the
+  // leaf-level scan push above: only once the cache is full (state == 1) and
+  // only when the rpc_rate_ coin says push.
+  //
+  // Return contract (caller holds the IO flag on global_node):
+  //   1  scan served (scan_num, max_key set; kv_buffer filled), IO flag dropped
+  //  -1  stale entry, IO flag dropped -> caller retries from the root
+  //   0  not pushed (coin said no, or the memory node could not serve it); the
+  //      IO flag is still held -> caller pulls the node as DEX normally does
+  int push_scan_from_inner(GlobalAddress global_node, Key k,
+                           std::pair<Key, Value> *&kv_buffer, int &scan_num,
+                           Key &max_key) {
+#ifdef MANUAL_PUSHDOWN
+    if (state == 1 && manual_push_sample()) {
+      GlobalAddress slot;
+      uint64_t mk = 0;
+      int leaves = 0;
+      int cnt = global_dsm_->rpc_scan(global_node, k, scan_num, slot, mk,
+                                      leaves);
+      if (cnt < 0) {
+        bool ok = page_table_->remove_with_lock(
+            global_node, reinterpret_cast<void *>(IO_FLAG));
+        assert(ok == true);
+        return -1;
+      }
+      if (cnt == 0 && leaves == 0)
+        return 0;
+      if (cnt > 0) {
+        char *buf =
+            raw_remote_read(slot, static_cast<size_t>(cnt) *
+                                      sizeof(std::pair<Key, Value>));
+        memcpy(kv_buffer, buf,
+               static_cast<size_t>(cnt) * sizeof(std::pair<Key, Value>));
+      }
+      scan_num = cnt;
+      max_key = mk;
+      bool ok = page_table_->remove_with_lock(
+          global_node, reinterpret_cast<void *>(IO_FLAG));
+      assert(ok == true);
+      return 1;
+    }
+#endif
+    return 0;
+  }
+
   // Point-lookup pushdown at the leaf's parent (the dominant lookup miss).
   //
   // Control mirrors the scan path: ONLY under -DMANUAL_PUSHDOWN and only when

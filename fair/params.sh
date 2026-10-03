@@ -173,7 +173,15 @@ cleanup_node() {
 # ---------------------------------------------------------------------------
 dir_cpu_list() {   # -> comma list of CPUs free of client cores (needs lscpu)
   command -v lscpu >/dev/null || return 0
-  lscpu -p=CPU,CORE,SOCKET | grep -v '^#' | awk -F, -v T="$THREADS" '
+  # The memory node runs no client threads (DEX: THREADS == kMaxThread puts all
+  # clients on the compute node; CHIME: CHIME_MN_CLIENTS=0), so reserving the
+  # client cores there left directory threads only 4 physical cores and put
+  # threads 5-8 on hyperthread siblings (stress1). On the memory node reserve
+  # nothing: 8 threads get 8 physical cores, and threads 1-4 keep the same CPUs
+  # as before (highest first: 79, 78, 77, 76, ...).
+  local T="$THREADS"
+  [ "${role:-}" = memory ] && T=0
+  lscpu -p=CPU,CORE,SOCKET | grep -v '^#' | awk -F, -v T="$T" '
     { cpu[NR]=$1; key[$1]=$3 ":" $2; n=NR }
     END {
       for (c = 0; c < T; c++) used[key[c]] = 1
@@ -193,7 +201,7 @@ pin_report() {   # print the plan and warn if two clients share a physical core
   [ "$shared" -gt 0 ] && echo "WARNING: $shared client CPUs share a physical core with another client" >&2
   return 0
 }
-REV_DIR_CPUS="$(dir_cpu_list)"
+: "${REV_DIR_CPUS:=$(dir_cpu_list)}"   # set REV_DIR_CPUS by hand to override
 REV_CLIENT_PIN=linear
 export REV_DIR_CPUS REV_CLIENT_PIN
 
