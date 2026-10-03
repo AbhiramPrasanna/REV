@@ -24,7 +24,7 @@
 # ===========================================================================
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-: "${SYSTEMS_C:=dex dexr chime dart}"
+: "${SYSTEMS_C:=dexr chime dart}"       # add "dex" for stock DEX
 : "${TREES:=fair}"
 : "${C4_LENGTHS:=1 10 100 1000}"
 : "${C4_UPDATES:=0 25 50 75 100}"
