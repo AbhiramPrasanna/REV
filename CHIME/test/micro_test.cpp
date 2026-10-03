@@ -73,6 +73,19 @@ extern volatile bool need_clear[MAX_APP_THREAD];
 extern uint64_t split_node[MAX_APP_THREAD];       // leaf + internal splits (Tree.cpp)
 extern uint64_t split_hopscotch[MAX_APP_THREAD];  // leaf splits only
 extern int g_index_cache_mb;   // runtime index-cache size (MB); see Tree.cpp
+// Read-path counters kept by Tree.cpp (cleared per thread at the start of the
+// measured phase through need_clear[]); printed as the [READPATH] line.
+extern uint64_t try_read_op[MAX_APP_THREAD];
+extern uint64_t try_read_leaf[MAX_APP_THREAD];
+extern uint64_t try_read_hopscotch[MAX_APP_THREAD];
+extern uint64_t read_two_segments[MAX_APP_THREAD];
+extern uint64_t try_speculative_read[MAX_APP_THREAD];
+extern uint64_t correct_speculative_read[MAX_APP_THREAD];
+extern uint64_t read_leaf_retry[MAX_APP_THREAD];
+extern uint64_t leaf_cache_invalid[MAX_APP_THREAD];
+extern uint64_t leaf_read_sibling[MAX_APP_THREAD];
+extern double cache_hit[MAX_APP_THREAD];
+extern double cache_miss[MAX_APP_THREAD];
 #ifdef CACHE_LEAF_NODE
 extern int g_leaf_cache_mb;    // runtime leaf-cache size (MB); see LeafCache.h
 #endif
@@ -822,6 +835,29 @@ int main(int argc, char *argv[]) {
                  dsm->getMyNodeID(), (unsigned long)lf, (unsigned long)lt, 100.0 * lf / lt);
   if (sr) printf("[CORRECTNESS node %d] scan rows returned = %lu\n",
                  dsm->getMyNodeID(), (unsigned long)sr);
+
+  // Read path of the measured lookups: where a pulled lookup's round trips go.
+  // Each speculative read, hop-segment read, retry and sibling read is one
+  // dependent RDMA round trip (a two-segment hop read is one batched trip).
+  {
+    uint64_t ops = 0, leaf = 0, hop = 0, two = 0, spec = 0, spec_ok = 0, retry = 0, inval = 0, sib = 0;
+    double hit = 0, miss = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++i) {
+      ops += try_read_op[i]; leaf += try_read_leaf[i]; hop += try_read_hopscotch[i];
+      two += read_two_segments[i]; spec += try_speculative_read[i]; spec_ok += correct_speculative_read[i];
+      retry += read_leaf_retry[i]; inval += leaf_cache_invalid[i]; sib += leaf_read_sibling[i];
+      hit += cache_hit[i]; miss += cache_miss[i];
+    }
+    if (ops) {
+      auto per = [&](uint64_t x) { return (double)x / ops; };
+      printf("[READPATH node %d] lookups=%lu  index-cache hit=%.1f%%  per lookup: leaf=%.3f "
+             "speculative=%.3f (right %.1f%%) hop-reads=%.3f (two-segment %.3f) retries=%.3f "
+             "invalid=%.3f sibling=%.3f  => est. leaf round trips/lookup=%.3f\n",
+             dsm->getMyNodeID(), (unsigned long)ops, (hit + miss) > 0 ? 100.0 * hit / (hit + miss) : 0.0,
+             per(leaf), per(spec), spec ? 100.0 * spec_ok / spec : 0.0, per(hop), per(two),
+             per(retry), per(inval), per(sib), per(spec + hop + retry + sib));
+    }
+  }
 
   // Leaf-cache counters for the MEASURED phase only (the tree->statistics() call
   // above ran right after warmup, so its numbers describe the cache fill, not the
