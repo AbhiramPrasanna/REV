@@ -153,7 +153,7 @@ def fig_c1(rows, mem):
     if per_core:
         pc = sum(per_core) / len(per_core)
         ax.text(8.3, ymax * 0.04, f"cores to match pull: {pull['tput_mops'] / pc:.1f} measured, "
-                f"{pull['tput_mops'] / model_push(1, 1)[1]:.1f} model", ha="right", fontsize=8, color=MUTED)
+                f"{xp / model_push(1, 1)[1]:.1f} model", ha="right", fontsize=8, color=MUTED)
         note("1", "C1", "push per core (Mops)", model_push(1, 1)[1], pc)
         note("1", "C1", "cores for push to match pull", xp / model_push(1, 1)[1], pull["tput_mops"] / pc)
     note("1", "C1", "warm pull (Mops)", xp, pull["tput_mops"])
