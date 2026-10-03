@@ -10,6 +10,7 @@
 #include "../tree_api.h"
 #include <atomic>
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <immintrin.h>
 #include <inttypes.h>
@@ -58,6 +59,39 @@ public:
   // std::atomic<uint64_t> num_rdma_in_refresh;
 
   CacheManager cache;
+
+  // DEX-R (runtime switch DEX_PUSH_READS_DEEPEST=1, default off). On a cache
+  // miss at ANY inner level, push the READ -- lookup or scan -- to the memory
+  // node from the deepest cached node, as CHIME does and as the pull/push model
+  // assumes. Stock DEX pushes only inside the bottom megaLevel levels of a
+  // non-shared subtree and pulls every miss above that. Writes (insert, update,
+  // delete) are NOT affected: they keep DEX's own rule, so splits behave as
+  // before. Reads change nothing in the tree; a read that meets a concurrent
+  // split gets "stale" from the memory node and retries, as stock DEX does.
+  // Pushing waits until the cache is full (state == 1), exactly like DEX's own
+  // leaf-level push, so warmup still fills the cache by pulling.
+  // Only with MN_ONLY_PLACEMENT: with the whole tree on one memory node, that
+  // node can always finish the walk; with levels spread over machines it could
+  // not, so the switch is ignored there.
+  static bool dexr_enabled() {
+    const char *s = getenv("DEX_PUSH_READS_DEEPEST");
+    bool on = s && atoi(s) != 0;
+#ifndef MN_ONLY_PLACEMENT
+    if (on) {
+      printf("[DEX-R] DEX_PUSH_READS_DEEPEST ignored: needs MN_ONLY_PLACEMENT\n");
+      on = false;
+    }
+#endif
+    static bool printed = false;
+    if (!printed) {
+      printed = true;
+      printf("[DEX-R] push reads from the deepest cached node: %s "
+             "(DEX_PUSH_READS_DEEPEST; writes keep DEX's megaLevel rule)\n",
+             on ? "ON" : "off");
+    }
+    return on;
+  }
+  bool push_reads_deepest_ = dexr_enabled();
 
   BTree(DSM *dsm, uint64_t tree_id, uint64_t cache_mb, double sample_rate,
         double admission_rate)
@@ -1915,6 +1949,18 @@ public:
             inner->IOUnlock();
             return lookup_success;
           }
+        } else if (push_reads_deepest_ && cache.state == 1) {
+          // DEX-R: a miss above megaLevel (or in a shared subtree): push the
+          // lookup from here; the memory node walks every remaining level.
+          // With rpc_rate 0 (no memory threads) cold_to_hot_with_rpc pulls.
+          bool lookup_success = false;
+          remote_flag = cache.cold_to_hot_with_rpc(
+              inner->children[idx], reinterpret_cast<void **>(&cur_node), inner,
+              idx, refresh, k, result, lookup_success, RPC_type::LOOKUP);
+          if (remote_flag == 1) {
+            inner->IOUnlock();
+            return lookup_success;
+          }
         } else {
           // Upper than subtree; then directly load from remote
           remote_flag = cache.cold_to_hot(inner->children[idx],
@@ -2067,6 +2113,29 @@ public:
             goto restart;
           }
         } else {
+          if (push_reads_deepest_ && cache.state == 1) {
+            // DEX-R: an inner-node miss: push the rest of the scan from here.
+            // The memory node walks down to the start leaf and along the leaf
+            // chain; 0 = not pushed (rpc_rate 0 or not servable) -> pull below.
+            int scan_num = num - cur_num;
+            Key max_key;
+            int pushed = cache.push_scan_from_inner(inner->children[idx], k,
+                                                    kv_buffer, scan_num,
+                                                    max_key);
+            if (pushed == 1) {
+              inner->IOUnlock();
+              cur_num += scan_num;
+              if (max_key == std::numeric_limits<Key>::max() ||
+                  (max_key == (right_bound_ - 1)) || cur_num == num) {
+                return cur_num;
+              }
+              k = max_key + 1;
+              goto restart;
+            } else if (pushed == -1) {
+              inner->IOUnlock();
+              goto restart;
+            }
+          }
           // Upper than subtree; then directly load from remote
           remote_flag = cache.cold_to_hot(inner->children[idx],
                                           reinterpret_cast<void **>(&cur_node),

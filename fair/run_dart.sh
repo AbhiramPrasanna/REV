@@ -40,7 +40,9 @@ if [ "$role" = compute ]; then
   echo "DART fair sweep (compute): $cells cells -> $OUT"
   i=0
   for wl in $WORKLOADS; do
-    if [ "$(wl_op "$wl")" = point ]; then read=100; scan=0; else read=0; scan=100; fi
+    # UPDATE_PCT (default 0): point workloads become (100-U)% lookups + U% updates
+    upd=0
+    if [ "$(wl_op "$wl")" = point ]; then upd=${UPDATE_PCT:-0}; read=$((100 - upd)); scan=0; else read=0; scan=100; fi
     if [ "$(wl_dist "$wl")" = uniform ]; then uni=1; else uni=0; fi
     theta=$(awk -v t="$ZIPF_THETA" 'BEGIN{printf "%d", t*100 + 0.5}')
     for cache in $CACHES; do
@@ -55,7 +57,7 @@ if [ "$role" = compute ]; then
         --mem_mb="$DART_MEM_MB" --th_b="$th_b" --test_func=1 --bucket=256 \
         --run_max_request=$((OPS_M * 1000000)) --payload_byte="$VALUE_B" \
         --mb_read_pct=$read --mb_scan_pct=$scan \
-        --mb_insert_pct=0 --mb_update_pct=0 --mb_remove_pct=0 \
+        --mb_insert_pct=0 --mb_update_pct="$upd" --mb_remove_pct=0 \
         --mb_uniform=$uni --mb_theta_x100="$theta" \
         --mb_key_count=$((KEYS_M * 1000000)) --mb_scan_len="$SCAN_LEN" \
         > "$mlog" 2>&1 &

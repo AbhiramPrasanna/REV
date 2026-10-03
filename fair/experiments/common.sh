@@ -37,6 +37,41 @@ min_per_cell() {   # system tree
   esac
 }
 
+# ---------------------------------------------------------------------------
+# Cache sizes shared by the challenge scripts (MB, in each system's own units).
+# Measured trees: DEX stress inner 1,878 MiB / whole 3,756 MiB; DEX fair inner
+# 350 MB / whole 2,448 MB; CHIME stress inner 129 MB / whole 1,627 MB; CHIME fair:
+# estimate (set from the fair3 [TREE] line).
+#   *_INNER  the inner nodes fit (no inner miss; a lookup = cached path + 1 leaf)
+#   *_M1     about one inner level left uncached (the model's m = 1 case)
+# Every DEX cell prints reads/op, so a size that misses its target shows up.
+# ---------------------------------------------------------------------------
+: "${DEX_STRESS_INNER:=2600}"  ; : "${DEX_STRESS_M1:=1024}"   # 1024 MB: ~2.2 reads/lookup (1 inner + leaf)
+: "${DEX_FAIR_INNER:=640}"     ; : "${DEX_FAIR_M1:=64}"       # bottom inner level (~300 MB) not cached
+: "${CHIME_STRESS_INNER:=192}" ; : "${CHIME_STRESS_M1:=32}"   # bottom inner level (~110 MB) not cached
+: "${CHIME_FAIR_INNER:=640}"   ; : "${CHIME_FAIR_M1:=64}"     # estimates: verify from fair3
+size_of() {   # system tree INNER|M1 -> MB   (dexr uses DEX's sizes)
+  local s=$1; [ "$s" = dexr ] && s=dex
+  local v; v="$(echo "${s}_${2}_${3}" | tr a-z A-Z)"; echo "${!v}"
+}
+
+# "dexr" = DEX with reads pushed from the deepest cached node (DEX-R,
+# DEX_PUSH_READS_DEEPEST=1); it runs the DEX binary. Writes keep DEX's rule.
+real_sys() { [ "$1" = dexr ] && echo dex || echo "$1"; }
+sys_env()  { [ "$1" = dexr ] && echo "DEX_PUSH_READS_DEEPEST=1" || echo "DEX_PUSH_READS_DEEPEST=0"; }
+
+# add_block id system tree cells VAR=value...  (handles dexr; CHIME leaf cache off
+# and scans pushed only on a miss unless the caller overrides)
+add_block() {
+  local id=$1 sys=$2 tree=$3 cells=$4; shift 4
+  plan_block "$id" "$(real_sys "$sys")" "$tree" "$cells" "$(sys_env "$sys")" \
+    "CHIME_LEAF_SET=0" "CHIME_SCAN_OFFLOAD_ALWAYS=0" "$@"
+}
+
+# One-client ("idle") cells, the closest a closed loop gets to the model's idle
+# latency. One client is slow, so fewer ops; warmup still has to fill the cache.
+IDLE_ENV=("THREADS=1" "OPS_M=1" "WARMUP_M=10")
+
 PLAN=()        # "run_id|system|tree|cells|VAR=value;VAR=value;..."
 plan_block() { # run_id system tree cells [VAR=value ...]  (values may contain spaces)
   local id=$1 sys=$2 tree=$3 cells=$4; shift 4
@@ -55,6 +90,8 @@ show_plan() {
   for line in "${PLAN[@]}"; do
     IFS='|' read -r id sys tree cells extra <<< "$line"
     min=$(min_per_cell "$sys" "$tree")
+    # a block may carry "@min=<minutes per cell>" to override the estimate
+    case ";$extra;" in *";@min="*) min=$(sed -nE 's/.*(^|;)@min=([0-9.]+).*/\2/p' <<< "$extra") ;; esac
     h=$(awk -v n="$cells" -v m="$min" 'BEGIN{printf "%.1f", n*m/60}')
     total=$(awk -v t="$total" -v n="$cells" -v m="$min" 'BEGIN{printf "%.2f", t + n*m/60}')
     printf "   %-28s %-6s %-6s %4d cells  ~%5s h   %s\n" "$id" "$sys" "$tree" "$cells" "$h" "$extra"
@@ -69,8 +106,9 @@ run_plan() {
     IFS='|' read -r id sys tree cells extra <<< "$line"
     echo
     echo "######## $(date '+%F %T')  block $id  ($sys, tree=$tree, $cells cells)  $extra"
-    local kv=()
-    [ -n "$extra" ] && IFS=';' read -ra kv <<< "$extra"
+    local kv=() all=() t
+    [ -n "$extra" ] && IFS=';' read -ra all <<< "$extra"
+    for t in ${all[@]+"${all[@]}"}; do [ "${t#@}" = "$t" ] && kv+=("$t"); done   # drop @-notes
     if ! env RUN_ID="$id" SYSTEMS="$sys" TREE_SETUP="$tree" ${kv[@]+"${kv[@]}"} \
          bash "$FAIR/run_all.sh" "$ROLE"; then
       echo "!! block $id failed on $ROLE. Fix it, then rerun this script with" >&2
