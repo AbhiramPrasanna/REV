@@ -1,46 +1,37 @@
 #!/bin/bash
 # ===========================================================================
-# c3 -- Challenge 3: the depth of the miss, and load    (measurement summary Fig. 3)
+# c3 -- Challenge 3: the depth of the miss      (measurement summary Fig. 3)
 #
-#   x  uncached inner levels m (from each cache's reads per lookup)
-#   y  (a) median latency   (b) heatmap: winner over (m, rho)
-#   curves  pull | push at several loads
-#   model   pull = (m+1)·R; push = R_rpc + t_msg + (m+1)·t_lvl, flat until the
-#           memory core is busy; the crossover m* grows with load
-#   fails if m* is the same at every load
+#   x  uncached inner levels m (from each cell's reads per lookup)
+#   y  latency, ONE client (the model's idle latency)
+#   curves  pull | push (one request from the deepest cached node)
+#   model   pull = (m+1)·R grows one round trip per level; push stays nearly flat;
+#           on an idle memory node push wins any miss of 1 level or more
+#   fails if push never wins at any depth
 #
-# Idle part (this script): ONE client -- the model's idle latency -- lookups,
-# the c2 cache sweep (m from ~9 down to 0), pull (0) vs push (1 thread).
-# These cells also measure the model's constants on our cluster (R, R_rpc,
-# t_msg, t_lvl). Loaded part: c2's 40-client cells at 2 and 4 cores, with rho
-# from memory-node CPU.
-# Systems: dexr and chime push from the deepest cached node (push latency vs m
-# as in the model); stock dex is included to show its fixed push depth.
-#
-# One client with DEX: run_dex.sh passes THREADS as DEX's max thread count, so the
-# compute node still registers first; check with one cell first:
-#   C3_ONE=1 bash fair/experiments/c3_depth_load.sh <role>
+# Caches that leave m = 0, about 1, about 2 levels uncached: DEX 128/4/1 MB,
+# CHIME 100/2 MB (CHIME's tree has 4 inner levels, so m only reaches ~1).
+# The loaded part of Fig. 3 (crossover vs memory-core load) comes from the c1/c2
+# 40-client cells and the memory-node CPU %. One client: CHIME loads the tree
+# with as many threads as clients, so each CHIME cell spends ~11 min loading.
+# 10 cells, ~1.2 h.
 #
 #   bash fair/experiments/c3_depth_load.sh memory|compute
 # ===========================================================================
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-: "${SYSTEMS_C:=dexr chime}"            # add "dex" for stock DEX
-: "${TREES:=model}"                   # original node formats (stress / fair also work)
-: "${C2_DEX_STRESS:=8 32 128 512 1024 2600}"   # CHIME sweeps: C2_CHIME_<TREE> in common.sh
-: "${C2_DEX_FAIR:=8 32 64 128 256 640}"
-: "${C2_DEX_MODEL:=2 4 8 16 32 64 128}"
+: "${TREES:=model}"
+: "${C3_DEX:=1 4 128}"
+: "${C3_CHIME:=2 100}"
 
-for sys in $SYSTEMS_C; do
-  for tree in $TREES; do
-    v="$(echo "C2_$(real_sys "$sys")_${tree}" | tr a-z A-Z)"; caches="${!v}"
-    [ "${C3_ONE:-0}" = 1 ] && caches=128
-    case "$(real_sys "$sys"):$tree" in dex:*) m=5 ;; chime:stress) m=8 ;; chime:model) m=6 ;; *) m=4 ;; esac
-    add_block "c3_${sys}_${tree}_idle" "$sys" "$tree" \
-      "$(count_cells "$caches" "0 1" point-uniform)" \
-      "CACHES=$caches" "MEMTHREADS=0 1" "WORKLOADS=point-uniform" "${IDLE_ENV[@]}" "@min=$m"
-    [ "${C3_ONE:-0}" = 1 ] && break 2
-  done
+for tree in $TREES; do
+  add_block "c3_dexr_${tree}_idle" dexr "$tree" "$(count_cells "$C3_DEX" "0 1" x)" \
+    "CACHES=$C3_DEX" "MEMTHREADS=0 1" "WORKLOADS=point-uniform" "${IDLE_ENV[@]}" "@min=3"
+  add_block "c3_chime_${tree}_idle_pull" chime "$tree" "$(count_cells "$C3_CHIME" 0 x)" \
+    "CACHES=$C3_CHIME" "MEMTHREADS=0" "WORKLOADS=point-uniform" "${IDLE_ENV[@]}" "@min=13"
+  add_block "c3_chime_${tree}_idle_push" chime "$tree" "$(count_cells "$C3_CHIME" 1 x)" \
+    "CACHES=$C3_CHIME" "MEMTHREADS=1" "WORKLOADS=point-uniform" "CHIME_OFFLOAD_MIN_LEVEL=1" \
+    "${IDLE_ENV[@]}" "@min=13"
 done
 
 apply_skip; show_plan; run_plan

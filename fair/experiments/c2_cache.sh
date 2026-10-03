@@ -1,61 +1,33 @@
 #!/bin/bash
 # ===========================================================================
-# c2 -- Challenge 2: the cache budget flips the winner   (measurement summary Fig. 2, 2b)
+# c2 -- Challenge 2: the cache budget flips the winner   (measurement summary Fig. 2)
 #
-#   x  cache / inner footprint (log)    y  (a) throughput   (b) round trips per op
-#   curves  pull | push on a miss, 2 and 4 cores | oracle (better per point) | DART
-#   model   pull collapses once the bottom inner level stops fitting; push from
-#           the missed node stays nearly flat; they cross at a budget that
-#           differs by structure (~6 MB for a 1 KB-page B+tree at 1e9 keys)
+#   x  cache budget (log), marked at the inner footprint    y  throughput (+ reads/op)
+#   curves  pull | push from the deepest cached node, 2 and 8 cores
+#   model   pull falls once the bottom inner level stops fitting; push stays nearly
+#           flat; the crossover budget differs by structure
 #   fails if the curves never cross
 #
-# Sweeps run from 8 MB to just past "inner nodes fit", plus one "whole tree
-# fits" point per tree. Round trips: DEX's reads/op + requests/op counters.
-# Systems: dex, dexr, chime (lookups + 100-key scans), dart (pull reference).
-# Where we expect to deviate: stock DEX push still pulls the levels above its
-# bottom 4 (flat with cores); DEX's pulled scans read one leaf at a time.
+# Lookups, 40 clients. Four budgets from "almost nothing cached" to "all inner
+# nodes cached": DEX 2/8/32/128 MB (inner 60 MB), CHIME 2/8/32/100 MB (tree cache
+# holds the inner nodes in 23 MB; 100 MB = CHIME's shipped 70 MB tree cache + 30 MB
+# hotspot buffer). Push = every lookup one request (DEX-R; CHIME min level 1).
+# 24 cells, ~1.3 h.
 #
 #   bash fair/experiments/c2_cache.sh memory|compute     (DRY_RUN=1 to preview)
 # ===========================================================================
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-: "${SYSTEMS_C:=dexr chime dart}"       # add "dex" for stock DEX
-: "${TREES:=model}"                   # original node formats (stress / fair also work)
-: "${C2_MEMTHREADS:=0 2 4}"
-: "${C2_WORKLOADS:=point-uniform range-uniform}"
-# DEX: the last point is "whole tree fits" (run with a long warmup).
-# CHIME sweeps: C2_CHIME_<TREE> in common.sh (model: up to its shipped 100 MB).
-: "${C2_DEX_STRESS:=8 32 128 512 1024 2600 5200}"
-: "${C2_DEX_FAIR:=8 32 64 128 256 640 3300}"
-: "${C2_DEX_MODEL:=2 4 8 16 32 64 128 $DEX_MODEL_WHOLE}"
-: "${C2_DART:=8 128 1024}"
-: "${WHOLE_WARMUP_M:=200}"     # DEX admits 1 leaf in 10: fill the whole tree
+: "${TREES:=model}"
+: "${C2_MEMTHREADS:=0 2 8}"
+: "${C2_DEX:=2 8 32 128}"
+: "${C2_CHIME:=2 8 32 100}"
 
-for sys in $SYSTEMS_C; do
-  if [ "$sys" = dart ]; then
-    add_block "c2_dart" dart stress "$(count_cells "$C2_DART" x "$C2_WORKLOADS")" \
-      "CACHES=$C2_DART" "WORKLOADS=$C2_WORKLOADS"
-    continue
-  fi
-  for tree in $TREES; do
-    v="$(echo "C2_$(real_sys "$sys")_${tree}" | tr a-z A-Z)"; read -ra cs <<< "${!v}"
-    last=${cs[${#cs[@]}-1]}
-    rest="${cs[*]:0:${#cs[@]}-1}"
-    if [ "$(real_sys "$sys")" = dex ]; then
-      # all but the whole-tree point, then the whole-tree point with a long warmup
-      add_block "c2_${sys}_${tree}" "$sys" "$tree" \
-        "$(count_cells "$rest" "$C2_MEMTHREADS" "$C2_WORKLOADS")" \
-        "CACHES=$rest" "MEMTHREADS=$C2_MEMTHREADS" "WORKLOADS=$C2_WORKLOADS"
-      add_block "c2_${sys}_${tree}_whole" "$sys" "$tree" \
-        "$(count_cells "$last" "$C2_MEMTHREADS" "$C2_WORKLOADS")" \
-        "CACHES=$last" "MEMTHREADS=$C2_MEMTHREADS" "WORKLOADS=$C2_WORKLOADS" \
-        "WARMUP_M=$WHOLE_WARMUP_M" "@min=4"
-    else
-      add_block "c2_${sys}_${tree}" "$sys" "$tree" \
-        "$(count_cells "${cs[*]}" "$C2_MEMTHREADS" "$C2_WORKLOADS")" \
-        "CACHES=${cs[*]}" "MEMTHREADS=$C2_MEMTHREADS" "WORKLOADS=$C2_WORKLOADS"
-    fi
-  done
+for tree in $TREES; do
+  add_block "c2_dexr_${tree}" dexr "$tree" "$(count_cells "$C2_DEX" "$C2_MEMTHREADS" x)" \
+    "CACHES=$C2_DEX" "MEMTHREADS=$C2_MEMTHREADS" "WORKLOADS=point-uniform"
+  add_block "c2_chime_${tree}" chime "$tree" "$(count_cells "$C2_CHIME" "$C2_MEMTHREADS" x)" \
+    "CACHES=$C2_CHIME" "MEMTHREADS=$C2_MEMTHREADS" "WORKLOADS=point-uniform" "CHIME_OFFLOAD_MIN_LEVEL=1"
 done
 
 apply_skip; show_plan; run_plan
