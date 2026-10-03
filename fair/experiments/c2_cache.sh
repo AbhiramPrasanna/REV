@@ -20,13 +20,14 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 : "${SYSTEMS_C:=dexr chime dart}"       # add "dex" for stock DEX
-: "${TREES:=stress fair}"
+: "${TREES:=model}"                   # original node formats (stress / fair also work)
 : "${C2_MEMTHREADS:=0 2 4}"
 : "${C2_WORKLOADS:=point-uniform range-uniform}"
-: "${C2_DEX_STRESS:=8 32 128 512 1024 2600 5200}"     # 5200: whole tree fits
-: "${C2_DEX_FAIR:=8 32 64 128 256 640 3300}"          # 3300: whole tree fits
-: "${C2_CHIME_STRESS:=8 16 32 64 128 192}"
-: "${C2_CHIME_FAIR:=8 32 64 128 256 640}"
+# DEX: the last point is "whole tree fits" (run with a long warmup).
+# CHIME sweeps: C2_CHIME_<TREE> in common.sh (model: up to its shipped 100 MB).
+: "${C2_DEX_STRESS:=8 32 128 512 1024 2600 5200}"
+: "${C2_DEX_FAIR:=8 32 64 128 256 640 3300}"
+: "${C2_DEX_MODEL:=2 4 8 16 32 64 128 $DEX_MODEL_WHOLE}"
 : "${C2_DART:=8 128 1024}"
 : "${WHOLE_WARMUP_M:=200}"     # DEX admits 1 leaf in 10: fill the whole tree
 

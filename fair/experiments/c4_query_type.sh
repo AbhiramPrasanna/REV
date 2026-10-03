@@ -4,7 +4,7 @@
 #       (measurement summary Fig. 4)
 #
 #   (a, b) x  scan length 1, 10, 100, 1000 keys (log)
-#          y  (a) latency, 1 client   (b) throughput, 36 clients
+#          y  (a) latency, 1 client   (b) throughput, 40 clients
 #   (c)    x  update fraction 0, 25, 50, 75, 100 %    y  throughput
 #   curves  pull and push for each structure: page B+tree (dex, dexr), hashed-leaf
 #           B+tree (chime), one-key-leaf radix tree (dart; pull only)
@@ -25,12 +25,13 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 : "${SYSTEMS_C:=dexr chime dart}"       # add "dex" for stock DEX
-: "${TREES:=fair}"
+: "${TREES:=model}"                   # original node formats (stress / fair also work)
 : "${C4_LENGTHS:=1 10 100 1000}"
 : "${C4_UPDATES:=0 25 50 75 100}"
+: "${THREADS_C:=40}"                    # label only: the many-client cells use THREADS (params.sh)
 
 for L in $C4_LENGTHS; do
-  for cl in 36 1; do
+  for cl in "$THREADS_C" 1; do
     if [ "$cl" = 1 ]; then ops=("${IDLE_ENV[@]}"); mn=5
     elif [ "$L" -ge 1000 ]; then ops=("OPS_M=2" "WARMUP_M=4"); mn=3
     else ops=("OPS_M=30" "WARMUP_M=10"); mn=3; fi
