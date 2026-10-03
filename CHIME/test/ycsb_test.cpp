@@ -37,28 +37,28 @@
 #define EPOCH_LAT_TEST
 #define LOADER_NUM 8 // [CONFIG] 8
 
-extern double cache_miss[MAX_APP_THREAD];
-extern double cache_hit[MAX_APP_THREAD];
-extern uint64_t lock_fail[MAX_APP_THREAD];
-extern uint64_t write_handover_num[MAX_APP_THREAD];
-extern uint64_t try_write_op[MAX_APP_THREAD];
-extern uint64_t read_handover_num[MAX_APP_THREAD];
-extern uint64_t try_read_op[MAX_APP_THREAD];
-extern uint64_t read_leaf_retry[MAX_APP_THREAD];
-extern uint64_t leaf_cache_invalid[MAX_APP_THREAD];
-extern uint64_t leaf_read_sibling[MAX_APP_THREAD];
-extern uint64_t try_speculative_read[MAX_APP_THREAD];
-extern uint64_t correct_speculative_read[MAX_APP_THREAD];
-extern uint64_t try_read_leaf[MAX_APP_THREAD];
-extern uint64_t read_two_segments[MAX_APP_THREAD];
-extern uint64_t try_read_hopscotch[MAX_APP_THREAD];
-extern uint64_t try_insert_op[MAX_APP_THREAD];
-extern uint64_t split_node[MAX_APP_THREAD];
-extern uint64_t try_write_segment[MAX_APP_THREAD];
-extern uint64_t write_two_segments[MAX_APP_THREAD];
-extern double load_factor_sum[MAX_APP_THREAD];
-extern uint64_t split_hopscotch[MAX_APP_THREAD];
-extern uint64_t retry_cnt[MAX_APP_THREAD][MAX_FLAG_NUM];
+extern PerThread<double> cache_miss;
+extern PerThread<double> cache_hit;
+extern PerThread<uint64_t> lock_fail;
+extern PerThread<uint64_t> write_handover_num;
+extern PerThread<uint64_t> try_write_op;
+extern PerThread<uint64_t> read_handover_num;
+extern PerThread<uint64_t> try_read_op;
+extern PerThread<uint64_t> read_leaf_retry;
+extern PerThread<uint64_t> leaf_cache_invalid;
+extern PerThread<uint64_t> leaf_read_sibling;
+extern PerThread<uint64_t> try_speculative_read;
+extern PerThread<uint64_t> correct_speculative_read;
+extern PerThread<uint64_t> try_read_leaf;
+extern PerThread<uint64_t> read_two_segments;
+extern PerThread<uint64_t> try_read_hopscotch;
+extern PerThread<uint64_t> try_insert_op;
+extern PerThread<uint64_t> split_node;
+extern PerThread<uint64_t> try_write_segment;
+extern PerThread<uint64_t> write_two_segments;
+extern PerThread<double> load_factor_sum;
+extern PerThread<uint64_t> split_hopscotch;
+extern PerThread<uint64_t[MAX_FLAG_NUM]> retry_cnt;
 
 int kThreadCount;
 int kNodeCount;

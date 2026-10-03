@@ -38,10 +38,10 @@ int g_offload_min_level = 2;
 // Offload accounting counters (same per-thread idiom as CHIME's other stats
 // below). Incremented ONLY inside offload paths; the benchmark app snapshots
 // their deltas around each op, exactly as DEX snapshots its num_push_* counters.
-uint64_t offload_lookup_cnt[MAX_APP_THREAD] = {0};
-uint64_t offload_scan_cnt[MAX_APP_THREAD]   = {0};
-uint64_t offload_scan_kv[MAX_APP_THREAD]    = {0};
-uint64_t offload_scan_leaf[MAX_APP_THREAD]  = {0};
+PerThread<uint64_t> offload_lookup_cnt;
+PerThread<uint64_t> offload_scan_cnt;
+PerThread<uint64_t> offload_scan_kv;
+PerThread<uint64_t> offload_scan_leaf;
 
 // Deterministic per-thread decision so a rate of r% offloads ~r of every 100
 // point lookups on each thread (no RNG in the hot path).
@@ -71,34 +71,34 @@ int g_leaf_cache_mb = 0;
 // on (a cached stamp can never be re-produced by a later write).
 static thread_local uint64_t leaf_stamp_ctr = 0;
 
-uint64_t leaf_cache_hit[MAX_APP_THREAD]   = {0};  // served from a cached image
-uint64_t leaf_cache_miss[MAX_APP_THREAD]  = {0};  // not resident -> remote read
-uint64_t leaf_cache_stale[MAX_APP_THREAD] = {0};  // resident but validation failed
-uint64_t leaf_cache_fill[MAX_APP_THREAD]  = {0};  // images published
+PerThread<uint64_t> leaf_cache_hit;  // served from a cached image
+PerThread<uint64_t> leaf_cache_miss;  // not resident -> remote read
+PerThread<uint64_t> leaf_cache_stale;  // resident but validation failed
+PerThread<uint64_t> leaf_cache_fill;  // images published
 #endif
 
-double cache_miss[MAX_APP_THREAD];
-double cache_hit[MAX_APP_THREAD];
-uint64_t lock_fail[MAX_APP_THREAD];
-uint64_t write_handover_num[MAX_APP_THREAD];
-uint64_t try_write_op[MAX_APP_THREAD];
-uint64_t read_handover_num[MAX_APP_THREAD];
-uint64_t try_read_op[MAX_APP_THREAD];
-uint64_t read_leaf_retry[MAX_APP_THREAD];
-uint64_t leaf_cache_invalid[MAX_APP_THREAD];
-uint64_t leaf_read_sibling[MAX_APP_THREAD];
-uint64_t correct_speculative_read[MAX_APP_THREAD];
-uint64_t try_speculative_read[MAX_APP_THREAD];
-uint64_t try_read_leaf[MAX_APP_THREAD];
-uint64_t read_two_segments[MAX_APP_THREAD];
-uint64_t try_read_hopscotch[MAX_APP_THREAD];
-uint64_t retry_cnt[MAX_APP_THREAD][MAX_FLAG_NUM];
-uint64_t try_insert_op[MAX_APP_THREAD];
-uint64_t split_node[MAX_APP_THREAD];
-uint64_t try_write_segment[MAX_APP_THREAD];
-uint64_t write_two_segments[MAX_APP_THREAD];
-double load_factor_sum[MAX_APP_THREAD];
-uint64_t split_hopscotch[MAX_APP_THREAD];
+PerThread<double> cache_miss;
+PerThread<double> cache_hit;
+PerThread<uint64_t> lock_fail;
+PerThread<uint64_t> write_handover_num;
+PerThread<uint64_t> try_write_op;
+PerThread<uint64_t> read_handover_num;
+PerThread<uint64_t> try_read_op;
+PerThread<uint64_t> read_leaf_retry;
+PerThread<uint64_t> leaf_cache_invalid;
+PerThread<uint64_t> leaf_read_sibling;
+PerThread<uint64_t> correct_speculative_read;
+PerThread<uint64_t> try_speculative_read;
+PerThread<uint64_t> try_read_leaf;
+PerThread<uint64_t> read_two_segments;
+PerThread<uint64_t> try_read_hopscotch;
+PerThread<uint64_t[MAX_FLAG_NUM]> retry_cnt;
+PerThread<uint64_t> try_insert_op;
+PerThread<uint64_t> split_node;
+PerThread<uint64_t> try_write_segment;
+PerThread<uint64_t> write_two_segments;
+PerThread<double> load_factor_sum;
+PerThread<uint64_t> split_hopscotch;
 
 uint64_t latency[MAX_APP_THREAD][MAX_CORO_NUM][LATENCY_WINDOWS];
 volatile bool need_stop = false;
@@ -3349,31 +3349,31 @@ void Tree::leaf_cache_statistics() {
 
 void Tree::clear_debug_info() {
 #ifdef CACHE_LEAF_NODE
-  memset(leaf_cache_hit, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(leaf_cache_miss, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(leaf_cache_stale, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(leaf_cache_fill, 0, sizeof(uint64_t) * MAX_APP_THREAD);
+  leaf_cache_hit.clear();
+  leaf_cache_miss.clear();
+  leaf_cache_stale.clear();
+  leaf_cache_fill.clear();
 #endif
-  memset(cache_miss, 0, sizeof(double) * MAX_APP_THREAD);
-  memset(cache_hit, 0, sizeof(double) * MAX_APP_THREAD);
-  memset(lock_fail, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(write_handover_num, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(try_write_op, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(read_handover_num, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(try_read_op, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(read_leaf_retry, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(leaf_cache_invalid, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(try_speculative_read, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(correct_speculative_read, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(try_read_leaf, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(read_two_segments, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(try_read_hopscotch, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(leaf_read_sibling, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(retry_cnt, 0, sizeof(uint64_t) * MAX_APP_THREAD * MAX_FLAG_NUM);
-  memset(try_insert_op, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(split_node, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(try_write_segment, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(write_two_segments, 0, sizeof(uint64_t) * MAX_APP_THREAD);
-  memset(load_factor_sum, 0, sizeof(double) * MAX_APP_THREAD);
-  memset(split_hopscotch, 0, sizeof(uint64_t) * MAX_APP_THREAD);
+  cache_miss.clear();
+  cache_hit.clear();
+  lock_fail.clear();
+  write_handover_num.clear();
+  try_write_op.clear();
+  read_handover_num.clear();
+  try_read_op.clear();
+  read_leaf_retry.clear();
+  leaf_cache_invalid.clear();
+  try_speculative_read.clear();
+  correct_speculative_read.clear();
+  try_read_leaf.clear();
+  read_two_segments.clear();
+  try_read_hopscotch.clear();
+  leaf_read_sibling.clear();
+  retry_cnt.clear();
+  try_insert_op.clear();
+  split_node.clear();
+  try_write_segment.clear();
+  write_two_segments.clear();
+  load_factor_sum.clear();
+  split_hopscotch.clear();
 }

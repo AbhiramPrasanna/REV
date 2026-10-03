@@ -54,6 +54,20 @@
 #define APP_MESSAGE_NR 96
 #define POLL_CQ_MAX_CNT_ONCE 8
 
+// Per-thread statistics counter: one 64-byte cache line per thread. Stock CHIME
+// declares these as plain `uint64_t x[MAX_APP_THREAD]`, so 8 threads share a
+// line and every counter bump on the lookup path invalidates the line in the
+// other 7 cores (false sharing; DEX pads its counters as [MAX_APP_THREAD][8]).
+// Indexing is unchanged (x[tid], x[tid][flag]); clear() replaces the memset.
+template <typename T>
+struct PerThread {
+  struct alignas(64) Slot { T v; };
+  Slot slot[MAX_APP_THREAD];
+  T &operator[](size_t i) { return slot[i].v; }
+  const T &operator[](size_t i) const { return slot[i].v; }
+  void clear() { memset(slot, 0, sizeof(slot)); }
+};
+
 // dir thread -- RPC-serving threads on the memory node.
 // [CONFIG] 4 (stock CHIME: 1). Stock CHIME never needs these: its data path is
 // pure one-sided RDMA, served by the NIC with ZERO memory-node CPU, so 1 dir
