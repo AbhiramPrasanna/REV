@@ -47,7 +47,7 @@
 #define RAW_RECV_CQ_COUNT 512
 
 // { app thread
-#define MAX_APP_THREAD 36
+#define MAX_APP_THREAD 40   // fair/: up to 40 clients, one per physical core (was 36)
 
 #define APP_MESSAGE_NR 96
 

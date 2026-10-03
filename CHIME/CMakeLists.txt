@@ -111,6 +111,13 @@ if(NOT CHIME_INTERNAL_SPAN STREQUAL "")
     add_definitions(-DCHIME_INTERNAL_SPAN=${CHIME_INTERNAL_SPAN})
 endif()
 
+# Leaf-node size (leafSpanSize) override; 64 = stock CHIME. Empty keeps the
+# source default (16). Must be a multiple of 8 (neighborSize). See include/Common.h.
+set(CHIME_LEAF_SPAN "" CACHE STRING "Override leafSpanSize (leaf entries); empty = source default")
+if(NOT CHIME_LEAF_SPAN STREQUAL "")
+    add_definitions(-DCHIME_LEAF_SPAN=${CHIME_LEAF_SPAN})
+endif()
+
 # Value size in bytes (simulatedValLen). Set it to whatever --payload_byte the
 # DART sweep being compared against used, so both systems store the same logical
 # dataset. Empty = source default (48). See include/Common.h.

@@ -2,7 +2,7 @@
 # ===========================================================================
 # c6 -- Challenge 6: load and skew move the crossover   (measurement summary Fig. 6)
 #
-#   (a) x  offered load = client threads 1, 2, 4, 8, 16, 24, 36 (closed loop)
+#   (a) x  offered load = client threads 1, 2, 4, 8, 16, 24, 32, 40 (closed loop)
 #       y  p50 / p99 latency vs measured throughput
 #       curves  pull | push at 1, 2, 4 memory cores
 #   (b) x  Zipf theta 0.5, 0.8, 0.99, 1.2 (uniform = theta 0, from c2)
@@ -22,8 +22,8 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 : "${SYSTEMS_C:=dexr chime}"            # add "dex" for stock DEX
-: "${TREES:=stress}"
-: "${C6_CLIENTS:=1 2 4 8 16 24 36}"
+: "${TREES:=model}"                   # original node formats (stress / fair also work)
+: "${C6_CLIENTS:=1 2 4 8 16 24 32 40}"
 : "${C6_THETAS:=0.5 0.8 0.99 1.2}"
 
 for sys in $SYSTEMS_C; do

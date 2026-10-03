@@ -9,7 +9,7 @@
 #
 # What "fair" fixes (see ARCHITECTURE.md §7):
 #   same data      50M keys, 8 B keys, 8 B values, in all three systems
-#   same clients   36 client threads, all on the compute node
+#   same clients   40 client threads (one per physical core), all on the compute node
 #   tree           see TREE_SETUP below: "stress" (default) gives each system the
 #                  tree that exposes its weak spot; "fair" gives both the same tree
 #   same cache     the TOTAL compute-side cache is the swept value in all three
@@ -24,7 +24,7 @@
 : "${CMP_IP:=10.30.1.6}"        # compute node (server 6)
 : "${MEMC_PORT:=11211}"
 
-: "${THREADS:=36}"              # client threads, compute node only
+: "${THREADS:=40}"              # client threads, compute node only (40 physical cores)
 : "${KEYS_M:=50}"               # keys loaded, millions
 : "${VALUE_B:=8}"               # value bytes
 : "${WARMUP_M:=10}"             # warmup ops, millions (DEX, CHIME)
@@ -63,6 +63,16 @@
 #                     pages (16 entries), CHIME bulk-built with DEX's fill
 #                     (8 keys per leaf, 7 children per inner node), 9 levels each.
 #
+#   model             each system's ORIGINAL node format, the one the analytical
+#                     model and measurement-summary-with-plots.pdf assume:
+#     DEX   1 KB inner and leaf pages (stock DEX pageSize = 1024), sorted bulk
+#           load. 50M keys: ~5 inner levels, inner ~60 MB, leaves ~1.7 GB.
+#     CHIME stock 64-entry inner and leaf nodes, 8 B values, keys inserted
+#           shuffled (CHIME's own load). 50M keys: ~4 inner levels, inner
+#           ~25-30 MB; CHIME's shipped cache is 100 MB (70 MB tree cache +
+#           30 MB hotspot buffer).
+#     Sizes are estimates until the first cell prints the tree.
+#
 # Every cell prints the tree it ran on (height, inner and leaf node counts and
 # MB, total MB) and writes it into the CSV.
 # ---------------------------------------------------------------------------
@@ -79,10 +89,15 @@ case "$TREE_SETUP" in
     : "${DEX_INNER_PAGE:=336}" "${DEX_LEAF_PAGE:=352}"
     : "${CHIME_BULK_BUILD:=1}"
     : "${CHIME_SCAN_OFFLOAD_ALWAYS:=1}" ;;   # every scan to the memory node, like DEX+
-  *) echo "TREE_SETUP must be stress or fair (got '$TREE_SETUP')" >&2; return 1 2>/dev/null || exit 1 ;;
+  model)
+    : "${DEX_INNER_PAGE:=1024}" "${DEX_LEAF_PAGE:=1024}"
+    : "${CHIME_BULK_BUILD:=0}"
+    : "${CHIME_SCAN_OFFLOAD_ALWAYS:=0}"      # CHIME's own rule: push a scan on a miss
+    CHIME_INTERNAL_SPAN=64 CHIME_LEAF_SPAN=64 ;;
+  *) echo "TREE_SETUP must be stress, fair or model (got '$TREE_SETUP')" >&2; return 1 2>/dev/null || exit 1 ;;
 esac
 : "${DEX_PLACEMENT:=mn_only}"          # mn_only | both
-CHIME_INTERNAL_SPAN=16
+: "${CHIME_INTERNAL_SPAN:=16}" "${CHIME_LEAF_SPAN:=16}"   # stress / fair: 16-entry nodes
 : "${CHIME_BUILD_LEAF_KEYS:=8}"        # bulk build only (fair)
 : "${CHIME_BUILD_INNER_FANOUT:=7}"
 : "${CHIME_SORTED_LOAD:=0}"            # insert load order when not bulk-building; 0 = shuffled
@@ -94,7 +109,13 @@ RESULTS_DIR="$FAIR_DIR/results/$RUN_ID"
 # one DEX build per geometry/placement, so switching TREE_SETUP never runs a
 # binary built for the other geometry (run_dex.sh also checks [GEOMETRY]).
 DEX_BUILD="$REV_DIR/dex/build_${DEX_INNER_PAGE}_${DEX_LEAF_PAGE}_${DEX_PLACEMENT}"
-CHIME_BUILD="$REV_DIR/CHIME/build_fair"
+# one CHIME build per node format (build_fair = the 16/16 builds used so far);
+# run_chime.sh checks the stamp.
+if [ "$CHIME_INTERNAL_SPAN:$CHIME_LEAF_SPAN" = 16:16 ]; then
+  CHIME_BUILD="$REV_DIR/CHIME/build_fair"
+else
+  CHIME_BUILD="$REV_DIR/CHIME/build_span${CHIME_INTERNAL_SPAN}_${CHIME_LEAF_SPAN}"
+fi
 DART_DIR="$REV_DIR/DART"
 
 # ---------------------------------------------------------------------------
@@ -189,7 +210,10 @@ dir_cpu_list() {   # -> comma list of CPUs free of client cores (needs lscpu)
       for (i = n; i >= 1; i--) { c = cpu[i]; if (!(key[c] in used)) free_[++m] = c }   # highest first
       out = ""
       for (i = 1; i <= m; i++) { c = free_[i]; if (!(key[c] in seen)) { seen[key[c]] = 1; out = out (out ? "," : "") c; taken[c] = 1 } }
-      for (i = 1; i <= m; i++) { c = free_[i]; if (!(c in taken)) out = out (out ? "," : "") c }
+      for (i = 1; i <= m; i++) { c = free_[i]; if (!(c in taken)) { out = out (out ? "," : "") c; taken[c] = 1 } }
+      # No physical core left (40 clients on 40 cores): use the clients second
+      # hyperthreads, highest first (79, 78, ... on the 6/8 servers).
+      for (i = n; i >= 1; i--) { c = cpu[i]; if (c >= T && !(c in taken)) { out = out (out ? "," : "") c; taken[c] = 1 } }
       print out
     }'
 }

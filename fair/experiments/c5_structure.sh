@@ -5,7 +5,7 @@
 #
 #   bars  structure x operation (lookup, 100-key scan, update)
 #   y     (a) latency gain of push = pull latency / push latency, 1 client
-#         (b) push throughput / pull throughput, 36 clients    (log, line at 1)
+#         (b) push throughput / pull throughput, 40 clients    (log, line at 1)
 #   model   at 1 GB and 2 memory cores, bars fall on both sides of 1; on the
 #           B+trees push is slower for lookups and scans, faster for inserts
 #   fails if every bar is on the same side of 1
@@ -20,7 +20,8 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 : "${SYSTEMS_C:=dexr chime dart}"       # add "dex" for stock DEX
-: "${TREES:=stress fair}"
+: "${TREES:=model}"                   # original node formats (stress / fair also work)
+: "${THREADS_C:=40}"                    # label only: the many-client cells use THREADS (params.sh)
 : "${C5_CACHE:=1024}"
 : "${C5_WORKLOADS:=point-uniform range-uniform}"
 
@@ -31,7 +32,7 @@ for sys in $SYSTEMS_C; do
     continue
   fi
   for tree in $TREES; do
-    for cl in 36 1; do
+    for cl in "$THREADS_C" 1; do
       extra=(); [ "$cl" = 1 ] && extra=("${IDLE_ENV[@]}" "@min=5")
       add_block "c5_${sys}_${tree}_c${cl}" "$sys" "$tree" \
         "$(count_cells "$C5_CACHE" "0 2" "$C5_WORKLOADS")" \

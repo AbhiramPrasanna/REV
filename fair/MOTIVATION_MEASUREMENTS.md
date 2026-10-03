@@ -32,6 +32,11 @@ Nothing here changes the paper. The plots go into a separate PDF in the same sty
 |---|---|---|
 | `TREE_SETUP=stress` (inner nodes never fit) | 22 levels, inner 1,878 MB, total 3,756 MB | stock shuffled load, inner ≈ 84–100 MB |
 | `TREE_SETUP=fair` (inner nodes fit from ~512 MB) | 9 levels, inner 350 MB | bulk-built, the same shape as DEX |
+| `TREE_SETUP=model` (original node formats, what the analytical model assumes; **default for c1–c6**) | 1 KB pages, ~5 inner levels, inner ~60 MB (estimate) | stock 64-entry nodes, shuffled load, inner ~25–30 MB (estimate); shipped cache 100 MB |
+
+Clients: 40 threads on the compute node, one per physical core (`THREADS=40`). DEX's limit was raised to 40 (`MAX_APP_THREAD`). With every physical core running a client, the compute node's directory threads go on the clients' second hyperthreads (79, 78, ...).
+
+Builds for the model tree (both servers): `RUN_ID=build TREE_SETUP=model ./fair/build.sh dex chime`.
 
 ---
 

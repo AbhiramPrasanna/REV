@@ -213,7 +213,12 @@ constexpr uint32_t blockSize       = cachelineSize - versionSize;
 // comparable to DEX. Must be a multiple of neighborSize (8) and >= neighborSize.
 // (Increasing internalSpanSize does NOT help: level-1 internal bytes are ~=
 // num_leaves*16 regardless of fanout.) Set back to 64 for stock CHIME.
-constexpr uint32_t leafSpanSize    = 16;
+// Overridable at build time (cmake -DCHIME_LEAF_SPAN=64 = stock CHIME, used by
+// fair/ TREE_SETUP=model). The default (16) keeps the committed geometry.
+#ifndef CHIME_LEAF_SPAN
+#define CHIME_LEAF_SPAN 16
+#endif
+constexpr uint32_t leafSpanSize    = CHIME_LEAF_SPAN;
 #ifdef SIBLING_BASED_VALIDATION
 constexpr uint32_t scatterMetadataSize = versionSize + sizeof(uint8_t) + sizeof(uint64_t);
 #else
