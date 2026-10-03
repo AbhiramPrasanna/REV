@@ -50,7 +50,7 @@
 
 
 // app thread
-#define MAX_APP_THREAD 65   // one additional thread for data statistics(main thread)  [CONFIG] 65
+#define MAX_APP_THREAD 81   // one additional thread for data statistics(main thread)  [CONFIG] 65; fair/: 80 clients
 #define APP_MESSAGE_NR 96
 #define POLL_CQ_MAX_CNT_ONCE 8
 
