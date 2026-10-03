@@ -137,32 +137,44 @@ def fig_c1(rows, mem):
         return None
     fig, axes = plt.subplots(1, 2 if mem else 1, figsize=(11 if mem else 6.2, 4))
     ax = axes[0] if mem else axes
-    xs = [0] + cores
+    # The PDF's Fig. 1 (page B+tree): warm pull = one 1 KB leaf read; push-only =
+    # the memory node walks the whole tree (5 inner levels + leaf). Our push is one
+    # request per lookup that reads only the leaf there, so the model's line for
+    # that path (1 level) is drawn too, lighter.
+    L_WALK = 6
+    mc = [0, 1, 2, 4, 8, 16]
+    _, xp = model_pull(1)
     ax.axhline(pull["tput_mops"], color=PULL, lw=2, label="pull, warm cache (measured)")
-    tp, xp = model_pull(pull["reads_per_op"])
-    ax.axhline(xp, color=PULL, lw=1.5, ls="--", alpha=0.75, label="pull (model)")
-    line(ax, cores, [p["tput_mops"] if p else None for p in push], PUSH2, "push (measured)")
-    line(ax, xs, [model_push(1, c)[1] for c in xs], PUSH2, "push from leaf parent (model)", model=True)
-    ymax = nice_max(max(pull["tput_mops"], xp, *[model_push(1, c)[1] for c in cores],
-                        *[p["tput_mops"] for p in push if p]))
-    ax.set_ylim(0, ymax); ax.set_xlim(0, 8.4); ax.set_xticks(xs)
-    style(ax, "Challenge 1 · DEX: lookup throughput vs memory cores",
+    ax.axhline(xp, color=PULL, lw=1.5, ls="--", alpha=0.75, label=f"pull, warm (model: {xp:.1f})")
+    line(ax, cores, [p["tput_mops"] if p else None for p in push], PUSH2, "push, every lookup (measured)")
+    line(ax, mc, [model_push(L_WALK, c)[1] for c in mc], PUSH2,
+         f"push-only from the root (model, PDF Fig. 1: {model_push(L_WALK, 1)[1]:.2f}/core)", model=True)
+    leaf = [model_push(1, c)[1] for c in mc]
+    ax.plot(mc, leaf, color=MODEL, lw=1.2, ls=":", label=f"push of the leaf only (model: {leaf[1]:.2f}/core)")
+    ymax = nice_max(max(pull["tput_mops"], xp, model_push(L_WALK, 16)[1],
+                        *[p["tput_mops"] for p in push if p]) * 1.05)
+    ax.set_ylim(0, ymax); ax.set_xlim(0, 16.5); ax.set_xticks(mc)
+    style(ax, "Challenge 1 · DEX (page B+tree): lookup throughput vs memory cores",
           "memory-node cores", "Mops (40 clients)")
-    ax.legend(fontsize=7.5, frameon=False, loc="upper left")
+    ax.legend(fontsize=7.2, frameon=False, loc="upper left")
+    par_model = xp / model_push(L_WALK, 1)[1]
+    ax.axvline(par_model, color=MODEL, lw=0.8, ls="--", alpha=0.5)
+    ax.annotate(f"model parity\n{par_model:.1f} cores", (par_model, ymax * 0.6), xytext=(4, 0),
+                textcoords="offset points", fontsize=7, color=MUTED)
     # per-core rate from the linear part (1-2 cores); larger counts can level off
     per_core = [p["tput_mops"] / c for p, c in zip(push, cores) if p and c <= 2]
     if per_core:
         pc = sum(per_core) / len(per_core)
         top = max((p["tput_mops"], c) for p, c in zip(push, cores) if p)
-        msg = (f"push per core {pc:.2f} Mops (model {model_push(1, 1)[1]:.2f}); "
-               f"cores to match pull: {pull['tput_mops'] / pc:.1f} at that rate, {xp / model_push(1, 1)[1]:.1f} model")
+        msg = (f"measured: {pc:.2f} Mops per core up to 2 cores -> would match pull at "
+               f"{pull['tput_mops'] / pc:.1f} cores")
         if top[0] < 0.85 * pc * top[1]:
-            msg += f"\npush levels off: {top[0]:.2f} Mops at {top[1]} cores ({top[0] / pull['tput_mops']:.0%} of pull)"
-        ax.text(8.3, (pull["tput_mops"] + top[0]) / 2, msg, ha="right", va="center",
-                fontsize=7.5, color=MUTED,
+            msg += f"\nbut levels off: {top[0]:.2f} Mops at {top[1]} cores ({top[0] / pull['tput_mops']:.0%} of pull)"
+        ax.text(16.3, ymax * 0.1, msg, ha="right", va="center", fontsize=7.5, color=MUTED,
                 bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=2))
-        note("1", "C1", "push per core (Mops)", model_push(1, 1)[1], pc)
-        note("1", "C1", "cores for push to match pull", xp / model_push(1, 1)[1], pull["tput_mops"] / pc)
+        note("1", "C1", "push per core, vs PDF push-only (Mops)", model_push(L_WALK, 1)[1], pc)
+        note("1", "C1", "cores for push to match pull, vs PDF", par_model, pull["tput_mops"] / pc)
+        note("1", "C1", "push at 8 cores, vs PDF push-only (Mops)", model_push(L_WALK, 8)[1], top[0])
     note("1", "C1", "warm pull (Mops)", xp, pull["tput_mops"])
     if mem:
         ax2 = axes[1]
@@ -311,12 +323,20 @@ def main():
     out = os.path.dirname(os.path.abspath(sys.argv[1]))
     figs = [("fig_c1", fig_c1(rows, mem)), ("fig_c2", fig_c2(rows)),
             ("fig_c3", fig_c3(rows)), ("fig_c4", fig_c4(rows))]
-    with PdfPages(os.path.join(out, "dex_c1c4.pdf")) as pdf:
+    def free(path):   # a file held open by a viewer (Windows) -> write next to it
+        try:
+            with open(path, "ab"):
+                return path
+        except OSError:
+            base, ext = os.path.splitext(path)
+            print(f"{os.path.basename(path)} is open in another program; writing {os.path.basename(base)}_new{ext}")
+            return base + "_new" + ext
+    with PdfPages(free(os.path.join(out, "dex_c1c4.pdf"))) as pdf:
         for name, f in figs:
             if f is None:
                 print(f"{name}: no data yet")
                 continue
-            f.savefig(os.path.join(out, name + ".png"), dpi=150)
+            f.savefig(free(os.path.join(out, name + ".png")), dpi=150)
             pdf.savefig(f)
             plt.close(f)
     print(f"\n{'challenge':<10}{'quantity':<46}{'model':>10}{'measured':>10}{'meas/model':>12}")
