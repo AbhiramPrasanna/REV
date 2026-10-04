@@ -414,7 +414,7 @@ run_sequence() {
 
   local ts host base
   ts="${SEQ_TS:-$(date +%Y%m%d_%H%M%S)}"
-  host="$(hostname -s 2>/dev/null || hostname)"
+  host="$(hostname -s 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)"   # some servers have no hostname command
   base="$LOG_DIR/sweep_${ts}"
   mkdir -p "$base"
   SWEEP_CSV="$base/summary_${role}.csv"     # all rows (all cache points) land here

@@ -176,7 +176,7 @@ quiet_filter() {
 # script also resets memcached before every cell; this is the between-systems
 # (and after-a-crash) reset. Safe to run when nothing is left.
 cleanup_node() {
-  echo ">> [$(hostname -s)] cleanup: stopping leftover newbench / micro_test / DART processes and memcached"
+  echo ">> [$(hostname -s 2>/dev/null || cat /etc/hostname)] cleanup: stopping leftover newbench / micro_test / DART processes and memcached"
   sudo -n pkill -9 -x newbench 2>/dev/null   # -n: never stop for a password
   pkill -9 -u "$(id -u)" -x micro_test 2>/dev/null
   sudo -n pkill -9 -f "$DART_DIR/bin/(monitor|compute|memory)" 2>/dev/null
@@ -232,7 +232,7 @@ pin_report() {   # print the plan and warn if two clients share a physical core
   command -v lscpu >/dev/null || { echo "pinning: lscpu missing, binaries fall back to their own rule"; return 0; }
   local shared
   shared=$(lscpu -p=CPU,CORE,SOCKET | grep -v '^#' | awk -F, -v T="$THREADS" '$1 < T { k = $3 ":" $2; if (k in s) d++; s[k] = 1 } END { print d + 0 }')
-  echo "pinning ($(hostname -s)): clients -> CPUs 0..$((THREADS - 1)); directory threads -> ${REV_DIR_CPUS:-<binary default>}"
+  echo "pinning ($(hostname -s 2>/dev/null || cat /etc/hostname)): clients -> CPUs 0..$((THREADS - 1)); directory threads -> ${REV_DIR_CPUS:-<binary default>}"
   [ "$shared" -gt 0 ] && echo "WARNING: $shared client CPUs share a physical core with another client" >&2
   return 0
 }
@@ -253,7 +253,7 @@ preflight_cores() {   # warn if client + memory threads cannot each get a core
   local need=$1 have
   have=$(nproc 2>/dev/null || echo 0)
   if [ "$have" -lt "$need" ]; then
-    echo "WARNING: $(hostname -s) has $have logical CPUs; this run pins ~$need threads." >&2
+    echo "WARNING: $(hostname -s 2>/dev/null || cat /etc/hostname) has $have logical CPUs; this run pins ~$need threads." >&2
     echo "         Threads will share cores and results will understate every system." >&2
   fi
 }
