@@ -207,6 +207,12 @@ void generate_workload() {
       uint64_t op = (r < (uint32_t)kReadRatio)   ? M_LOOKUP :
                     (r < (uint32_t)insertmark)   ? M_INSERT :
                     (r < (uint32_t)updatemark)   ? M_UPDATE : M_RANGE;
+      // Updates must name a loaded key: CHIME's leaf_node_update asserts the key is
+      // in its leaf (Tree.cpp, assert(j != neighborSize)), and the key space holds
+      // ~1,000 more keys than were loaded (room for inserts). Map the drawn key onto
+      // a loaded one; the same drawn key always maps to the same loaded key, so the
+      // skew of the distribution is kept.
+      if (op == M_UPDATE) key = bulk_array[key % bulk_load_num];
       arr[i] = (op << 56) | (key & kOpMask);
     }
   };
