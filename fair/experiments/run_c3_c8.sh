@@ -12,7 +12,7 @@
 # time, so nic_bandwidth.py gives the bytes per second of every cell:
 #   fair/results/nic/<stamp>_nic.csv, <stamp>_ts.log  ->  <stamp>_bandwidth.csv
 #
-# PARTS (default: all, in this order). 180 cells, about 7.5 h.
+# PARTS (default: all, in this order). 192 cells, about 8 h.
 #   c3     one client, 1 GB and 8 MB, pull and 1 thread, 10 M warmup:
 #          DEX and CHIME (CHIME's c3 done properly)                          8
 #   c2     CHIME pull at 64 and 160 MB (its cache holds every inner node
@@ -33,8 +33,9 @@
 #   lc     CHIME with its leaf cache (our add on) wherever the inner tree
 #          fits: the inner nodes get what they need, the leaf cache the rest
 #          (1 GB = about 830 MB of leaves). c1 to c8 cells at 1 GB, plus
-#          256 and 512 MB for c2. Needs the CHIME build with
-#          CHIME_LEAF_BEFORE_PUSH (rebuild CHIME on both servers first)       44
+#          256 and 512 MB for c2, plus 8 MB and 128 MB (leaf budget 0 there,
+#          the inner tree does not fit). Needs the CHIME build with
+#          CHIME_LEAF_BEFORE_PUSH (rebuild CHIME on both servers first)       56
 #   e.g.   PARTS="c3 c1" bash fair/experiments/run_c3_c8.sh <role>   (same on both)
 #
 # Resume after a failure: SKIP_TO=<block id> on both servers.
@@ -129,7 +130,7 @@ if has lc; then
   # get what they need (the whole inner tree takes 162 MB of tree cache; 192 MB
   # leaves room, 256 MB for runs whose inserts grow the tree) and the leaf cache
   # gets the rest of the budget. Below that the leaf cache stays off, so 8 MB and
-  # 128 MB are the same as plain CHIME and are not rerun.
+  # 128 MB get a leaf budget of 0.
   # CHIME_LEAF_BEFORE_PUSH=1: a lookup whose leaf is cached is answered from the
   # cache (one 16 byte check, no memory node CPU) instead of being pushed.
   lc() {  # id cache inner_mb cells VAR=value...
@@ -137,6 +138,11 @@ if has lc; then
     add_block "r_lc_$id" chime $T "$cells" "CACHES=$c" "CHIME_LEAF_SET=1" "LEAF_CACHE_MB=$((c - in))" \
       "CHIME_LEAF_BEFORE_PUSH=1" "$@" "$OFF" "$PARK" "@min=2.5"
   }
+  # 8 MB and 128 MB: the inner tree does not fit, so the leaf budget is 0 (the
+  # rule above). Run anyway, in the same mode, so the series is complete.
+  lc c1_8mb        $S $S  6 "MEMTHREADS=0 1 2 4 8 16" "$LOOK" "$P1"
+  lc c2_128mb     $M1 $M1 3 "MEMTHREADS=0 2 16" "$LOOK" "$P1"
+  lc c4_scan100_8mb $S $S 3 "MEMTHREADS=0 2 16" "WORKLOADS=range-uniform" "SCAN_LEN=100" "OPS_M=2" "WARMUP_M=2" "$ALWAYS" "LEAF_ADMIT_SCAN=0.1"
   lc c1_1gb        $W 192 6 "MEMTHREADS=0 1 2 4 8 16" "$LOOK" "$P1"
   lc c2_256mb     256 192 3 "MEMTHREADS=0 2 16" "$LOOK" "$P1"
   lc c2_512mb     512 192 3 "MEMTHREADS=0 2 16" "$LOOK" "$P1"
