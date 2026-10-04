@@ -101,12 +101,14 @@ LEAF_ADMIT_POINT="${LEAF_ADMIT_POINT:-1.0}"
 LOG_DIR="${LOG_DIR:-$CHIME_DIR/build/results/offload_ab}"
 
 # micro_test args: readR insertR updateR rangeR uniform(1|0) theta bulkM warmM opM
-# UPDATE_PCT (default 0): point workloads become (100-U)% lookups + U% updates.
+# UPDATE_PCT / INSERT_PCT (default 0): point workloads become
+# (100-U-I)% lookups + U% updates + I% inserts of fresh keys.
 workload_args() {
-  local U="${UPDATE_PCT:-0}" R=$((100 - ${UPDATE_PCT:-0}))
+  local U="${UPDATE_PCT:-0}" I="${INSERT_PCT:-0}"
+  local R=$((100 - U - I))
   case "$WORKLOAD" in
-    point-uniform) echo "$R 0 $U 0   1 0            $BULK $WARMUP $POINT_OP" ;;
-    point-zipf)    echo "$R 0 $U 0   0 $ZIPF_THETA  $BULK $WARMUP $POINT_OP" ;;
+    point-uniform) echo "$R $I $U 0   1 0            $BULK $WARMUP $POINT_OP" ;;
+    point-zipf)    echo "$R $I $U 0   0 $ZIPF_THETA  $BULK $WARMUP $POINT_OP" ;;
     range-uniform) echo "0 0 0 100   1 0            $BULK $WARMUP $RANGE_OP" ;;
     range-zipf)    echo "0 0 0 100   0 $ZIPF_THETA  $BULK $WARMUP $RANGE_OP" ;;
     *) echo "unknown WORKLOAD=$WORKLOAD" >&2; exit 1 ;;

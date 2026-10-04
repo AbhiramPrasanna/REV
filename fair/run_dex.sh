@@ -83,9 +83,12 @@ i=0
 for mt in $MEMTHREADS; do
   if [ "$mt" -eq 0 ]; then rpc=0; dir=1; off=off; else rpc=1; dir=$mt; off=on; fi
   for wl in $WORKLOADS; do
-    # UPDATE_PCT (default 0): point workloads become (100-U)% lookups + U% updates
-    upd=0
-    if [ "$(wl_op "$wl")" = point ]; then upd=${UPDATE_PCT:-0}; r=$((100 - upd)); rg=0; else r=0; rg=100; fi
+    # UPDATE_PCT / INSERT_PCT (default 0): point workloads become
+    # (100-U-I)% lookups + U% updates + I% inserts of fresh keys
+    upd=0; ins=0
+    if [ "$(wl_op "$wl")" = point ]; then
+      upd=${UPDATE_PCT:-0}; ins=${INSERT_PCT:-0}; r=$((100 - upd - ins)); rg=0
+    else r=0; rg=100; fi
     if [ "$(wl_dist "$wl")" = uniform ]; then uni=1; else uni=0; fi
     for cache in $CACHES; do
       i=$((i+1))
@@ -94,7 +97,7 @@ for mt in $MEMTHREADS; do
       echo ">>> [$(date +%H:%M:%S)] ($i/$cells) $tag"
       #  args: nodes r ins upd del range threads memthreads cache uniform theta
       #        bulkM warmupM opM check time_based early_stop index rpc admit tune kmax
-      args=(2 "$r" 0 "$upd" 0 "$rg" "$THREADS" "$dir" "$cache" "$uni" "$ZIPF_THETA"
+      args=(2 "$r" "$ins" "$upd" 0 "$rg" "$THREADS" "$dir" "$cache" "$uni" "$ZIPF_THETA"
             "$KEYS_M" "$WARMUP_M" "$OPS_M" 0 0 1 0 "$rpc" 0.1 0 "$THREADS")
 
       if [ "$role" = compute ]; then
