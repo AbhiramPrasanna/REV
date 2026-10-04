@@ -94,7 +94,18 @@ case "$TREE_SETUP" in
     : "${CHIME_BULK_BUILD:=0}"
     : "${CHIME_SCAN_OFFLOAD_ALWAYS:=0}"      # CHIME's own rule: push a scan on a miss
     CHIME_INTERNAL_SPAN=64 CHIME_LEAF_SPAN=64 ;;
-  *) echo "TREE_SETUP must be stress, fair or model (got '$TREE_SETUP')" >&2; return 1 2>/dev/null || exit 1 ;;
+  deep)
+    # Height 10 for both (the model's "deeper tree", lesson 7: smaller nodes,
+    # 8 B keys). DEX: 288 B inner pages = 13 entries (~6 children after DEX's
+    # sorted load), 352 B leaves = 16 entries (~8 keys): 6.25M leaves, 9 inner
+    # levels. CHIME: 16-entry nodes bulk-built to the same shape (8 keys per
+    # leaf, 6 children per inner node). Inner nodes ~1.25M each (~440 MB DEX).
+    : "${DEX_INNER_PAGE:=288}" "${DEX_LEAF_PAGE:=352}"
+    : "${CHIME_BULK_BUILD:=1}"
+    : "${CHIME_BUILD_LEAF_KEYS:=8}" "${CHIME_BUILD_INNER_FANOUT:=6}"
+    : "${CHIME_SCAN_OFFLOAD_ALWAYS:=0}"
+    CHIME_INTERNAL_SPAN=16 CHIME_LEAF_SPAN=16 ;;
+  *) echo "TREE_SETUP must be stress, fair, model or deep (got '$TREE_SETUP')" >&2; return 1 2>/dev/null || exit 1 ;;
 esac
 : "${DEX_PLACEMENT:=mn_only}"          # mn_only | both
 : "${CHIME_INTERNAL_SPAN:=16}" "${CHIME_LEAF_SPAN:=16}"   # stress / fair: 16-entry nodes
