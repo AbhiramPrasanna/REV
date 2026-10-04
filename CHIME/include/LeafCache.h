@@ -120,6 +120,17 @@ inline bool enabled() {
   return v;
 }
 
+// CHIME_LEAF_BEFORE_PUSH=1: with offloading on, look in the leaf cache before
+// pushing a lookup whose inner path is fully cached (Tree::search). Off by
+// default, so offload cells behave exactly as before.
+inline bool check_before_push() {
+  static const bool v = [] {
+    const char *e = getenv("CHIME_LEAF_BEFORE_PUSH");
+    return e && atoi(e) != 0;
+  }();
+  return v;
+}
+
 // ---- admission ------------------------------------------------------------
 // Fraction of eligible fills that are actually inserted, per path. DEX has the
 // same knob (`ADMIT`, cold_to_hot_with_admission / ..._for_scan): with

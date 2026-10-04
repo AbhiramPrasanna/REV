@@ -12,7 +12,7 @@
 # time, so nic_bandwidth.py gives the bytes per second of every cell:
 #   fair/results/nic/<stamp>_nic.csv, <stamp>_ts.log  ->  <stamp>_bandwidth.csv
 #
-# PARTS (default: all, in this order). 136 cells, about 5.5 h.
+# PARTS (default: all, in this order). 180 cells, about 7.5 h.
 #   c3     one client, 1 GB and 8 MB, pull and 1 thread, 10 M warmup:
 #          DEX and CHIME (CHIME's c3 done properly)                          8
 #   c2     CHIME pull at 64 and 160 MB (its cache holds every inner node
@@ -30,6 +30,11 @@
 #   c7     10% and 50% inserts at 1 GB (pull, 2, 16)                        12
 #   c8     each system's own push rule (stock DEX, CHIME's own offload
 #          rule) for lookups, 100 key scans and Zipf 0.99, at 2 and 16      12
+#   lc     CHIME with its leaf cache (our add on) wherever the inner tree
+#          fits: the inner nodes get what they need, the leaf cache the rest
+#          (1 GB = about 830 MB of leaves). c1 to c8 cells at 1 GB, plus
+#          256 and 512 MB for c2. Needs the CHIME build with
+#          CHIME_LEAF_BEFORE_PUSH (rebuild CHIME on both servers first)       44
 #   e.g.   PARTS="c3 c1" bash fair/experiments/run_c3_c8.sh <role>   (same on both)
 #
 # Resume after a failure: SKIP_TO=<block id> on both servers.
@@ -39,7 +44,7 @@
 # ===========================================================================
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-: "${PARTS:=c3 c2 c1 c4 c5 c6 c7 c8}"
+: "${PARTS:=c3 c2 c1 c4 c5 c6 c7 c8 lc}"
 has() { [[ " $PARTS " == *" $1 "* ]]; }
 n() { count_cells x "$1" x; }
 
@@ -117,6 +122,38 @@ if has c8; then
   add_block r_c8_chime_rule      chime $T 2 "CACHES=$W" "MEMTHREADS=2 16" "$LOOK" "$OFF" "$PARK" "@min=2"
   add_block r_c8_chime_rule_scan chime $T 2 "CACHES=$W" "MEMTHREADS=2 16" "WORKLOADS=range-uniform" "SCAN_LEN=100" "OPS_M=2" "WARMUP_M=2" "$OFF" "$PARK" "@min=2.5"
   add_block r_c8_chime_rule_zipf chime $T 2 "CACHES=$W" "MEMTHREADS=2 16" "WORKLOADS=point-zipf" "ZIPF_THETA=0.99" "$OFF" "$PARK" "@min=2"
+fi
+
+if has lc; then
+  # CHIME with its leaf cache (our add on, not part of CHIME): the inner nodes
+  # get what they need (the whole inner tree takes 162 MB of tree cache; 192 MB
+  # leaves room, 256 MB for runs whose inserts grow the tree) and the leaf cache
+  # gets the rest of the budget. Below that the leaf cache stays off, so 8 MB and
+  # 128 MB are the same as plain CHIME and are not rerun.
+  # CHIME_LEAF_BEFORE_PUSH=1: a lookup whose leaf is cached is answered from the
+  # cache (one 16 byte check, no memory node CPU) instead of being pushed.
+  lc() {  # id cache inner_mb cells VAR=value...
+    local id=$1 c=$2 in=$3 cells=$4; shift 4
+    add_block "r_lc_$id" chime $T "$cells" "CACHES=$c" "CHIME_LEAF_SET=1" "LEAF_CACHE_MB=$((c - in))" \
+      "CHIME_LEAF_BEFORE_PUSH=1" "$@" "$OFF" "$PARK" "@min=2.5"
+  }
+  lc c1_1gb        $W 192 6 "MEMTHREADS=0 1 2 4 8 16" "$LOOK" "$P1"
+  lc c2_256mb     256 192 3 "MEMTHREADS=0 2 16" "$LOOK" "$P1"
+  lc c2_512mb     512 192 3 "MEMTHREADS=0 2 16" "$LOOK" "$P1"
+  lc c3_1gb        $W 192 2 "MEMTHREADS=0 1" "$LOOK" "$P1" "${ONE[@]}"
+  lc c4_scan100    $W 192 3 "MEMTHREADS=0 2 16" "WORKLOADS=range-uniform" "SCAN_LEN=100" "OPS_M=2" "WARMUP_M=2" "$ALWAYS" "LEAF_ADMIT_SCAN=0.1"
+  lc c4_upd100     $W 192 1 "MEMTHREADS=0" "$LOOK" "UPDATE_PCT=100"
+  lc c4_w50        $W 192 3 "MEMTHREADS=0 2 16" "$LOOK" "UPDATE_PCT=50" "$P1"
+  lc c5_ins        $W 256 1 "MEMTHREADS=0" "$LOOK" "INSERT_PCT=100" "OPS_M=10"
+  lc c5_ins_idle   $W 256 1 "MEMTHREADS=0" "$LOOK" "INSERT_PCT=100" "${ONE[@]}"
+  lc c5_idle_scan100 $W 192 2 "MEMTHREADS=0 1" "WORKLOADS=range-uniform" "SCAN_LEN=100" "THREADS=1" "OPS_M=1" "WARMUP_M=3" "$ALWAYS" "LEAF_ADMIT_SCAN=0.1"
+  lc c6_zipf99     $W 192 3 "MEMTHREADS=0 2 16" "WORKLOADS=point-zipf" "ZIPF_THETA=0.99" "$P1"
+  lc c6_load_t8    $W 192 3 "THREADS=8" "MEMTHREADS=0 2 4" "$LOOK" "$P1"
+  lc c6_load_t24   $W 192 3 "THREADS=24" "MEMTHREADS=0 2 4" "$LOOK" "$P1"
+  lc c7_ins10      $W 256 3 "MEMTHREADS=0 2 16" "$LOOK" "INSERT_PCT=10" "OPS_M=10" "$P1"
+  lc c7_ins50      $W 256 3 "MEMTHREADS=0 2 16" "$LOOK" "INSERT_PCT=50" "OPS_M=10" "$P1"
+  lc c8_rule       $W 192 2 "MEMTHREADS=2 16" "$LOOK"
+  lc c8_rule_zipf  $W 192 2 "MEMTHREADS=2 16" "WORKLOADS=point-zipf" "ZIPF_THETA=0.99"
 fi
 
 apply_skip; show_plan

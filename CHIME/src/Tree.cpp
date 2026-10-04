@@ -1826,13 +1826,26 @@ bool Tree::search(const Key &k, Value &v, CoroPull* sink) {
   // The threshold is a knob because the break-even is empirical: at level==2 the
   // RPC replaces only ~2 round trips and may not beat them, while deeper
   // boundaries collapse more. Sweep CHIME_OFFLOAD_MIN_LEVEL to find it.
-  if ((int)level >= g_offload_min_level && should_offload(dsm->getMyThreadID())) {
-    Value off_v = define::kValueNull;
-    int ret = dsm->rpc_lookup(p, (int)level, k, off_v);
-    v = (ret == 1) ? off_v : define::kValueNull;
-    search_res = (ret == 1);
-    offload_lookup_cnt[dsm->getMyThreadID()] ++;
-    goto search_finish;
+  //
+  // CHIME_LEAF_BEFORE_PUSH=1 (off by default): with the leaf cache on, a lookup
+  // whose leaf is already cached is not pushed. It goes on to leaf_node_search,
+  // which answers it from the cached image after one 16 byte validation read and
+  // no memory node CPU; only lookups whose leaf is not cached are pushed.
+  {  // own scope: the gotos above must not jump over leaf_cached's initialization
+#ifdef CACHE_LEAF_NODE
+    const bool leaf_cached = level == 1 && leaf_cache && leafcache::check_before_push() &&
+                             leaf_cache->get(p) != nullptr;
+#else
+    const bool leaf_cached = false;
+#endif
+    if (!leaf_cached && (int)level >= g_offload_min_level && should_offload(dsm->getMyThreadID())) {
+      Value off_v = define::kValueNull;
+      int ret = dsm->rpc_lookup(p, (int)level, k, off_v);
+      v = (ret == 1) ? off_v : define::kValueNull;
+      search_res = (ret == 1);
+      offload_lookup_cnt[dsm->getMyThreadID()] ++;
+      goto search_finish;
+    }
   }
 #endif
 
