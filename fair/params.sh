@@ -237,6 +237,15 @@ pin_report() {   # print the plan and warn if two clients share a physical core
   return 0
 }
 : "${REV_DIR_CPUS:=$(dir_cpu_list)}"   # set REV_DIR_CPUS by hand to override
+# REV_PARK_CMP_DIRS=1: on the compute node, put every directory thread on ONE CPU
+# (the first in the list, 79 on the 6/8 servers). DEX and CHIME start as many
+# directory threads there as on the memory node, and they spin in pollWithCQ, but
+# they have no work: the whole tree lives on the memory node (DEX MN_ONLY_PLACEMENT,
+# CHIME MEMORY_NODE_NUM=1). With 40 clients on 40 cores, k spread-out directory
+# threads would share the cores of k clients; parked, only client 39 shares one.
+if [ "${role:-}" = compute ] && [ "${REV_PARK_CMP_DIRS:-0}" = 1 ] && [ -n "$REV_DIR_CPUS" ]; then
+  REV_DIR_CPUS="${REV_DIR_CPUS%%,*}"
+fi
 REV_CLIENT_PIN=linear
 export REV_DIR_CPUS REV_CLIENT_PIN
 
