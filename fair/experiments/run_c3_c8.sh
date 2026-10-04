@@ -12,15 +12,14 @@
 # time, so nic_bandwidth.py gives the bytes per second of every cell:
 #   fair/results/nic/<stamp>_nic.csv, <stamp>_ts.log  ->  <stamp>_bandwidth.csv
 #
-# PARTS (default: all, in this order). 204 cells, about 8.3 h.
-#   c3     one client, 1 GB and 8 MB, pull and 1 thread, 10 M warmup:
-#          DEX and CHIME (CHIME's c3 done properly)                          8
+# PARTS (default: all, in this order). 152 cells, about 6.8 h.
+#   c1 to c4 are CHIME only, new cells only (DEX_C14=1 adds DEX):
+#   c3     one client, 1 GB and 8 MB, pull and 1 thread, 10 M warmup         4
 #   c2     CHIME pull at 64 and 160 MB (its cache holds every inner node
 #          at about 160 MB)                                                  2
-#   c1     memory cores at 8 MB (pull, 1, 2, 4, 8, 16) and network
-#          bandwidth at 1 GB (pull, 2, 16), both systems                    18
+#   c1     memory cores at 8 MB: 1, 4 and 8 threads                          3
 #   c4     scan length 10 and 1000 (pull, 2, 16); one client scans of 10
-#          and 100 keys (pull, 1); 50% updates (pull, 2, 16); both systems  26
+#          and 100 keys (pull, 1); 50% updates (pull, 2, 16)                13
 #   c5     inserts: 40 clients (pull, 2) and one client (pull, 1); CHIME
 #          pushes no writes, so pull only                                    6
 #   c6     load: 1, 8 and 24 clients (pull, 2, 4) plus 40 clients with 4;
@@ -75,22 +74,33 @@ both_scan() {  # id min_dex min_chime cells scan_len VAR=value...
   add_block "r_${id}_chime" chime $T "$c" "WORKLOADS=range-uniform" "SCAN_LEN=$len" "$@" "$ALWAYS" "$OFF" "$PARK" "@min=$cm"
 }
 
+# c1 to c4: CHIME only, and only cells we do not have yet (DEX and plain CHIME
+# c1 to c4 are done). DEX_C14=1 adds the DEX versions of these cells too.
+chime_push() {  # id min cells VAR=value...
+  local id=$1 m=$2 c=$3; shift 3
+  add_block "r_${id}_chime" chime $T "$c" "$@" "$OFF" "$P1" "$PARK" "@min=$m"
+  [ "${DEX_C14:-0}" = 1 ] && add_block "r_${id}_dexr" dexr $T "$c" "$@" "$PARK" "@min=2.4"
+}
+chime_scan() {  # id min cells scan_len VAR=value...
+  local id=$1 m=$2 c=$3 len=$4; shift 4
+  add_block "r_${id}_chime" chime $T "$c" "WORKLOADS=range-uniform" "SCAN_LEN=$len" "$@" "$ALWAYS" "$OFF" "$PARK" "@min=$m"
+  [ "${DEX_C14:-0}" = 1 ] && add_block "r_${id}_dexr" dexr $T "$c" "WORKLOADS=range-uniform" "SCAN_LEN=$len" "$@" "$PARK" "@min=2.4"
+}
 if has c3; then
-  both_push c3 3 5 4 "CACHES=$W $S" "MEMTHREADS=0 1" "$LOOK" "${ONE[@]}"
+  chime_push c3 5 4 "CACHES=$W $S" "MEMTHREADS=0 1" "$LOOK" "${ONE[@]}"
 fi
 if has c2; then
   add_block r_c2_chime_fit chime $T 2 "CACHES=64 160" "MEMTHREADS=0" "$LOOK" "$OFF" "$PARK" "@min=2"
 fi
 if has c1; then
-  both_push c1_8mb 2.4 2 6 "CACHES=$S" "MEMTHREADS=0 1 2 4 8 16" "$LOOK"
-  both_push c1_1gb 2.4 2 3 "CACHES=$W" "MEMTHREADS=0 2 16" "$LOOK"
+  chime_push c1_8mb 2 3 "CACHES=$S" "MEMTHREADS=1 4 8" "$LOOK"        # 0, 2, 10, 14, 16 done
 fi
 if has c4; then
-  both_scan c4_scan10   2.4 2.5 3 10   "CACHES=$W" "MEMTHREADS=0 2 16" "OPS_M=2" "WARMUP_M=2"
-  both_scan c4_scan1000 3   4   3 1000 "CACHES=$W" "MEMTHREADS=0 2 16" "OPS_M=1" "WARMUP_M=1"
-  both_scan c4_idle_scan10  3 4 2 10  "CACHES=$W" "MEMTHREADS=0 1" "THREADS=1" "OPS_M=1" "WARMUP_M=3"
-  both_scan c4_idle_scan100 4 6 2 100 "CACHES=$W" "MEMTHREADS=0 1" "THREADS=1" "OPS_M=1" "WARMUP_M=3"
-  both_push c4_w50 2.4 2 3 "CACHES=$W" "MEMTHREADS=0 2 16" "$LOOK" "UPDATE_PCT=50"
+  chime_scan c4_scan10       2.5 3 10   "CACHES=$W" "MEMTHREADS=0 2 16" "OPS_M=2" "WARMUP_M=2"
+  chime_scan c4_scan1000     4   3 1000 "CACHES=$W" "MEMTHREADS=0 2 16" "OPS_M=1" "WARMUP_M=1"
+  chime_scan c4_idle_scan10  4   2 10   "CACHES=$W" "MEMTHREADS=0 1" "THREADS=1" "OPS_M=1" "WARMUP_M=3"
+  chime_scan c4_idle_scan100 6   2 100  "CACHES=$W" "MEMTHREADS=0 1" "THREADS=1" "OPS_M=1" "WARMUP_M=3"
+  chime_push c4_w50          2   3 "CACHES=$W" "MEMTHREADS=0 2 16" "$LOOK" "UPDATE_PCT=50"
 fi
 if has c5; then
   add_block r_c5_dexr_ins       dexr  $T 2 "CACHES=$W" "MEMTHREADS=0 2" "$LOOK" "INSERT_PCT=100" "OPS_M=10" "$PARK" "@min=2.4"
