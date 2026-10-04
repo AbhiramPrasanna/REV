@@ -5,7 +5,7 @@
 #
 #   c3  one client at 1 GB with a full warm-up (10 M lookups, not 2 M):
 #       DEX-R pull and push (1 thread)                                   (2)
-#       (CHIME's one-client cells are left out for now.)
+#       CHIME pull and push (1 thread): off for now, CHIME_C3=1 adds them (2)
 #       With 2 M the deep tree's cache was not warm: CHIME held 1.10 M of
 #       1.25 M inner nodes, DEX had 22% of its misses in inner nodes. The
 #       bottom inner level has 1.04 M nodes; 10 M uniform lookups touch all.
@@ -29,6 +29,11 @@ PARK="REV_PARK_CMP_DIRS=1"
 WARM=("THREADS=1" "OPS_M=1" "WARMUP_M=10")
 
 add_block qx_c3_dexr  dexr  $T 2 "CACHES=1024" "MEMTHREADS=0 1" "WORKLOADS=point-uniform" "${WARM[@]}" "$PARK" "@min=3"
+# CHIME's one-client cells: off for now, CHIME_C3=1 adds them (same on both servers)
+if [ "${CHIME_C3:-0}" = 1 ]; then
+  add_block qx_c3_chime chime $T 2 "CACHES=1024" "MEMTHREADS=0 1" "WORKLOADS=point-uniform" "${WARM[@]}" \
+    "$OFF" "CHIME_OFFLOAD_MIN_LEVEL=1" "$PARK" "@min=5"
+fi
 add_block qx_c2_chime_pull chime $T 2 "CACHES=64 160" "MEMTHREADS=0" "WORKLOADS=point-uniform" "$OFF" "$PARK" "@min=2"
 
 apply_skip; show_plan; run_plan
