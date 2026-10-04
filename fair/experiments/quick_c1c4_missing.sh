@@ -5,8 +5,7 @@
 # threads parked on one CPU (REV_PARK_CMP_DIRS=1, see params.sh).
 #
 #   memory threads 10/14/16, DEX and CHIME as shipped (hotspot buffer on):
-#     c1  1 GB lookups: 1/2/4/8 again and 10/14/16, so each core curve is one
-#         core layout                                        (DEX 7, CHIME 7)
+#     c1  1 GB lookups: 10/14/16 (1/2/4/8 are in q_c1_*)    (DEX 3, CHIME 3)
 #     c2  8 and 128 MB lookups                               (DEX 6, CHIME 6)
 #     c4  100-key scans at 8 MB and 1 GB; DEX updates        (DEX 9, CHIME 6)
 #   CHIME with its hotspot buffer off (CHIME_HOTSPOT=0), above 50 MB only:
@@ -14,7 +13,7 @@
 #     c2  128 MB: pull, push at 2/10/14/16                   (5)
 #     c3  1 GB, 1 client: pull, push                         (2)
 #     c4  1 GB scans: pull, push at 2/10/14/16; updates      (6)
-# 62 cells, ~2.2 h. c3 needs no 10/14/16: one client keeps one memory thread busy.
+# 54 cells, ~1.9 h. Only cells that have not run yet. c3 needs no 10/14/16: one client keeps one memory thread busy.
 #
 # Cores. Memory node: thread k on CPU 80-k (79, 78, ... 64), one physical core
 # each. Compute node: clients on CPUs 0-39 (one per physical core); the directory
@@ -36,8 +35,8 @@ n() { count_cells x "$1" x; }
 n2() { count_cells "a b" "$1" x; }
 
 # ---- memory threads up to 16, as shipped
-add_block qm_c1_dexr       dexr  $T $(n "1 2 4 8 $H") "CACHES=$W" "MEMTHREADS=1 2 4 8 $H" "WORKLOADS=point-uniform" "$PARK" "@min=2.4"
-add_block qm_c1_chime_push chime $T $(n "1 2 4 8 $H") "CACHES=$W" "MEMTHREADS=1 2 4 8 $H" "WORKLOADS=point-uniform" "$P1" "$PARK" "@min=1.8"
+add_block qm_c1_dexr       dexr  $T $(n "$H") "CACHES=$W" "MEMTHREADS=$H" "WORKLOADS=point-uniform" "$PARK" "@min=2.4"
+add_block qm_c1_chime_push chime $T $(n "$H") "CACHES=$W" "MEMTHREADS=$H" "WORKLOADS=point-uniform" "$P1" "$PARK" "@min=1.8"
 add_block qm_c2_dexr  dexr  $T $(n2 "$H") "CACHES=$S $M1" "MEMTHREADS=$H" "WORKLOADS=point-uniform" "$PARK" "@min=2.4"
 add_block qm_c2_chime chime $T $(n2 "$H") "CACHES=$S $M1" "MEMTHREADS=$H" "WORKLOADS=point-uniform" "$P1" "$PARK" "@min=1.8"
 add_block qm_c4_dexr_scan  dexr  $T $(n2 "$H") "CACHES=$S $W" "MEMTHREADS=$H" "${SCAN[@]}" "$PARK" "@min=2.4"
