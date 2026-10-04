@@ -167,6 +167,16 @@ fi
 apply_skip; show_plan
 [ "${DRY_RUN:-0}" = 1 ] && { run_plan; exit 0; }
 
+# ---- sudo: DEX runs its binary under sudo (run_dex.sh). Ask for the password
+# once, here, and refresh the sudo ticket every minute for the whole run, so a
+# DEX cell that follows a long stretch of CHIME blocks never stops at a password
+# prompt (which left the other server waiting 30 min and failing).
+if [[ "${PLAN[*]}" == *"|dex|"* ]]; then
+  echo "== sudo: enter your password once; it is kept fresh until the run ends"
+  sudo -v || { echo "sudo -v failed; the DEX cells need sudo" >&2; exit 1; }
+  ( while kill -0 $$ 2>/dev/null; do sudo -n -v 2>/dev/null; sleep 60; done ) &
+fi
+
 # ---- compute node: NIC sampler + time-stamped console copy --------------------
 if [ "$ROLE" = compute ]; then
   NIC_DIR="$FAIR/results/nic"; mkdir -p "$NIC_DIR"
