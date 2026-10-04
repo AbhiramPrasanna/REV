@@ -339,6 +339,13 @@ re_acquire:
     lock_fail[dsm->getMyThreadID()] ++;
     goto re_acquire;
   }
+#ifdef ENABLE_OFFLOAD
+  // Write pushdown mode 2: reads of this node until it is unlocked can be local
+  // copies on the memory node (DSM::note_locked).
+  if (dsm->is_owner_thread())
+    dsm->note_locked(node_addr, is_leaf ? define::allocationLeafSize : define::allocationInternalSize,
+                     node_addr + lock_offset);
+#endif
 
 #ifdef CACHE_LEAF_NODE
   // A leaf is about to be modified. Two things must happen before any data byte
@@ -431,17 +438,24 @@ void Tree::insert(const Key &k, Value v, CoroPull* sink) {
   assert(level != 0);
 
 #if (defined ENABLE_OFFLOAD && !defined ENABLE_VAR_LEN_KV)
-  // CHIME_PUSH_WRITES=1: hand this write to the memory node that holds `p`, which
-  // runs CHIME's own write protocol for us (push_write.h). Same rule as a pushed
-  // lookup, and never to this machine itself. Declined (0) -> do it here as usual.
-  if (pushw::enabled() && p.nodeID != dsm->getMyNodeID() && (int)level >= g_offload_min_level &&
-      should_offload(dsm->getMyThreadID()) &&
-      dsm->rpc_write(pushw::OP_INSERT, p, sibling_p, level, k, (uint64_t)v) == 1) {
-    offload_write_cnt[dsm->getMyThreadID()] ++;
+  // CHIME_PUSH_WRITES: hand this write to the memory node that holds `p`
+  // (push_write.h). Mode 1: same rule as a pushed lookup, never to this machine
+  // itself, and a decline (0) means do it here as usual. Mode 2: every write,
+  // to whichever node holds `p` (this one included), and never done here.
+  if (pushw::owner_mode() ||
+      (pushw::enabled() && p.nodeID != dsm->getMyNodeID() && (int)level >= g_offload_min_level &&
+       should_offload(dsm->getMyThreadID()))) {
+    if (dsm->rpc_write(pushw::OP_INSERT, p, sibling_p, level, k, (uint64_t)v) == 1) {
+      offload_write_cnt[dsm->getMyThreadID()] ++;
 #ifdef CACHE_LEAF_NODE
-    if (level == 1 && leaf_cache) leaf_cache->invalidate(p);   // our image is now stale
+      if (level == 1 && leaf_cache) leaf_cache->invalidate(p);   // our image is now stale
 #endif
-    goto insert_finish;
+      goto insert_finish;
+    }
+    if (pushw::owner_mode()) {
+      fprintf(stderr, "[PUSHW] mode 2: memory node %d declined a write\n", (int)p.nodeID);
+      abort();
+    }
   }
 #endif
 
@@ -1615,17 +1629,24 @@ void Tree::update(const Key &k, Value v, CoroPull* sink) {
   assert(level != 0);
 
 #if (defined ENABLE_OFFLOAD && !defined ENABLE_VAR_LEN_KV)
-  // CHIME_PUSH_WRITES=1: hand this write to the memory node that holds `p`, which
-  // runs CHIME's own write protocol for us (push_write.h). Same rule as a pushed
-  // lookup, and never to this machine itself. Declined (0) -> do it here as usual.
-  if (pushw::enabled() && p.nodeID != dsm->getMyNodeID() && (int)level >= g_offload_min_level &&
-      should_offload(dsm->getMyThreadID()) &&
-      dsm->rpc_write(pushw::OP_UPDATE, p, sibling_p, level, k, (uint64_t)v) == 1) {
-    offload_write_cnt[dsm->getMyThreadID()] ++;
+  // CHIME_PUSH_WRITES: hand this write to the memory node that holds `p`
+  // (push_write.h). Mode 1: same rule as a pushed lookup, never to this machine
+  // itself, and a decline (0) means do it here as usual. Mode 2: every write,
+  // to whichever node holds `p` (this one included), and never done here.
+  if (pushw::owner_mode() ||
+      (pushw::enabled() && p.nodeID != dsm->getMyNodeID() && (int)level >= g_offload_min_level &&
+       should_offload(dsm->getMyThreadID()))) {
+    if (dsm->rpc_write(pushw::OP_UPDATE, p, sibling_p, level, k, (uint64_t)v) == 1) {
+      offload_write_cnt[dsm->getMyThreadID()] ++;
 #ifdef CACHE_LEAF_NODE
-    if (level == 1 && leaf_cache) leaf_cache->invalidate(p);   // our image is now stale
+      if (level == 1 && leaf_cache) leaf_cache->invalidate(p);   // our image is now stale
 #endif
-    goto update_finish;
+      goto update_finish;
+    }
+    if (pushw::owner_mode()) {
+      fprintf(stderr, "[PUSHW] mode 2: memory node %d declined a write\n", (int)p.nodeID);
+      abort();
+    }
   }
 #endif
 
@@ -2163,6 +2184,14 @@ void Tree::publish_leaf_stamp(const GlobalAddress& leaf_addr, CoroPull* sink) {
   // is itself a perfectly cacheable state (a fresh split sibling).
   uint64_t stamp = (((dsm->getMyGlobalThreadID() + 1) & 0xFFFFULL) << 48) |
                    (++leaf_stamp_ctr & ((1ULL << 48) - 1));
+#ifdef ENABLE_OFFLOAD
+  // With pushed writes, memory node workers write too, and their global thread
+  // ids can equal a compute node thread's, so the id would no longer make the
+  // stamp unique. Use (machine, thread slot) instead; off: the line above.
+  if (pushw::enabled())
+    stamp = ((((uint64_t)dsm->getMyNodeID() & 0xFF) << 8 | ((uint64_t)dsm->getMyThreadID() & 0xFF)) << 48) |
+            (leaf_stamp_ctr & ((1ULL << 48) - 1));
+#endif
   auto stamp_buffer = (dsm->get_rbuf(sink)).get_cas_buffer();
   *stamp_buffer = stamp;
   dsm->write_without_sink((char *)stamp_buffer, leaf_addr + define::leafStampOffset,
@@ -3399,6 +3428,7 @@ void Tree::bulk_build(const uint64_t *sorted_keys, uint64_t n, int leaf_keys, in
 void Tree::insert_from(GlobalAddress p, GlobalAddress sibling_p, uint16_t level, const Key &k, Value v) {
   CoroPull *sink = nullptr;
   before_operation(sink);
+  dsm->clear_locked();
   try_write_op[dsm->getMyThreadID()] ++;
   try_insert_op[dsm->getMyThreadID()] ++;
   if (p == GlobalAddress::Null() || level == 0) {
@@ -3421,6 +3451,7 @@ void Tree::insert_from(GlobalAddress p, GlobalAddress sibling_p, uint16_t level,
 void Tree::update_from(GlobalAddress p, GlobalAddress sibling_p, uint16_t level, const Key &k, Value v) {
   CoroPull *sink = nullptr;
   before_operation(sink);
+  dsm->clear_locked();
   try_write_op[dsm->getMyThreadID()] ++;
   if (p == GlobalAddress::Null() || level == 0) {
     auto e = get_root_ptr(sink);
@@ -3473,6 +3504,7 @@ int Tree::start_push_write_workers() {
 void Tree::push_write_worker(int cpu) {
   dsm->registerThread();
   if (cpu >= 0) bindCore((uint16_t)cpu);
+  if (pushw::owner_mode()) dsm->set_owner_thread(true);   // CPU locks, local copies (DSM.h)
   pushw::Req r;
   int idle = 0;
   while (true) {

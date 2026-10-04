@@ -158,6 +158,12 @@ void Directory::process_message(const RawMessage *m) {
     // Declined (status 0) if the switch is off on this node or no worker could
     // start; the compute node then does the write itself.
     if (!pushw::enabled() || !pushw::ensure_started()) {
+      if (pushw::owner_mode()) {
+        // Mode 2 has no fallback: a compute node writing for itself would race
+        // the workers' CPU locks. Stop loudly instead.
+        fprintf(stderr, "[PUSHW] mode 2: no write worker could start on node %d\n", nodeID);
+        abort();
+      }
       send = (RawMessage *)dCon->message->getSendPool();
       send->level = 0;
       break;

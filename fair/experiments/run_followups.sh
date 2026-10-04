@@ -5,7 +5,7 @@
 #   1. run_zipf_hotspot.sh   CHIME, Zipf 0.99, hotspot buffer on (with and
 #                            without the leaf cache, and CHIME's own rule)   8 cells
 #   2. run_writes_small.sh   DEX and CHIME writes at 8 and 128 MB           16 cells
-#   3. run_chime_pushw.sh    CHIME with write pushdown on (CHIME_PUSH_WRITES) 22 cells
+#   3. run_chime_pushw.sh    CHIME with writes pushed, mode 2 (CHIME_PUSH_WRITES=2) 27 cells
 #                            needs the CHIME build with push_write.h on both servers
 # ~2 h. Run on both servers, memory node first. If one part fails, rerun that
 # part's own script (with SKIP_TO=<block> to resume inside it).

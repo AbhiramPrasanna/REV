@@ -300,6 +300,39 @@ public:
 
   // How many thread slots (thCon[]) registerThread has handed out on this node.
   int thread_slots_used() const { return appID.load(); }
+
+  // ---- write pushdown mode 2 (CHIME_PUSH_WRITES=2, see push_write.h) --------
+  // In mode 2 the memory node is the only writer, so its write workers may run
+  // atomics on their OWN node as CPU atomics, copy a node they hold locked
+  // straight out of local memory, and must wait for every write they post (so
+  // no CPU step overtakes a write still in flight). Data writes stay RDMA
+  // writes: compute nodes keep reading with one sided reads, and a NIC write
+  // keeps each cache line whole for them. Off for every other thread.
+  void set_owner_thread(bool on) { owner_thread = on; locked_len = 0; }
+  bool is_owner_thread() const { return owner_thread; }
+  // The node this thread has just locked: [node, node + len), lock word at `lock`.
+  void note_locked(const GlobalAddress &node, uint32_t len, const GlobalAddress &lock) {
+    locked_node = node; locked_lock = lock; locked_len = len;
+  }
+  void clear_locked() { locked_len = 0; }
+
+private:
+  static thread_local bool owner_thread;
+  static thread_local GlobalAddress locked_node, locked_lock;
+  static thread_local uint32_t locked_len;
+  bool owner_local(const GlobalAddress &g) const { return owner_thread && g.nodeID == myNodeID; }
+  bool in_locked(const GlobalAddress &g, size_t size) const {
+    return locked_len && g.nodeID == locked_node.nodeID && g.offset >= locked_node.offset &&
+           g.offset + size <= locked_node.offset + locked_len;
+  }
+  // A write that covers the lock word releases the lock: stop treating the node
+  // as held (clearing early only costs the local copy, never correctness).
+  void release_check(const GlobalAddress &g, size_t size) {
+    if (locked_len && g.nodeID == locked_lock.nodeID && g.offset <= locked_lock.offset &&
+        locked_lock.offset < g.offset + size)
+      locked_len = 0;
+  }
+  char *local_ptr(const GlobalAddress &g) const { return (char *)baseAddr + g.offset; }
 };
 
 inline GlobalAddress DSM::alloc(size_t size, uint8_t align_bit) {

@@ -17,6 +17,11 @@ thread_local ThreadConnection *DSM::iCon = nullptr;
 thread_local char *DSM::rdma_buffer = nullptr;
 thread_local LocalAllocator DSM::local_allocators[MEMORY_NODE_NUM][NR_DIRECTORY];
 thread_local RdmaBuffer DSM::rbuf[MAX_CORO_NUM];
+// write pushdown mode 2 (push_write.h): set only on a memory node's write workers
+thread_local bool DSM::owner_thread = false;
+thread_local GlobalAddress DSM::locked_node;
+thread_local GlobalAddress DSM::locked_lock;
+thread_local uint32_t DSM::locked_len = 0;
 thread_local uint64_t DSM::thread_tag = 0;
 
 
@@ -181,6 +186,10 @@ void DSM::read(char *buffer, GlobalAddress gaddr, size_t size, bool signal,
 
 void DSM::read_sync(char *buffer, GlobalAddress gaddr, size_t size,
                     CoroPull* sink) {
+  if (owner_local(gaddr) && in_locked(gaddr, size)) {  // mode 2: node we hold locked
+    memcpy(buffer, local_ptr(gaddr), size);
+    return;
+  }
   read(buffer, gaddr, size, true, sink);
 
   if (sink == nullptr) {
@@ -205,6 +214,10 @@ void DSM::read_sync_without_sink(char *buffer, GlobalAddress gaddr, size_t size,
 
 void DSM::write(const char *buffer, GlobalAddress gaddr, size_t size,
                 bool signal, CoroPull* sink) {
+  if (owner_thread) {  // mode 2
+    release_check(gaddr, size);
+    if (!signal && sink == nullptr) { write_sync(buffer, gaddr, size, sink); return; }
+  }
 
   if (sink == nullptr) {
     rdmaWrite(iCon->data[0][gaddr.nodeID], (uint64_t)buffer,
@@ -221,6 +234,10 @@ void DSM::write(const char *buffer, GlobalAddress gaddr, size_t size,
 
 void DSM::write_without_sink(const char *buffer, GlobalAddress gaddr, size_t size,
                              bool signal, CoroPull* sink, CoroQueue* waiting_queue) {
+  if (owner_thread && sink == nullptr) {  // mode 2: wait for it
+    write_sync(buffer, gaddr, size, nullptr);
+    return;
+  }
   uint64_t wrID = sink ? sink->get() : 0ULL;
   rdmaWrite(iCon->data[0][gaddr.nodeID], (uint64_t)buffer,
             remoteInfo[gaddr.nodeID].dsmBase + gaddr.offset, size,
@@ -281,6 +298,20 @@ void DSM::read_batch(RdmaOpRegion *rs, int k, bool signal, CoroPull* sink) {
 }
 
 void DSM::read_batch_sync(RdmaOpRegion *rs, int k, CoroPull* sink) {
+  if (owner_thread) {  // mode 2: every region inside the node we hold locked -> local copies
+    bool all_local = k > 0;
+    for (int i = 0; i < k && all_local; ++i) {
+      GlobalAddress g; g.val = rs[i].dest;
+      all_local = !rs[i].is_on_chip && owner_local(g) && in_locked(g, rs[i].size);
+    }
+    if (all_local) {
+      for (int i = 0; i < k; ++i) {
+        GlobalAddress g; g.val = rs[i].dest;
+        memcpy((char *)rs[i].source, local_ptr(g), rs[i].size);
+      }
+      return;
+    }
+  }
   read_batch(rs, k, true, sink);
 
   if (sink == nullptr) {
@@ -309,6 +340,20 @@ void DSM::read_batch_sync_without_sink(RdmaOpRegion *rs, int k, CoroPull* sink, 
 }
 
 void DSM::read_batches_sync(const std::vector<RdmaOpRegion>& rs, CoroPull* sink) {
+  if (owner_thread && !rs.empty()) {  // mode 2: all inside the node we hold locked -> local copies
+    bool all_local = true;
+    for (const auto& r : rs) {
+      GlobalAddress g; g.val = r.dest;
+      if (r.is_on_chip || !owner_local(g) || !in_locked(g, r.size)) { all_local = false; break; }
+    }
+    if (all_local) {
+      for (const auto& r : rs) {
+        GlobalAddress g; g.val = r.dest;
+        memcpy((char *)r.source, local_ptr(g), r.size);
+      }
+      return;
+    }
+  }
   std::map<uint64_t, std::vector<RdmaOpRegion> > each_rs;
 
   for (const auto& r : rs) {
@@ -327,6 +372,10 @@ void DSM::read_batches_sync(const std::vector<RdmaOpRegion>& rs, CoroPull* sink)
 }
 
 void DSM::write_batch(RdmaOpRegion *rs, int k, bool signal, CoroPull* sink) {
+  if (owner_thread) {  // mode 2
+    for (int i = 0; i < k; ++i) { GlobalAddress g; g.val = rs[i].dest; release_check(g, rs[i].size); }
+    if (!signal && sink == nullptr) { write_batch_sync(rs, k, sink); return; }
+  }
   int node_id = -1;
   for (int i = 0; i < k; ++i) {
     GlobalAddress gaddr;
@@ -344,6 +393,10 @@ void DSM::write_batch(RdmaOpRegion *rs, int k, bool signal, CoroPull* sink) {
 }
 
 void DSM::write_batch_without_sink(RdmaOpRegion *rs, int k, bool signal, CoroPull* sink, CoroQueue* waiting_queue) {
+  if (owner_thread && sink == nullptr) {  // mode 2: wait for it
+    write_batch_sync(rs, k, nullptr);
+    return;
+  }
   uint64_t wrID = sink ? sink->get() : 0ULL;
   int node_id = -1;
   for (int i = 0; i < k; ++i) {
@@ -385,6 +438,8 @@ void DSM::write_batch_sync_without_sink(RdmaOpRegion *rs, int k, CoroPull* sink,
 }
 
 void DSM::write_batches_sync(const std::vector<RdmaOpRegion>& rs, CoroPull* sink) {
+  if (owner_thread)  // mode 2
+    for (const auto& r : rs) { GlobalAddress g; g.val = r.dest; release_check(g, r.size); }
   std::map<uint64_t, std::vector<RdmaOpRegion> > each_rs;
 
   for (const auto& r : rs) {
@@ -612,6 +667,16 @@ void DSM::cas(GlobalAddress gaddr, uint64_t equal, uint64_t val,
 
 bool DSM::cas_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
                    uint64_t *rdma_buffer, CoroPull* sink) {
+  if (owner_local(gaddr)) {
+    // Mode 2 (push_write.h): the memory node is the only writer, so no RDMA
+    // atomic ever touches this word and a CPU atomic is safe. Same result as an
+    // RDMA CAS: the original value lands in rdma_buffer.
+    uint64_t old = equal;
+    __atomic_compare_exchange_n((uint64_t *)local_ptr(gaddr), &old, val, false,
+                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    *rdma_buffer = old;
+    return equal == old;
+  }
   cas(gaddr, equal, val, rdma_buffer, true, sink);
 
   if (sink == nullptr) {
@@ -641,6 +706,24 @@ void DSM::cas_mask(GlobalAddress gaddr, uint64_t equal, uint64_t val,
 
 bool DSM::cas_mask_sync(GlobalAddress gaddr, uint64_t equal, uint64_t val,
                         uint64_t *rdma_buffer, uint64_t compare_mask, uint64_t swap_mask, CoroPull* sink) {
+  if (owner_local(gaddr)) {
+    // Mode 2 (push_write.h): the masked CAS stock CHIME gets from the NIC, as a
+    // CPU atomic loop on our own memory. Succeeds iff the compare_mask bits
+    // equal `equal`'s; swaps only the swap_mask bits; the original word lands in
+    // rdma_buffer either way, as the hardware operation leaves it.
+    uint64_t *w = (uint64_t *)local_ptr(gaddr);
+    uint64_t cur = __atomic_load_n(w, __ATOMIC_SEQ_CST);
+    while (true) {
+      *rdma_buffer = cur;
+      if ((cur & compare_mask) != (equal & compare_mask)) return false;
+      uint64_t nv = (cur & ~swap_mask) | (val & swap_mask);
+      if (__atomic_compare_exchange_n(w, &cur, nv, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+        *rdma_buffer = cur;  // unchanged by a successful exchange: the original word
+        return true;
+      }
+      // a failed exchange reloaded `cur`; check it again
+    }
+  }
   // rdma-core has no masked compare-and-swap (was ibv_exp EXT_MASKED_ATOMIC), so
   // emulate it with read + plain 64-bit CAS. The plain CAS compares the WHOLE
   // word, so a concurrent change to bits OUTSIDE compare_mask -- e.g. another

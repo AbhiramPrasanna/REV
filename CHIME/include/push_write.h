@@ -37,14 +37,32 @@
 //                 that received the request (Directory::send_write_reply, under
 //                 that directory's send lock).
 //
+// TWO MODES (CHIME_PUSH_WRITES=1 or 2):
+//   1  delegation, as above. Compute nodes may still write themselves (a
+//      declined request, the offload rule, warm-up), so the memory node uses
+//      CHIME's RDMA steps on its own memory: lock = RDMA masked CAS (read +
+//      CAS on rdma-core), read, write, unlock. Any number of compute and
+//      memory nodes. Memory node time per write: several NIC operations.
+//   2  the memory node OWNS writes, as DEX's memory node does for its subtrees
+//      and as the pull/push model assumes: EVERY insert and update is pushed
+//      (warm-up included, whatever the offload rule), never declined, so no
+//      RDMA writer exists. The memory node's workers then take locks with CPU
+//      atomics and copy a node they hold locked out of local memory (DSM.h,
+//      owner thread); only the data write stays an RDMA write to itself, so
+//      compute nodes reading with one sided reads still see each cache line
+//      whole. Memory node time per write: CPU work plus one NIC write.
+//      Needs MEMORY_NODE_NUM == 1 for now (a split's parent on another memory
+//      node would need that node to do the update); with more memory nodes
+//      mode 2 runs as mode 1. Any number of compute nodes.
+//
 // Off by default: with CHIME_PUSH_WRITES unset nothing below runs, no worker
 // starts, and the only change on the hot path is one cached flag test.
 // Requirements: every node runs the same binary and the same CHIME_PUSH_WRITES
 // value (a node with the switch off answers 0 and the sender falls back).
 // Not covered: ENABLE_VAR_LEN_KV (values live in a separate data block).
 //
-// Knobs (memory node):
-//   CHIME_PUSH_WRITES=1            turn it on (all nodes)
+// Knobs:
+//   CHIME_PUSH_WRITES=1 or 2       mode 1 or mode 2 (same value on all nodes)
 //   CHIME_PUSH_WRITE_WORKERS=<n>   worker threads per memory node
 //                                  (default: the number of directory threads)
 //   CHIME_PUSH_WRITE_CPUS=<list>   pin worker i to CPU list[i % len]; unset = no pinning
@@ -52,6 +70,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <functional>
@@ -63,13 +82,23 @@ class Directory;
 
 namespace pushw {
 
-inline bool enabled() {
-  static const bool v = [] {
+// 0 off, 1 delegation, 2 the memory node owns writes (see above).
+inline int mode() {
+  static const int v = [] {
     const char *e = getenv("CHIME_PUSH_WRITES");
-    return e && atoi(e) != 0;
+    int m = e ? atoi(e) : 0;
+    if (m < 0 || m > 2) m = 0;
+    if (m == 2 && MEMORY_NODE_NUM > 1) {
+      fprintf(stderr, "[PUSHW] CHIME_PUSH_WRITES=2 needs MEMORY_NODE_NUM == 1 "
+                      "(this build has %d); running mode 1 instead\n", (int)MEMORY_NODE_NUM);
+      m = 1;
+    }
+    return m;
   }();
   return v;
 }
+inline bool enabled() { return mode() > 0; }
+inline bool owner_mode() { return mode() == 2; }
 
 enum : uint8_t { OP_INSERT = 1, OP_UPDATE = 2 };
 
