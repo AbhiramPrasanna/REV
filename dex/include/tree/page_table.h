@@ -11,10 +11,29 @@ Used to enhance the feature of leanstore => to give the ground truth of page ID
 #include <atomic>
 #include <bits/hash_bytes.h>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
 #include <random>
 
 namespace cachepush {
+
+// DEX_SAFE_PT=1 (environment, read once; default off = stock DEX). Readers walk
+// a bucket's overflow chain without the lock (get_with_lock, check_and_remove)
+// and only check the bucket version afterwards. Stock remove() frees an
+// overflow bucket the moment it empties, so a concurrent reader can follow
+// next_ into freed memory and crash; stock insert() links a new overflow bucket
+// before zeroing it. Both are rare until the table churns hard (small caches
+// with pushed writes: every write inserts and removes an IO flag). With the
+// switch on, emptied overflow buckets stay linked and are reused by insert,
+// and a new bucket is filled before it is linked. reset() still frees them all
+// between runs, when no thread is using the table.
+inline bool safe_page_table() {
+  static const bool on = [] {
+    const char *e = std::getenv("DEX_SAFE_PT");
+    return e != nullptr && e[0] == '1';
+  }();
+  return on;
+}
 static const int num_entry_in_page_bucket = 3;
 // It should be cache-line based
 // 64 Byte
@@ -52,6 +71,20 @@ public:
            bucket_num_ * sizeof(page_bucket));
     std::cout << "entry_num: " << entry_num_ << std::endl;
     std::cout << "bucket_num: " << bucket_num_ << std::endl;
+    if (safe_page_table())
+      std::cout << "[DEX_SAFE_PT] page table keeps overflow buckets linked: ON"
+                << std::endl;
+  }
+
+  // A new overflow bucket holding (key, value), published only once filled.
+  void append_bucket(page_bucket *last_bucket, GlobalAddress key, void *value) {
+    page_bucket *nb = nullptr;
+    posix_memalign(reinterpret_cast<void **>(&nb), 64, sizeof(page_bucket));
+    memset(reinterpret_cast<void *>(nb), 0, sizeof(page_bucket));
+    nb->page_frame_[0].page_id_ = key;
+    nb->page_frame_[0].buffer_page_ = value;
+    nb->count_ = 1;
+    __atomic_store_n(&last_bucket->next_, nb, __ATOMIC_RELEASE);
   }
 
   void traverse_and_delete(page_bucket *cur_bucket) {
@@ -119,6 +152,10 @@ public:
     }
 
     assert(last_bucket != nullptr);
+    if (safe_page_table()) {
+      append_bucket(last_bucket, key, value);
+      return true;
+    }
     posix_memalign(reinterpret_cast<void **>(&(last_bucket->next_)), 64,
                    sizeof(page_bucket));
     cur_bucket = last_bucket->next_;
@@ -187,6 +224,10 @@ public:
     }
 
     assert(last_bucket != nullptr);
+    if (safe_page_table()) {
+      append_bucket(last_bucket, key, value);
+      return true;
+    }
     posix_memalign(reinterpret_cast<void **>(&(last_bucket->next_)), 64,
                    sizeof(page_bucket));
     cur_bucket = last_bucket->next_;
@@ -215,7 +256,8 @@ public:
             (cur_frame[i].buffer_page_ == value)) {
           cur_frame[i].buffer_page_ = nullptr;
           cur_bucket->count_--;
-          if (cur_bucket->count_ == 0 && prev_bucket != nullptr) {
+          if (cur_bucket->count_ == 0 && prev_bucket != nullptr &&
+              !safe_page_table()) {
             prev_bucket->next_ = cur_bucket->next_;
             free(cur_bucket);
           }
@@ -246,7 +288,8 @@ public:
         if (cur_frame[i].page_id_.val == key.val) {
           cur_frame[i].buffer_page_ = nullptr;
           cur_bucket->count_--;
-          if (cur_bucket->count_ == 0 && prev_bucket != nullptr) {
+          if (cur_bucket->count_ == 0 && prev_bucket != nullptr &&
+              !safe_page_table()) {
             prev_bucket->next_ = cur_bucket->next_;
             free(cur_bucket);
           }

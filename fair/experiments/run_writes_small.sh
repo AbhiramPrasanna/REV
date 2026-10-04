@@ -22,11 +22,12 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 T=deep
 OFF="CHIME_HOTSPOT=0"
 PARK="REV_PARK_CMP_DIRS=1"
+SAFE="DEX_SAFE_PT=1"   # DEX page table safe under churn (dex/include/tree/page_table.h)
 SMALL="CACHES=8 128"
 OPS=("OPS_M=10" "WARMUP_M=10")
 
-add_block r_w_c45_dexr_upd  dexr  $T 6 "$SMALL" "MEMTHREADS=0 2 16" "WORKLOADS=point-uniform" "UPDATE_PCT=100" "${OPS[@]}" "$PARK" "@min=2.4"
-add_block r_w_c45_dexr_ins  dexr  $T 6 "$SMALL" "MEMTHREADS=0 2 16" "WORKLOADS=point-uniform" "INSERT_PCT=100" "${OPS[@]}" "$PARK" "@min=2.4"
+add_block r_w_c45_dexr_upd  dexr  $T 6 "$SMALL" "MEMTHREADS=0 2 16" "WORKLOADS=point-uniform" "UPDATE_PCT=100" "${OPS[@]}" "$PARK" "$SAFE" "@min=2.4"
+add_block r_w_c45_dexr_ins  dexr  $T 6 "$SMALL" "MEMTHREADS=0 2 16" "WORKLOADS=point-uniform" "INSERT_PCT=100" "${OPS[@]}" "$PARK" "$SAFE" "@min=2.4"
 add_block r_w_c45_chime_upd chime $T 2 "$SMALL" "MEMTHREADS=0" "WORKLOADS=point-uniform" "UPDATE_PCT=100" "${OPS[@]}" "$OFF" "$PARK" "@min=3"
 add_block r_w_c45_chime_ins chime $T 2 "$SMALL" "MEMTHREADS=0" "WORKLOADS=point-uniform" "INSERT_PCT=100" "${OPS[@]}" "$OFF" "$PARK" "@min=3"
 
