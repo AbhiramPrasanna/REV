@@ -10,6 +10,7 @@
 #ifdef ENABLE_OFFLOAD
 #include "chime_rpc.h"   // memory-node lookup/scan pushdown handlers
 #include "remote_load.h" // memory-node "remote CPU load" (dir-thread active %)
+#include "push_write.h"  // optional write pushdown (CHIME_PUSH_WRITES)
 #endif
 
 // #include <gperftools/profiler.h>
@@ -142,9 +143,38 @@ void Directory::dirThread() {
 void Directory::process_message(const RawMessage *m) {
 
   RawMessage *send = nullptr;
+#ifdef ENABLE_OFFLOAD
+  // With write pushdown on, worker threads also send through this directory's
+  // send pool, so every send from here holds the same lock. Off: no lock.
+  std::unique_lock<std::mutex> send_lk(send_mtx, std::defer_lock);
+  if (pushw::enabled()) send_lk.lock();
+#endif
   switch (m->type) {
 
 #ifdef ENABLE_OFFLOAD
+  case RpcType::RPC_WRITE: {
+    // Never run the write here: queue it for a worker thread, which answers it
+    // (push_write.h explains why a directory thread must not block on a lock).
+    // Declined (status 0) if the switch is off on this node or no worker could
+    // start; the compute node then does the write itself.
+    if (!pushw::enabled() || !pushw::ensure_started()) {
+      send = (RawMessage *)dCon->message->getSendPool();
+      send->level = 0;
+      break;
+    }
+    pushw::Req r;
+    pushw::unpack_level(m->level, r.level, r.op);
+    r.addr = m->addr;
+    r.sibling = GlobalAddress(m->aux);
+    r.k = m->k;
+    r.v = m->v;
+    r.node_id = m->node_id;
+    r.app_id = m->app_id;
+    r.dir = this;
+    pushw::queue().push(r);
+    break;  // no reply here: the worker sends it
+  }
+
   case RpcType::RPC_LOOKUP: {
     // m->addr / m->level = the CN's cache-boundary node + its level; m->k = key.
     // Traverse the remaining internals + leaf locally and reply with the value.
@@ -228,3 +258,12 @@ void Directory::process_message(const RawMessage *m) {
     dCon->sendMessage2App(send, m->node_id, m->app_id);
   }
 }
+
+#ifdef ENABLE_OFFLOAD
+void Directory::send_write_reply(uint16_t node_id, uint16_t app_id, int status) {
+  std::lock_guard<std::mutex> g(send_mtx);
+  auto *send = (RawMessage *)dCon->message->getSendPool();
+  send->level = status;
+  dCon->sendMessage2App(send, node_id, app_id);
+}
+#endif

@@ -7,6 +7,9 @@
 #include <cstdlib>   // getenv for CHIME_RANGE_BATCHED
 #ifdef ENABLE_OFFLOAD
 #include "chime_rpc.h"
+#include "push_write.h"   // optional write pushdown (CHIME_PUSH_WRITES)
+#include "Directory.h"    // a pushed write is answered through its directory
+#include <thread>
 #endif
 
 #include <algorithm>
@@ -42,6 +45,10 @@ PerThread<uint64_t> offload_lookup_cnt;
 PerThread<uint64_t> offload_scan_cnt;
 PerThread<uint64_t> offload_scan_kv;
 PerThread<uint64_t> offload_scan_leaf;
+// Write pushdown (CHIME_PUSH_WRITES): writes this node pushed, and writes this
+// node's workers ran for other nodes.
+PerThread<uint64_t> offload_write_cnt;
+PerThread<uint64_t> pushw_served_cnt;
 
 // Deterministic per-thread decision so a rate of r% offloads ~r of every 100
 // point lookups on each thread (no RNG in the hot path).
@@ -217,6 +224,11 @@ retry:
       goto retry;
     }
   }
+#if (defined ENABLE_OFFLOAD && !defined ENABLE_VAR_LEN_KV)
+  // Write pushdown: this node runs pushed writes on worker threads that start on
+  // the first request (push_write.h). Nothing starts with the switch off.
+  if (pushw::enabled()) pushw::starter() = [this] { return start_push_write_workers(); };
+#endif
 }
 
 
@@ -417,6 +429,21 @@ void Tree::insert(const Key &k, Value v, CoroPull* sink) {
   }
   record_cache_hit_ratio(from_cache, level);
   assert(level != 0);
+
+#if (defined ENABLE_OFFLOAD && !defined ENABLE_VAR_LEN_KV)
+  // CHIME_PUSH_WRITES=1: hand this write to the memory node that holds `p`, which
+  // runs CHIME's own write protocol for us (push_write.h). Same rule as a pushed
+  // lookup, and never to this machine itself. Declined (0) -> do it here as usual.
+  if (pushw::enabled() && p.nodeID != dsm->getMyNodeID() && (int)level >= g_offload_min_level &&
+      should_offload(dsm->getMyThreadID()) &&
+      dsm->rpc_write(pushw::OP_INSERT, p, sibling_p, level, k, (uint64_t)v) == 1) {
+    offload_write_cnt[dsm->getMyThreadID()] ++;
+#ifdef CACHE_LEAF_NODE
+    if (level == 1 && leaf_cache) leaf_cache->invalidate(p);   // our image is now stale
+#endif
+    goto insert_finish;
+  }
+#endif
 
 next:
   retry_cnt[dsm->getMyThreadID()][retry_flag] ++;
@@ -1586,6 +1613,21 @@ void Tree::update(const Key &k, Value v, CoroPull* sink) {
   }
   record_cache_hit_ratio(from_cache, level);
   assert(level != 0);
+
+#if (defined ENABLE_OFFLOAD && !defined ENABLE_VAR_LEN_KV)
+  // CHIME_PUSH_WRITES=1: hand this write to the memory node that holds `p`, which
+  // runs CHIME's own write protocol for us (push_write.h). Same rule as a pushed
+  // lookup, and never to this machine itself. Declined (0) -> do it here as usual.
+  if (pushw::enabled() && p.nodeID != dsm->getMyNodeID() && (int)level >= g_offload_min_level &&
+      should_offload(dsm->getMyThreadID()) &&
+      dsm->rpc_write(pushw::OP_UPDATE, p, sibling_p, level, k, (uint64_t)v) == 1) {
+    offload_write_cnt[dsm->getMyThreadID()] ++;
+#ifdef CACHE_LEAF_NODE
+    if (level == 1 && leaf_cache) leaf_cache->invalidate(p);   // our image is now stale
+#endif
+    goto update_finish;
+  }
+#endif
 
 next:
   retry_cnt[dsm->getMyThreadID()][retry_flag] ++;
@@ -3347,6 +3389,109 @@ void Tree::bulk_build(const uint64_t *sorted_keys, uint64_t n, int leaf_keys, in
          leaf_keys, inner_fanout);
 }
 
+#if (defined ENABLE_OFFLOAD && !defined ENABLE_VAR_LEN_KV)
+// ---- write pushdown, memory node side (push_write.h) -----------------------
+// Run an insert for another node, starting from the node its cache resolved.
+// The same walk as Tree::insert after its cache lookup, with from_cache = false:
+// `p` may be stale, so a split that moved the key right is followed by the
+// turn right checks instead of being reported as a stale cache entry, and a
+// leaf that is no longer valid sends the walk back to the root.
+void Tree::insert_from(GlobalAddress p, GlobalAddress sibling_p, uint16_t level, const Key &k, Value v) {
+  CoroPull *sink = nullptr;
+  before_operation(sink);
+  try_write_op[dsm->getMyThreadID()] ++;
+  try_insert_op[dsm->getMyThreadID()] ++;
+  if (p == GlobalAddress::Null() || level == 0) {
+    auto e = get_root_ptr(sink);
+    p = e.ptr, sibling_p = GlobalAddress::Null(), level = e.level;
+  }
+  while (true) {
+    path_stack[0][level - 1] = p;
+    if (level == 1) {
+      if (leaf_node_insert(p, sibling_p, k, v, false, sink)) return;
+      auto e = get_root_ptr(sink);
+      p = e.ptr, sibling_p = GlobalAddress::Null(), level = e.level;
+      continue;
+    }
+    internal_node_search(p, sibling_p, k, level, false, sink);  // never fails with from_cache = false
+  }
+}
+
+// Run an update for another node; the same walk as insert_from.
+void Tree::update_from(GlobalAddress p, GlobalAddress sibling_p, uint16_t level, const Key &k, Value v) {
+  CoroPull *sink = nullptr;
+  before_operation(sink);
+  try_write_op[dsm->getMyThreadID()] ++;
+  if (p == GlobalAddress::Null() || level == 0) {
+    auto e = get_root_ptr(sink);
+    p = e.ptr, sibling_p = GlobalAddress::Null(), level = e.level;
+  }
+  while (true) {
+    path_stack[0][level - 1] = p;
+    if (level == 1) {
+      if (leaf_node_update(p, sibling_p, k, v, false, sink)) return;
+      auto e = get_root_ptr(sink);
+      p = e.ptr, sibling_p = GlobalAddress::Null(), level = e.level;
+      continue;
+    }
+    internal_node_search(p, sibling_p, k, level, false, sink);
+  }
+}
+
+// Start the worker threads (called once, on the first pushed write). Each
+// worker takes a free DSM thread slot, so it can issue RDMA like any client.
+// Returns how many started; 0 makes the directory decline pushed writes.
+int Tree::start_push_write_workers() {
+  int want = chime::num_dir();
+  if (const char *e = getenv("CHIME_PUSH_WRITE_WORKERS")) want = atoi(e);
+  const int free_slots = MAX_APP_THREAD - dsm->thread_slots_used();
+  const int n = std::min(want, free_slots);
+  if (n <= 0) {
+    printf("[PUSHW] node %d: no free thread slot for write workers (%d used of %d); "
+           "pushed writes will be declined\n", dsm->getMyNodeID(), dsm->thread_slots_used(), MAX_APP_THREAD);
+    return 0;
+  }
+  std::vector<int> cpus;
+  if (const char *list = getenv("CHIME_PUSH_WRITE_CPUS")) {
+    for (const char *q = list; *q;) {
+      char *end;
+      long c = strtol(q, &end, 10);
+      if (end == q) { ++q; continue; }
+      if (c >= 0) cpus.push_back((int)c);
+      q = end;
+    }
+  }
+  for (int i = 0; i < n; ++ i) {
+    const int cpu = cpus.empty() ? -1 : cpus[i % cpus.size()];
+    std::thread([this, cpu] { push_write_worker(cpu); }).detach();
+  }
+  printf("[PUSHW] node %d: %d write workers started (%s)\n", dsm->getMyNodeID(), n,
+         cpus.empty() ? "not pinned" : "pinned by CHIME_PUSH_WRITE_CPUS");
+  return n;
+}
+
+void Tree::push_write_worker(int cpu) {
+  dsm->registerThread();
+  if (cpu >= 0) bindCore((uint16_t)cpu);
+  pushw::Req r;
+  int idle = 0;
+  while (true) {
+    if (!pushw::queue().pop(r)) {
+      if (++ idle >= 1024) { std::this_thread::yield(); idle = 0; }
+      continue;
+    }
+    idle = 0;
+    Key k;
+    memcpy(k.data(), &r.k, define::keyLen);
+    if (r.op == pushw::OP_INSERT) insert_from(r.addr, r.sibling, (uint16_t)r.level, k, (Value)r.v);
+    else update_from(r.addr, r.sibling, (uint16_t)r.level, k, (Value)r.v);
+    pushw_served_cnt[dsm->getMyThreadID()] ++;
+    r.dir->send_write_reply(r.node_id, r.app_id, 1);
+  }
+}
+#endif
+
+
 void Tree::statistics() {
 #ifdef TREE_ENABLE_CACHE
   tree_cache->statistics();
@@ -3359,6 +3504,14 @@ void Tree::statistics() {
 
 
 void Tree::leaf_cache_statistics() {
+#if (defined ENABLE_OFFLOAD && !defined ENABLE_VAR_LEN_KV)
+  if (pushw::enabled()) {
+    uint64_t pushed = 0, served = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++ i) { pushed += offload_write_cnt[i]; served += pushw_served_cnt[i]; }
+    printf("[PUSHW] node %d: writes pushed=%lu, writes run for other nodes=%lu\n",
+           dsm->getMyNodeID(), pushed, served);
+  }
+#endif
 #ifdef CACHE_LEAF_NODE
   if (leaf_cache) {
     uint64_t hit = 0, miss = 0, stale = 0, fill = 0;

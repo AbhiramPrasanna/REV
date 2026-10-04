@@ -277,7 +277,29 @@ public:
     leaves = (int)mm->v;
     return mm->level;
   }
+
+  // Write pushdown (CHIME_PUSH_WRITES=1, see push_write.h): ask the memory node
+  // that holds `node_addr` to run this insert or update itself, starting from
+  // `node_addr` (`level` as the cache saw it; `sibling` its expected sibling, or
+  // Null). Returns 1 once the write is done, 0 if the memory node declined (the
+  // caller then does the write itself).
+  int rpc_write(uint8_t op, const GlobalAddress &node_addr, const GlobalAddress &sibling,
+                int level, const Key &k, uint64_t v) {
+    RawMessage m;
+    m.type = RpcType::RPC_WRITE;
+    m.addr = node_addr;
+    m.level = (level & 0xFFFF) | ((int)op << 16);   // same packing as pushw::pack_level
+    memcpy(&m.k, k.data(), define::keyLen);
+    m.v = v;
+    m.aux = sibling.to_uint64();
+    rpc_call_dir(m, node_addr.nodeID, thread_id % chime::num_dir());
+    auto *mm = rpc_wait();
+    return mm->level;
+  }
 #endif // ENABLE_OFFLOAD
+
+  // How many thread slots (thCon[]) registerThread has handed out on this node.
+  int thread_slots_used() const { return appID.load(); }
 };
 
 inline GlobalAddress DSM::alloc(size_t size, uint8_t align_bit) {

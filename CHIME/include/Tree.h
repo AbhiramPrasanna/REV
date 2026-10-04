@@ -179,6 +179,14 @@ private:
   // update
   bool leaf_node_update(const GlobalAddress& node_addr, const GlobalAddress& sibling_addr, const Key &k, Value v, bool from_cache, CoroPull* sink);
 
+#if (defined ENABLE_OFFLOAD && !defined ENABLE_VAR_LEN_KV)
+  // write pushdown, memory node side (push_write.h)
+  void insert_from(GlobalAddress p, GlobalAddress sibling_p, uint16_t level, const Key &k, Value v);
+  void update_from(GlobalAddress p, GlobalAddress sibling_p, uint16_t level, const Key &k, Value v);
+  int start_push_write_workers();
+  void push_write_worker(int cpu);
+#endif
+
   // hopscotch
 #ifdef HOPSCOTCH_LEAF_NODE
   bool hopscotch_insert_and_unlock(LeafNode* leaf, const Key& k, Value v, const GlobalAddress& node_addr, uint64_t* lock_buffer, CoroPull* sink, int entry_num=define::leafSpanSize);
