@@ -6,11 +6,11 @@
 #   PARTS="hi"     10, 14 and 16 memory threads for every push cell of
 #                  quick_c1c8: DEX, and CHIME as shipped (hotspot buffer on)
 #                  69 cells, ~2.4 h
-#   PARTS="nohot"  every CHIME cell of quick_c1c8 again with CHIME's hotspot
+#   PARTS="nohot"  CHIME's c1-c4 cells of quick_c1c8 again with CHIME's hotspot
 #                  buffer off (CHIME_HOTSPOT=0): pull, the quick run's thread
 #                  counts (1/2/4/8 in c1, 2 elsewhere) and 10/14/16
-#                  48 cells, ~1.6 h
-#   default: PARTS="hi nohot", ~4 h
+#                  21 cells, ~45 min (NOHOT_MORE=1 adds c6-c8: +27 cells)
+#   default: PARTS="hi nohot", ~3.2 h
 #
 # The hotspot buffer is a 30 MB cache of recently used key positions that stock
 # CHIME turns on above 50 MB of cache. On the model tree, turning it off raised
@@ -68,7 +68,7 @@ if [[ " $PARTS " == *" hi "* ]]; then
 fi
 
 if [[ " $PARTS " == *" nohot "* ]]; then
-  # ---- CHIME with the hotspot buffer off: quick_c1c8's thread counts and 10/14/16
+  # ---- CHIME with the hotspot buffer off, c1-c4: quick_c1c8's thread counts and 10/14/16
   O="CHIME_HOTSPOT=0"
   add_block qn_c1_chime_pull chime $T 1 "CACHES=$W" "MEMTHREADS=0" "WORKLOADS=point-uniform" "$O" "@min=1.8"
   add_block qn_c1_chime_push chime $T $(n "1 2 4 8 $MT_HI") "CACHES=$W" "MEMTHREADS=1 2 4 8 $MT_HI" \
@@ -80,6 +80,9 @@ if [[ " $PARTS " == *" nohot "* ]]; then
   add_block qn_c4_chime_scan chime $T $(n "0 2 $MT_HI") "CACHES=$W" "MEMTHREADS=0 2 $MT_HI" "${SCAN[@]}" \
     "CHIME_SCAN_OFFLOAD_ALWAYS=1" "$O" "@min=1.8"
   add_block qn_c4_chime_upd chime $T 1 "CACHES=$W" "MEMTHREADS=0" "WORKLOADS=point-uniform" "UPDATE_PCT=100" "$O" "@min=1.8"
+fi
+# c6-c8 with the hotspot buffer off only when asked: NOHOT_MORE=1
+if [[ " $PARTS " == *" nohot "* && "${NOHOT_MORE:-0}" == 1 ]]; then
   add_block qn_c6_chime_t8 chime $T $(n "0 2 $MT_HI") "THREADS=8" "CACHES=$M1" "MEMTHREADS=0 2 $MT_HI" \
     "WORKLOADS=point-uniform" "$O" "$P1" "@min=1.8"
   add_block qn_c6_chime_zipf chime $T $(n "0 2 $MT_HI") "ZIPF_THETA=0.99" "CACHES=$W" "MEMTHREADS=0 2 $MT_HI" \
