@@ -3,44 +3,38 @@
 # c5 -- Challenge 5: the same policy helps one structure and hurts another
 #       (measurement summary Fig. 5)
 #
-#   bars  structure x operation (lookup, 100-key scan, update)
+#   bars  structure (DEX page B+tree, CHIME hashed-leaf B+tree) x operation
+#         (lookup, 100-key scan, insert)
 #   y     (a) latency gain of push = pull latency / push latency, 1 client
-#         (b) push throughput / pull throughput, 40 clients    (log, line at 1)
-#   model   at 1 GB and 2 memory cores, bars fall on both sides of 1; on the
-#           B+trees push is slower for lookups and scans, faster for inserts
+#         (b) push throughput / pull throughput, 2 memory cores, 40 clients
+#   model   at 1 GB and 2 cores, bars fall on both sides of 1: on the B+trees push
+#           is slower for lookups and scans, faster (on latency) for inserts
 #   fails if every bar is on the same side of 1
 #
-# The model's own point: 1024 MB cache, 2 memory threads, pull (0) vs push.
-# Systems: dex, dexr, chime in both trees; dart (no push) gives the radix-tree
-# pull reference. Updates use UPDATE_PCT=100 (the model's insert bar; updates
-# change no tree shape).
+# Caches: the model's 1 GB point (warm) and 8 MB. Most bars reuse cells from
+# other challenges, so this script runs only the INSERT cells:
+#   lookup, 40 clients      c1_<sys>_deep_c<cache>(_pull|_push)   (mt 0 / 2)
+#   lookup, 1 client        c3_<sys>_deep_idle                    (1024 and 8 MB)
+#   100-key scan, 40 / 1    c4_<sys>_deep_c<cache>_L100(_1client)
+#   insert, 40 / 1          this script (INSERT_PCT=100: fresh keys, real splits)
+# CHIME has no write push, so its insert bars are pull only. 12 cells, ~40 min.
 #
 #   bash fair/experiments/c5_structure.sh memory|compute
 # ===========================================================================
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-: "${SYSTEMS_C:=dexr chime dart}"       # add "dex" for stock DEX
-: "${TREES:=model}"                   # original node formats (stress / fair also work)
-: "${THREADS_C:=40}"                    # label only: the many-client cells use THREADS (params.sh)
-: "${C5_CACHE:=1024}"
-: "${C5_WORKLOADS:=point-uniform range-uniform}"
+: "${TREES:=deep}"
 
-for sys in $SYSTEMS_C; do
-  if [ "$sys" = dart ]; then
-    add_block "c5_dart" dart stress 2 "CACHES=$C5_CACHE" "WORKLOADS=$C5_WORKLOADS"
-    add_block "c5_dart_upd" dart stress 1 "CACHES=$C5_CACHE" "WORKLOADS=point-uniform" "UPDATE_PCT=100"
-    continue
-  fi
-  for tree in $TREES; do
-    for cl in "$THREADS_C" 1; do
-      extra=(); [ "$cl" = 1 ] && extra=("${IDLE_ENV[@]}" "@min=5")
-      add_block "c5_${sys}_${tree}_c${cl}" "$sys" "$tree" \
-        "$(count_cells "$C5_CACHE" "0 2" "$C5_WORKLOADS")" \
-        "CACHES=$C5_CACHE" "MEMTHREADS=0 2" "WORKLOADS=$C5_WORKLOADS" ${extra[@]+"${extra[@]}"}
-      add_block "c5_${sys}_${tree}_c${cl}_upd" "$sys" "$tree" 2 \
-        "CACHES=$C5_CACHE" "MEMTHREADS=0 2" "WORKLOADS=point-uniform" "UPDATE_PCT=100" \
-        ${extra[@]+"${extra[@]}"}
-    done
+for tree in $TREES; do
+  for c in $(two_caches dexr "$tree"); do
+    add_block "c5_dexr_${tree}_c${c}_ins" dexr "$tree" 2 "INSERT_PCT=100" \
+      "CACHES=$c" "MEMTHREADS=0 2" "WORKLOADS=point-uniform"
+    add_block "c5_dexr_${tree}_c${c}_ins_1client" dexr "$tree" 2 "INSERT_PCT=100" "${IDLE_ENV[@]}" \
+      "CACHES=$c" "MEMTHREADS=0 1" "WORKLOADS=point-uniform" "@min=3"
+    add_block "c5_chime_${tree}_c${c}_ins" chime "$tree" 1 "INSERT_PCT=100" \
+      "CACHES=$c" "MEMTHREADS=0" "WORKLOADS=point-uniform"
+    add_block "c5_chime_${tree}_c${c}_ins_1client" chime "$tree" 1 "INSERT_PCT=100" "${IDLE_ENV[@]}" \
+      "CACHES=$c" "MEMTHREADS=0" "WORKLOADS=point-uniform" "@min=3"
   done
 done
 

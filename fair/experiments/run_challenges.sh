@@ -1,17 +1,15 @@
 #!/bin/bash
 # ===========================================================================
 # run_challenges.sh <memory|compute> -- the one script for both servers: runs
-# every challenge experiment (c1..c6, c2b) back to back, in the same order on
+# every challenge experiment (c1..c8) back to back, in the same order on
 # both sides. Start the memory side first or in either order:
 #
 #   server 8:  bash fair/experiments/run_challenges.sh memory  2>&1 | tee ~/ch_memory.out
 #   server 6:  bash fair/experiments/run_challenges.sh compute 2>&1 | tee ~/ch_compute.out
 #
 # Both servers must use the SAME variables:
-#   CHALLENGES  which, in order (default: c1 c2 c2b c3 c4 c5 c6)
-#   SYSTEMS_C   systems inside each challenge (default per script: dexr chime
-#               [dart]); add "dex" for stock DEX
-#   TREES       stress fair (default per script)
+#   CHALLENGES  which, in order (default: c1 c2 c3 c4 c5 c6 c7 c8; c2b on request)
+#   TREES       deep (default: height-10 trees for DEX and CHIME); model also works
 #   DRY_RUN=1   print every plan and time estimate, run nothing
 # Resume after a failure: CHALLENGES="<failed one> <the rest>" SKIP_TO=<block>
 #   (SKIP_TO applies to the first challenge only).
@@ -23,6 +21,8 @@
 #   c4   query type: scan length, updates     (Fig. 4)
 #   c5   same policy, different structures    (Fig. 5)
 #   c6   load and skew                        (Fig. 6)
+#   c7   coherence of mixed paths (inserts)   (Challenge 7, no model)
+#   c8   online decision (phases x policies)  (Challenge 8, no model)
 # DEX-R = DEX with reads pushed from the deepest cached node (writes keep
 # DEX's rule); needs the DEX build from this commit on both servers.
 # ===========================================================================
@@ -30,10 +30,10 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 role="${1:?usage: run_challenges.sh <memory|compute>}"
 case "$role" in compute|memory) ;; *) echo "role must be compute or memory" >&2; exit 1 ;; esac
-: "${CHALLENGES:=c1 c2 c2b c3 c4 c5 c6}"
+: "${CHALLENGES:=c1 c2 c3 c4 c5 c6 c7 c8}"
 declare -A script=([c1]=c1_cores.sh [c2]=c2_cache.sh [c2b]=c2b_chime_keys.sh
                    [c3]=c3_depth_load.sh [c4]=c4_query_type.sh [c5]=c5_structure.sh
-                   [c6]=c6_load_skew.sh)
+                   [c6]=c6_load_skew.sh [c7]=c7_coherence.sh [c8]=c8_online.sh)
 for c in $CHALLENGES; do
   [ -n "${script[$c]:-}" ] || { echo "unknown challenge '$c' (use: ${!script[*]})" >&2; exit 1; }
 done

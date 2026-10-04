@@ -33,6 +33,7 @@ min_per_cell() {   # system tree
     chime:stress)   echo 6 ;;
     chime:fair)     echo 2.5 ;;
     chime:model)    echo 4 ;;
+    chime:deep)     echo 3 ;;     # bulk-built: no insert load
     dart:*)         echo 2 ;;
     *)              echo 3 ;;
   esac
@@ -63,6 +64,15 @@ min_per_cell() {   # system tree
 : "${DEX_MODEL_INNER:=128}"    ; : "${DEX_MODEL_M1:=4}"       # M1: only levels above the bottom one fit
 : "${CHIME_MODEL_INNER:=100}"  ; : "${CHIME_MODEL_M1:=2}"
 : "${DEX_MODEL_WHOLE:=2600}"
+# deep = height-10 trees (TREE_SETUP=deep in params.sh): ~1.25M inner nodes in
+# 9 levels, the bottom one ~83% of them. DEX inner ~440 MB (352 B slots).
+#   INNER 1024 MB  all inner nodes cached (warm; the model's 1 GB point)
+#   M1     128 MB  all but the bottom inner level cached (the model's m = 1)
+#   SMALL    8 MB  the top ~5 levels only (m ~ 3-4)
+: "${DEX_DEEP_INNER:=1024}"   ; : "${DEX_DEEP_M1:=128}"
+: "${CHIME_DEEP_INNER:=1024}" ; : "${CHIME_DEEP_M1:=128}"
+: "${SMALL_MB:=8}"
+two_caches() { echo "$SMALL_MB $(size_of "$1" "$2" INNER)"; }   # system tree -> "8 <warm>"
 # CHIME cache sweeps (MB) per tree, used by c2 and c3. (DEX's sweeps differ
 # between c2, which adds a whole-tree point, and c3, so each script sets its own.)
 : "${C2_CHIME_STRESS:=8 16 32 64 128 192}"
