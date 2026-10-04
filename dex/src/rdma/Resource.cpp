@@ -1,8 +1,17 @@
 #include "Rdma.h"
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 
 bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
                    uint8_t devIndex) {
+  // REV_IB_DEV / REV_IB_PORT / REV_IB_GID pick the RDMA device (by name, e.g.
+  // mlx5_1), its port and the GID index at run time, for a server pair whose
+  // NIC differs from the one compiled in (an InfiniBand port instead of RoCE).
+  // Unset: the compiled-in choice, exactly as before.
+  const char *want_dev = getenv("REV_IB_DEV");
+  if (const char *e = getenv("REV_IB_PORT")) port = (uint8_t)atoi(e);
+  if (const char *e = getenv("REV_IB_GID")) gidIndex = atoi(e);
 
   ibv_device *dev = NULL;
   ibv_context *ctx = NULL;
@@ -26,7 +35,8 @@ bool createContext(RdmaContext *context, uint8_t port, int gidIndex,
 
   for (int i = 0; i < devicesNum; ++i) {
     // printf("Device %d: %s\n", i, ibv_get_device_name(deviceList[i]));
-    if (ibv_get_device_name(deviceList[i])[5] == '0') {
+    const char *dev_name = ibv_get_device_name(deviceList[i]);
+    if (want_dev ? strcmp(dev_name, want_dev) == 0 : (dev_name[5] == '0')) {
       // if (ibv_get_device_name(deviceList[i]) == "mlx5_1") {
       //      printf("Device %d: %s\n", i, ibv_get_device_name(deviceList[i]));
       devIndex = i;
