@@ -19,17 +19,25 @@
 #               so 3600 MB does not hold it; 5200 MB does (run e1: 0 reads)
 #   dists     uniform, then Zipf 0.99
 #
-#   For each workload, stock then DEX-R, uniform first:
+#   Order: lookups and scans first (both rules, uniform then Zipf, then their
+#   whole-tree cells), and the 50/50 mix last, so lookups and scans are complete
+#   before the mix starts.
 #   block (RUN_ID)            workload        cells
+#   part 1, lookups and scans                                          ~15.0 h
 #   dxt_point_uniform         lookups, stock  8 caches x 6 thread counts = 48   ~1.9 h
 #   dxtr_point_uniform        lookups, DEX-R  7 caches x 5 thread counts = 35   ~1.4 h
 #   dxt_range_uniform         scans, stock    48                                ~2.3 h
 #   dxtr_range_uniform        scans, DEX-R    35                                ~1.7 h
+#   dxt_point_zipf ... dxtr_range_zipf        the same four for Zipf 0.99       ~7.3 h
+#   dxt_whole_tree            lookups and scans, 5200 MB, Base only    4        ~0.3 h
+#   part 2, the 50/50 mix (PAll)                                       ~7.7 h
 #   dxt_mixed_uniform         50/50, stock    48                                ~2.2 h
 #   dxtr_mixed_uniform        50/50, DEX-R    35                                ~1.6 h
-#   ... the same six blocks for Zipf 0.99                                       ~11.1 h
-#   dxt_whole_tree            all six, 5200 MB, Base only (see below)  6        ~0.5 h
+#   dxt_mixed_zipf            50/50, stock    48                                ~2.2 h
+#   dxtr_mixed_zipf           50/50, DEX-R    35                                ~1.6 h
+#   dxt_whole_mixed           50/50, 5200 MB, Base only                2        ~0.2 h
 #   504 cells, ~22.6 h (uniform only: 252 cells, ~11.3 h)
+#   MIXED=0 leaves part 2 out (~15.0 h); MIXED=only runs part 2 alone.
 #
 # DEX-R leaves out two settings that are identical to stock: 0 memory threads
 # (with no threads DEX-R pulls exactly as Base does) and 2600 MB (every inner
@@ -57,6 +65,7 @@
 # Trim or resume (same values on both servers):
 #   DISTS=uniform           only the uniform blocks and their whole-tree cells (~11.3 h)
 #   RULES=stock             stock DEX only (~13.3 h); RULES=deepest: DEX-R only (~9.3 h)
+#   MIXED=0 / MIXED=only    leave out the 50/50 mix / run only the mix
 #   SKIP_TO=<block>         resume from a block after a failure
 #   OPS_M=10                10 M measured operations instead of 30 M (~1/3 faster)
 #   DRY_RUN=1               print the plan only
@@ -78,32 +87,42 @@ T=stress
 : "${DXT_OPS_M:=${OPS_M:-30}}"
 COMMON=("THREADS=$DXT_THREADS" "OPS_M=$DXT_OPS_M" "WARMUP_M=10" "DEX_SAFE_PT=1" "REV_PARK_CMP_DIRS=1")
 
-whole_wl=""
-for d in $DISTS; do
-  for op in point range mixed; do
-    wl="${op}-${d}"
-    # minutes per cell: scans and the mix are slower at small caches
-    case $op in point) m=2.4 ;; range) m=2.9 ;; mixed) m=2.7 ;; esac
-    if [[ " $RULES " == *" stock "* ]]; then
-      n=$(count_cells "$DXT_CACHES" "$DXT_MEMTHREADS" "$wl")
-      add_block "dxt_${op}_${d}" dex $T "$n" "CACHES=$DXT_CACHES" "MEMTHREADS=$DXT_MEMTHREADS" \
-        "WORKLOADS=$wl" "${COMMON[@]}" "@min=$m"
-    fi
-    if [[ " $RULES " == *" deepest "* ]]; then
-      n=$(count_cells "$DXTR_CACHES" "$DXTR_MEMTHREADS" "$wl")
-      add_block "dxtr_${op}_${d}" dexr $T "$n" "CACHES=$DXTR_CACHES" "MEMTHREADS=$DXTR_MEMTHREADS" \
-        "WORKLOADS=$wl" "${COMMON[@]}" "@min=$m"
-    fi
-    whole_wl="$whole_wl $wl"
+add_rules() {   # op dist minutes-per-cell: the stock block, then the DEX-R block
+  local op=$1 d=$2 m=$3 wl="$1-$2" n
+  if [[ " $RULES " == *" stock "* ]]; then
+    n=$(count_cells "$DXT_CACHES" "$DXT_MEMTHREADS" "$wl")
+    add_block "dxt_${op}_${d}" dex $T "$n" "CACHES=$DXT_CACHES" "MEMTHREADS=$DXT_MEMTHREADS"       "WORKLOADS=$wl" "${COMMON[@]}" "@min=$m"
+  fi
+  if [[ " $RULES " == *" deepest "* ]]; then
+    n=$(count_cells "$DXTR_CACHES" "$DXTR_MEMTHREADS" "$wl")
+    add_block "dxtr_${op}_${d}" dexr $T "$n" "CACHES=$DXTR_CACHES" "MEMTHREADS=$DXTR_MEMTHREADS"       "WORKLOADS=$wl" "${COMMON[@]}" "@min=$m"
+  fi
+}
+add_whole() {  # block-id workloads: Base at the whole-tree cache (stock rule only)
+  [[ " $RULES " == *" stock "* ]] || return 0
+  [ -n "$2" ] || return 0
+  local n; n=$(count_cells "$WHOLE_MB" "$WHOLE_MEMTHREADS" "$2")
+  add_block "$1" dex $T "$n" "CACHES=$WHOLE_MB" "MEMTHREADS=$WHOLE_MEMTHREADS"     "WORKLOADS=$2" "THREADS=$DXT_THREADS" "OPS_M=$DXT_OPS_M" "WARMUP_M=$WHOLE_WARMUP_M"     "DEX_SAFE_PT=1" "REV_PARK_CMP_DIRS=1" "@min=5"
+}
+
+# minutes per cell: scans and the mix are slower at small caches
+: "${MIXED:=1}"
+if [ "$MIXED" != only ]; then          # part 1: lookups and scans
+  pr=""
+  for d in $DISTS; do
+    add_rules point "$d" 2.4
+    add_rules range "$d" 2.9
+    pr="$pr point-$d range-$d"
   done
-done
-whole_wl="${whole_wl# }"
-[[ " $RULES " == *" stock "* ]] || whole_wl=""   # whole tree is Base: runs with the stock rule
-if [ -n "$whole_wl" ]; then
-n=$(count_cells "$WHOLE_MB" "$WHOLE_MEMTHREADS" "$whole_wl")
-add_block dxt_whole_tree dex $T "$n" "CACHES=$WHOLE_MB" "MEMTHREADS=$WHOLE_MEMTHREADS" \
-  "WORKLOADS=$whole_wl" "THREADS=$DXT_THREADS" "OPS_M=$DXT_OPS_M" "WARMUP_M=$WHOLE_WARMUP_M" \
-  "DEX_SAFE_PT=1" "REV_PARK_CMP_DIRS=1" "@min=5"
+  add_whole dxt_whole_tree "${pr# }"
+fi
+if [ "$MIXED" != 0 ]; then             # part 2: the 50/50 mix, last
+  mx=""
+  for d in $DISTS; do
+    add_rules mixed "$d" 2.7
+    mx="$mx mixed-$d"
+  done
+  add_whole dxt_whole_mixed "${mx# }"
 fi
 
 apply_skip; show_plan
