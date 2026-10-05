@@ -10,7 +10,9 @@ cell's compute log for mean latency and, in the 50/50 mix, the lookup and scan
 latencies separately. Writes fair/results/dxt_sweep_all.csv, one row per cell:
 
     rule           stock (DEX's bottom-four-level rule) or deepest (DEX-R)
-    variant        Base (0 memory threads), PLk / PSc / PAll (push)
+    variant        Base (0 memory threads), PLk / PSc (push on a miss), Mix
+                   (the 50/50 workload with push on a miss); PAll means push
+                   everything and is not a block of this sweep
     inner_share    share of the inner nodes the cache can hold
                    (3,846,104 inner nodes x 512 B = 1,878 MiB; capped at 1)
 """
@@ -27,9 +29,11 @@ TREE_MIB = 3756.0
 
 
 def variant(wl, mt):
+    # PAll means push everything (every operation to the memory node); the
+    # 50/50 mix with push on a miss is not PAll, it is "Mix".
     if int(mt) == 0:
         return "Base"
-    return {"point": "PLk", "range": "PSc", "mixed": "PAll"}[wl.split("-")[0]]
+    return {"point": "PLk", "range": "PSc", "mixed": "Mix"}[wl.split("-")[0]]
 
 
 SEC = re.compile(r"^\[(LOOKUP|RANGE|ALL OPS)\]")
