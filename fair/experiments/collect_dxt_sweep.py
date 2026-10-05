@@ -4,11 +4,12 @@ collect_dxt_sweep.py -- merge the run_dxt_sweep.sh blocks into one CSV.
 
     python3 fair/experiments/collect_dxt_sweep.py
 
-Reads fair/results/dxt_*/dex/dex_compute.csv (and dex_memory.csv when the
+Reads fair/results/dxt_*/ and dxtr_*/dex/dex_compute.csv (and dex_memory.csv when the
 memory server's results have been copied or pushed next to them), plus each
 cell's compute log for mean latency and, in the 50/50 mix, the lookup and scan
 latencies separately. Writes fair/results/dxt_sweep_all.csv, one row per cell:
 
+    rule           stock (DEX's bottom-four-level rule) or deepest (DEX-R)
     variant        Base (0 memory threads), PLk / PSc / PAll (push)
     inner_share    share of the inner nodes the cache can hold
                    (3,846,104 inner nodes x 512 B = 1,878 MiB; capped at 1)
@@ -56,8 +57,9 @@ def log_latency(path):
 
 def main():
     rows = []
-    for comp in sorted(glob.glob(os.path.join(RES, "dxt_*", "dex", "dex_compute.csv"))):
+    for comp in sorted(glob.glob(os.path.join(RES, "dxt*_*", "dex", "dex_compute.csv"))):
         block = comp.split(os.sep)[-3]
+        rule = "deepest" if block.startswith("dxtr_") else "stock"
         mem = {}
         mpath = os.path.join(os.path.dirname(comp), "dex_memory.csv")
         if os.path.exists(mpath):
@@ -70,7 +72,7 @@ def main():
             cache = float(c)
             row = {
                 "block": block, "workload": wl, "op": wl.split("-")[0], "dist": r["dist"],
-                "cache_mb": c, "memthreads": mt, "variant": variant(wl, mt),
+                "cache_mb": c, "memthreads": mt, "rule": rule, "variant": variant(wl, mt),
                 "inner_share": round(min(1.0, cache / INNER_MIB), 4),
                 "whole_tree_fits": "yes" if cache >= 1.3 * TREE_MIB else "no",
                 "tput_mops": r["tput_mops"], "p99_us": r["p99_us"],
@@ -96,7 +98,7 @@ def main():
     print(f"wrote {OUT}: {len(rows)} cells")
     # quick look: Base against push, uniform lookups and scans
     for op in ("point", "range", "mixed"):
-        sel = [x for x in rows if x["op"] == op and x["dist"] == "uniform"]
+        sel = [x for x in rows if x["op"] == op and x["dist"] == "uniform" and x["rule"] == "stock"]
         if not sel:
             continue
         print(f"\n{op}-uniform  Mops by cache (MB) and memory threads")
