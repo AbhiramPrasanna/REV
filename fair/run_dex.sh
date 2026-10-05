@@ -87,7 +87,11 @@ for mt in $MEMTHREADS; do
     # UPDATE_PCT / INSERT_PCT (default 0): point workloads become
     # (100-U-I)% lookups + U% updates + I% inserts of fresh keys
     upd=0; ins=0
-    if [ "$(wl_op "$wl")" = point ]; then
+    # mixed-<dist> (for PAll): (100-MIX_SCAN_PCT)% lookups + MIX_SCAN_PCT% scans
+    # in one run (default 50/50), so lookups and scans are pushed together.
+    if [[ "$wl" == mixed-* ]]; then
+      rg=${MIX_SCAN_PCT:-50}; r=$((100 - rg))
+    elif [ "$(wl_op "$wl")" = point ]; then
       upd=${UPDATE_PCT:-0}; ins=${INSERT_PCT:-0}; r=$((100 - upd - ins)); rg=0
     else r=0; rg=100; fi
     if [ "$(wl_dist "$wl")" = uniform ]; then uni=1; else uni=0; fi
