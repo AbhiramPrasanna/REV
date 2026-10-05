@@ -71,14 +71,17 @@ def main():
                 mem[(r["workload"], r["cache_mb"], r["memthreads"])] = r
         for r in csv.DictReader(open(comp)):
             wl, c, mt = r["workload"], r["cache_mb"], r["memthreads"]
-            lat = log_latency(r["log"])
+            logp = r["log"]
+            if not os.path.exists(logp):   # results copied from the server: use the local copy
+                logp = os.path.join(os.path.dirname(comp), os.path.basename(logp))
+            lat = log_latency(logp)
             m = mem.get((wl, c, mt), {})
             cache = float(c)
             row = {
                 "block": block, "workload": wl, "op": wl.split("-")[0], "dist": r["dist"],
                 "cache_mb": c, "memthreads": mt, "rule": rule, "variant": variant(wl, mt),
                 "inner_share": round(min(1.0, cache / INNER_MIB), 4),
-                "whole_tree_fits": "yes" if cache >= 1.3 * TREE_MIB else "no",
+                "whole_tree_fits": "yes" if cache >= TREE_MIB else "no",
                 "tput_mops": r["tput_mops"], "p99_us": r["p99_us"],
                 "mean_us": lat.get("ALL OPS", (0, "NA", "NA"))[1],
                 "reads_per_op": r["rdma_read_per_op"], "requests_per_op": r["rpc_per_op"],
