@@ -10,7 +10,8 @@
 #             DEX-R (DEX_PUSH_READS_DEEPEST=1): push from the deepest cached node,
 #             nothing pulled first; at 8 MB this is the near pure push point
 #   variants  Base = 0 memory threads; push = 1 2 4 8 16 memory threads
-#             PLk on point lookups, PSc on 100-key scans, PAll on a 50/50 mix
+#             PLk on point lookups, PSc on 100-key scans, and a 50/50 mix of
+#             the two ("Mix"; PAll means push everything, not this mix)
 #   caches    8 32 64 128 256 512 1024 2600 MB, and 5200 MB (whole tree)
 #             - the inner nodes need 1,969 MB (3,846,104 x 512 B), so 1800 MB
 #               does not hold them; 2600 MB does (run e1: 0.6 reads/lookup,
@@ -30,7 +31,7 @@
 #   dxtr_range_uniform        scans, DEX-R    35                                ~1.7 h
 #   dxt_point_zipf ... dxtr_range_zipf        the same four for Zipf 0.99       ~7.3 h
 #   dxt_whole_tree            lookups and scans, 5200 MB, Base only    4        ~0.3 h
-#   part 2, the 50/50 mix (PAll)                                       ~7.7 h
+#   part 2, the 50/50 mix                                       ~7.7 h
 #   dxt_mixed_uniform         50/50, stock    48                                ~2.2 h
 #   dxtr_mixed_uniform        50/50, DEX-R    35                                ~1.6 h
 #   dxt_mixed_zipf            50/50, stock    48                                ~2.2 h

@@ -1923,6 +1923,9 @@ public:
       } else {
         cache.record_node_hit(dsm_->getMyThreadID());
       }
+      if (cache.level_stats_on())
+        cache.record_level(dsm_->getMyThreadID(), inner->level - 1,
+                           cur_node != nullptr);
 
       // IO flag has been inserted into the page table
       // But the operation is not finished
@@ -2082,6 +2085,9 @@ public:
       } else {
         cache.record_node_hit(dsm_->getMyThreadID());
       }
+      if (cache.level_stats_on())
+        cache.record_level(dsm_->getMyThreadID(), inner->level - 1,
+                           cur_node != nullptr);
 
       // IO flag has been inserted into the page table
       // But the operation is not finished
@@ -2723,6 +2729,21 @@ public:
   double get_rpc_ratio() { return cache.get_rpc_ratio(); }
 
   uint64_t get_cache_writeback() { return cache.rdma_write; }
+
+  // DEX_LEVEL_STATS=1: per-level hit and miss counts of the measured window.
+  void print_level_stats(int node_id) {
+    if (!cache.level_stats_on())
+      return;
+    printf("\n----- PER-LEVEL CACHE HITS [node %d] (level 0 = leaf) -----\n", node_id);
+    for (int l = 0; l < cache.kStatLevels; ++l) {
+      uint64_t h = cache.level_hits(l), m = cache.level_misses(l);
+      if (h + m == 0)
+        continue;
+      printf("[LEVEL] level=%d hits=%lu misses=%lu hit_rate=%.4f\n", l,
+             (unsigned long)h, (unsigned long)m,
+             static_cast<double>(h) / static_cast<double>(h + m));
+    }
+  }
 
   // Reset the path-aware cache miss counters so the measured window excludes
   // warmup traffic.  Called right after warmup finishes (see thread_run).
