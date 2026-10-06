@@ -1156,6 +1156,7 @@ int main(int argc, char *argv[]) {
                              tree->get_cache_writeback(),
                              tree->get_node_hit());
 #endif
+      tree->print_level_stats(node_id);   // prints only with DEX_LEVEL_STATS=1
 
       throughput_vec.push_back(total_cluster_tp);
       straggler_throughput_vec.push_back(straggler_cluster_tp);

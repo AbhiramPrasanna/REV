@@ -4,6 +4,7 @@
 /* Here I try to implement the idea of LeanStore and seek opportunies of further
  * optimization*/
 #include <atomic>
+#include <cstdlib>
 #include <list>
 #include <random>
 #include <set>
@@ -75,6 +76,40 @@ public:
   uint64_t full_page_miss_ = 0; // full read miss
   uint64_t rdma_write = 0;
 
+  // Per-level hit/miss, DEX_LEVEL_STATS=1 (read once; default off). Level 0 is
+  // the leaf, level 1 its parent, and so on up the tree. One count per node a
+  // traversal visits, the same visits the counters above count.
+  static constexpr int kStatLevels = 32;
+  uint64_t level_hit_arr_[MAX_APP_THREAD][kStatLevels] = {};
+  uint64_t level_miss_arr_[MAX_APP_THREAD][kStatLevels] = {};
+  static bool level_stats_on() {
+    static const bool on = [] {
+      const char *e = std::getenv("DEX_LEVEL_STATS");
+      return e != nullptr && e[0] == '1';
+    }();
+    return on;
+  }
+  inline void record_level(int tid, int level, bool hit) {
+    if (level < 0 || level >= kStatLevels)
+      return;
+    if (hit)
+      ++level_hit_arr_[tid][level];
+    else
+      ++level_miss_arr_[tid][level];
+  }
+  uint64_t level_hits(int level) const {
+    uint64_t s = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++i)
+      s += level_hit_arr_[i][level];
+    return s;
+  }
+  uint64_t level_misses(int level) const {
+    uint64_t s = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++i)
+      s += level_miss_arr_[i][level];
+    return s;
+  }
+
   inline void record_node_hit(int tid) { ++node_hit_arr_[tid][0]; }
   inline void record_inner_miss(int tid) { ++inner_miss_arr_[tid][0]; }
   inline void record_leaf_miss(int tid) { ++leaf_miss_arr_[tid][0]; }
@@ -101,6 +136,8 @@ public:
     memset(inner_miss_arr_, 0, sizeof(inner_miss_arr_));
     memset(leaf_miss_arr_, 0, sizeof(leaf_miss_arr_));
     memset(node_hit_arr_, 0, sizeof(node_hit_arr_));
+    memset(level_hit_arr_, 0, sizeof(level_hit_arr_));
+    memset(level_miss_arr_, 0, sizeof(level_miss_arr_));
   }
 
   // Concurrent hash table

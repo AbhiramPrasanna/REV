@@ -43,6 +43,7 @@ public:
   virtual uint64_t get_inner_miss() { return 0; }
   virtual uint64_t get_leaf_miss() { return 0; }
   virtual uint64_t get_node_hit() { return 0; }
+  virtual void print_level_stats(int node_id) {}
   virtual uint64_t get_cache_writeback() { return 0; }
 
   // Do most initialization work here
