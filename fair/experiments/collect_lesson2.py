@@ -15,6 +15,12 @@ adds, from each cell's compute log:
     lookup_found_pct, scan_rows        correctness lines
     inner_hit_pct, leaf_hit_pct        inner nodes against leaves ([KIND], CHIME_LEVEL_STATS=1)
     scan_* columns                     scan leaf hits and reads ([SCANLEAF])
+    lat_mean/p50/p90/p99/p999_us       latency spread over all operations
+    rdma_*_per_op                      round trips, reads, writes, atomics, pushed
+                                       requests, verbs and bytes ([RDMA], CHIME_RDMA_STATS=1)
+    ops_offload_pct, leaves/kv_per_scan_pushdown   pushed work
+    mn_busy_cores, mn_busy_cores_peak  memory server CPU spent on pushed requests,
+                                       from memory.log next to compute.log (server 8)
 and writes fair/results/lesson2_levels.csv: one row per cell and tree level
 ([LEVEL] lines; level 0 = leaf), the same counts DEX's per-level runs give.
 Logs are found by their path relative to fair/results, so results copied from
@@ -85,6 +91,37 @@ def main():
             out["scan_leaf_reads"] = rx(t, r"\[SCANLEAF node \d+\].*?leaf_reads=(\d+)", int)
             out["scan_cn_leaves_per_scan"] = rx(t, r"\[SCANLEAF node \d+\].*?cn_leaves_per_scan=([0-9.]+)")
             out["scan_leaf_hit_pct"] = rx(t, r"\[SCANLEAF node \d+\].*?leaf_hit_pct=([0-9.]+)")
+            # latency spread, all operations ([ALL OPS] ALL row of the reporter)
+            lat = re.search(r"\[ALL OPS\][\s\S]*?\n\s+ALL\s+n=\d+\s+mean=\s*([0-9.]+)us\s+p50=\s*([0-9.]+)us\s+"
+                            r"p90=\s*([0-9.]+)us\s+p99=\s*([0-9.]+)us\s+p99\.9=\s*([0-9.]+)us", t)
+            for k_, i_ in (("lat_mean_us", 1), ("lat_p50_us", 2), ("lat_p90_us", 3),
+                           ("lat_p99_us", 4), ("lat_p999_us", 5)):
+                out[k_] = float(lat.group(i_)) if lat else ""
+            # CHIME_RDMA_STATS=1: what each operation sent over the network
+            for k_, pat in (("rdma_round_trips_per_op", r"per_op: round_trips=([0-9.]+)"),
+                            ("rdma_reads_per_op", r"per_op:.*?reads=([0-9.]+)"),
+                            ("rdma_writes_per_op", r"per_op:.*?writes=([0-9.]+)"),
+                            ("rdma_atomics_per_op", r"per_op:.*?atomics=([0-9.]+)"),
+                            ("rdma_requests_per_op", r"per_op:.*?sends=([0-9.]+)"),
+                            ("rdma_verbs_per_op", r"per_op:.*?verbs=([0-9.]+)"),
+                            ("rdma_bytes_per_op", r"per_op:.*?bytes=([0-9.]+)")):
+                out[k_] = rx(t, r"\[RDMA node \d+\] " + pat)
+            # pushed work (OFFLOADED TASKS block of the reporter)
+            out["ops_offload_pct"] = rx(t, r"ops offload \(rpc\)\s*=\s*\d+ \(([0-9.]+)%\)")
+            out["leaves_per_scan_pushdown"] = rx(t, r"leaves / scan pushdown\s*=\s*([0-9.]+)")
+            out["kv_per_scan_pushdown"] = rx(t, r"kv / scan pushdown\s*=\s*([0-9.]+)")
+            # memory server CPU: the push threads' busy time, from the memory log (server 8)
+            mlog = log[:-len("compute.log")] + "memory.log" if log and log.endswith("compute.log") else None
+            out["mn_busy_cores"], out["mn_busy_cores_peak"], out["mn_log_found"] = "", "", 0
+            if mlog and os.path.exists(mlog):
+                agg = [(float(a), int(b)) for a, b in re.findall(
+                    r"AGGREGATE active = ([0-9.]+)% \(of \d+ dir-threads;[^)]*\)\s+msgs=(\d+)",
+                    open(mlog, errors="replace").read())]
+                busy = [a for a, m in agg if m > 1000]       # reports while requests were arriving
+                out["mn_log_found"] = 1
+                if busy:
+                    out["mn_busy_cores"] = round(sum(busy) / len(busy) / 100.0, 3)
+                    out["mn_busy_cores_peak"] = round(max(busy) / 100.0, 3)
             out["log_found"] = 1 if log else 0
             rows.append(out)
             for lv, h, m in re.findall(r"\[LEVEL\] level=(\d+) hits=(\d+) misses=(\d+)", t):
@@ -110,7 +147,8 @@ def main():
     # quick checks: the binary must have run what the block asked for
     bad = [r for r in rows if r["log_found"] and r["push_ops_cfg"] and r["push_ops"]
            and r["push_ops_cfg"] != r["push_ops"]]
-    split = [r for r in rows if r.get("total_cache_mb") not in ("", "NA") and r.get("inner_cache_mb") not in ("", "NA")
+    num = lambda x: x not in (None, "", "NA")
+    split = [r for r in rows if num(r.get("total_cache_mb")) and num(r.get("inner_cache_mb"))
              and int(r["inner_cache_mb"]) + int(r.get("leaf_cache_mb") or 0) != int(r["total_cache_mb"])]
     print(f"wrote {dst}: {len(rows)} cells from {len({r['block'] for r in rows})} blocks")
     if levels:

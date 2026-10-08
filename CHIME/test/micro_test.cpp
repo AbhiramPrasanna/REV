@@ -436,6 +436,7 @@ void thread_run(int id) {
     g_lk_total.clear();
     g_scan_rows.clear();
     std::fill(need_clear, need_clear + MAX_APP_THREAD, true);
+    rdma_stats_reset();   // CHIME_RDMA_STATS=1: count only the measured phase
     ready = true;
     g_meas_start_ns.store(Timer::get_time_ns());
     warmup_cnt.store(-1);
@@ -830,6 +831,7 @@ int main(int argc, char *argv[]) {
          dsm->getMyNodeID(), (unsigned long)total_ops, meas_s,
          meas_s > 0 ? total_ops / meas_s / 1e6 : 0.0,
          g_time_based ? "time-bounded" : "op-bounded");
+  rdma_stats_print(dsm->getMyNodeID(), total_ops);   // CHIME_RDMA_STATS=1
 
   // All MAX_APP_THREAD slots: stats are indexed by DSM thread id, and main
   // registered first (id 0), so the workers are ids 1..kThreadCount -- reading
