@@ -29,6 +29,10 @@
 constexpr int kQPMaxDepth = 4096;
 constexpr int kInlineDataMax = 220;
 
+// CHIME_RDMA_STATS=1: RDMA verbs counted per thread (src/rdma/Operation.cpp).
+void rdma_stats_reset();                         // zero the counts (start of the measured phase)
+void rdma_stats_print(int node_id, uint64_t ops);  // [RDMA node N] totals and per operation
+
 struct RdmaOpRegion {
   uint64_t source;
   uint64_t dest;

@@ -1,4 +1,65 @@
 #include "Rdma.h"
+#include <atomic>
+#include <cstdio>
+
+// CHIME_RDMA_STATS=1 (off by default): every verb this process posts is counted, per
+// thread, in the function that posts it. A "post" is one ibv_post_send, so a batch
+// of k reads is one post (one round trip) and k reads. Pushed requests go out as
+// sends. rdma_stats_reset() zeroes the counts at the start of the measured phase;
+// rdma_stats_print() prints them, per operation when ops > 0.
+namespace rdmastats {
+struct alignas(64) Slot {
+  uint64_t posts, read_wr, read_bytes, write_wr, write_bytes, atomic_wr, send_wr, send_bytes;
+};
+constexpr int kSlots = 256;
+static Slot slots[kSlots];
+static std::atomic<int> next_slot{0};
+static thread_local int my_slot = -1;
+static inline bool on() {
+  static const bool v = [] { const char *e = getenv("CHIME_RDMA_STATS"); return e != nullptr && e[0] == '1'; }();
+  return v;
+}
+static inline void add(uint64_t rd, uint64_t rdb, uint64_t wr, uint64_t wrb, uint64_t at,
+                       uint64_t snd, uint64_t sndb) {
+  if (!on()) return;
+  if (my_slot < 0) my_slot = next_slot.fetch_add(1) % kSlots;
+  Slot &s = slots[my_slot];
+  s.posts++; s.read_wr += rd; s.read_bytes += rdb; s.write_wr += wr; s.write_bytes += wrb;
+  s.atomic_wr += at; s.send_wr += snd; s.send_bytes += sndb;
+}
+static inline uint64_t batch_bytes(const RdmaOpRegion *ror, int k) {
+  uint64_t b = 0;
+  for (int i = 0; i < k; ++i) b += ror[i].size;
+  return b;
+}
+}  // namespace rdmastats
+
+void rdma_stats_reset() {
+  if (!rdmastats::on()) return;
+  for (auto &s : rdmastats::slots) s = rdmastats::Slot{};
+}
+
+void rdma_stats_print(int node_id, uint64_t ops) {
+  if (!rdmastats::on()) return;
+  rdmastats::Slot t{};
+  for (const auto &s : rdmastats::slots) {
+    t.posts += s.posts; t.read_wr += s.read_wr; t.read_bytes += s.read_bytes;
+    t.write_wr += s.write_wr; t.write_bytes += s.write_bytes; t.atomic_wr += s.atomic_wr;
+    t.send_wr += s.send_wr; t.send_bytes += s.send_bytes;
+  }
+  printf("[RDMA node %d] ops=%lu posts=%lu read_wr=%lu read_bytes=%lu write_wr=%lu "
+         "write_bytes=%lu atomic_wr=%lu send_wr=%lu send_bytes=%lu\n", node_id,
+         (unsigned long)ops, (unsigned long)t.posts, (unsigned long)t.read_wr,
+         (unsigned long)t.read_bytes, (unsigned long)t.write_wr, (unsigned long)t.write_bytes,
+         (unsigned long)t.atomic_wr, (unsigned long)t.send_wr, (unsigned long)t.send_bytes);
+  if (ops == 0) return;
+  const double o = (double)ops;
+  printf("[RDMA node %d] per_op: round_trips=%.4f reads=%.4f writes=%.4f atomics=%.4f "
+         "sends=%.4f verbs=%.4f bytes=%.1f\n", node_id, t.posts / o, t.read_wr / o,
+         t.write_wr / o, t.atomic_wr / o, t.send_wr / o,
+         (t.read_wr + t.write_wr + t.atomic_wr + t.send_wr) / o,
+         (t.read_bytes + t.write_bytes + t.send_bytes) / o);
+}
 
 #include<vector>
 
@@ -74,6 +135,7 @@ static inline void fillSgeWr(ibv_sge &sg, ibv_recv_wr &wr, uint64_t source,
 bool rdmaSend(ibv_qp *qp, uint64_t source, uint64_t size, uint32_t lkey,
               ibv_ah *ah, uint32_t remoteQPN /* remote dct_number */,
               bool isSignaled) {
+  rdmastats::add(0, 0, 0, 0, 0, 1, size);
 
   struct ibv_sge sg;
   struct ibv_send_wr wr;
@@ -99,6 +161,7 @@ bool rdmaSend(ibv_qp *qp, uint64_t source, uint64_t size, uint32_t lkey,
 // for RC & UC
 bool rdmaSend(ibv_qp *qp, uint64_t source, uint64_t size, uint32_t lkey,
               int32_t imm) {
+  rdmastats::add(0, 0, 0, 0, 0, 1, size);
 
   struct ibv_sge sg;
   struct ibv_send_wr wr;
@@ -159,6 +222,7 @@ bool rdmaReceive(ibv_srq *srq, uint64_t source, uint64_t size, uint32_t lkey) {
 // for RC & UC
 bool rdmaRead(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t size,
               uint32_t lkey, uint32_t remoteRKey, bool signal, uint64_t wrID) {
+  rdmastats::add(1, size, 0, 0, 0, 0, 0);
   struct ibv_sge sg;
   struct ibv_send_wr wr;
   struct ibv_send_wr *wrBad;
@@ -187,6 +251,7 @@ bool rdmaRead(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t size,
 bool rdmaWrite(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t size,
                uint32_t lkey, uint32_t remoteRKey, int32_t imm, bool isSignaled,
                uint64_t wrID) {
+  rdmastats::add(0, 0, 1, size, 0, 0, 0);
 
   struct ibv_sge sg;
   struct ibv_send_wr wr;
@@ -223,6 +288,7 @@ bool rdmaWrite(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t size,
 // RC & UC
 bool rdmaFetchAndAdd(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t add,
                      uint32_t lkey, uint32_t remoteRKey) {
+  rdmastats::add(0, 0, 0, 0, 1, 0, 0);
   struct ibv_sge sg;
   struct ibv_send_wr wr;
   struct ibv_send_wr *wrBad;
@@ -250,6 +316,7 @@ bool rdmaFetchAndAdd(ibv_qp *qp, uint64_t source, uint64_t dest, uint64_t add,
 bool rdmaFetchAndAddBoundary(ibv_qp *qp, uint64_t source, uint64_t dest,
                              uint64_t add, uint32_t lkey, uint32_t remoteRKey,
                              uint64_t boundary, bool singal, uint64_t wr_id) {
+  rdmastats::add(0, 0, 0, 0, 1, 0, 0);
   (void)boundary;
   struct ibv_sge sg;
   struct ibv_send_wr wr;
@@ -279,6 +346,7 @@ bool rdmaFetchAndAddBoundary(ibv_qp *qp, uint64_t source, uint64_t dest,
 bool rdmaCompareAndSwap(ibv_qp *qp, uint64_t source, uint64_t dest,
                         uint64_t compare, uint64_t swap, uint32_t lkey,
                         uint32_t remoteRKey, bool signal, uint64_t wrID) {
+  rdmastats::add(0, 0, 0, 0, 1, 0, 0);
   struct ibv_sge sg;
   struct ibv_send_wr wr;
   struct ibv_send_wr *wrBad;
@@ -313,6 +381,7 @@ bool rdmaCompareAndSwap(ibv_qp *qp, uint64_t source, uint64_t dest,
 bool rdmaCompareAndSwapMask(ibv_qp *qp, uint64_t source, uint64_t dest,
                             uint64_t compare, uint64_t swap, uint32_t lkey,
                             uint32_t remoteRKey, uint64_t compare_mask, uint64_t swap_mask, bool singal, uint64_t wrID) {
+  rdmastats::add(0, 0, 0, 0, 1, 0, 0);
   (void)compare_mask;
   (void)swap_mask;
   struct ibv_sge sg;
@@ -342,6 +411,7 @@ bool rdmaCompareAndSwapMask(ibv_qp *qp, uint64_t source, uint64_t dest,
 
 bool rdmaReadBatch(ibv_qp *qp, RdmaOpRegion *ror, int k, bool isSignaled,
                    uint64_t wrID) {
+  rdmastats::add(k, rdmastats::batch_bytes(ror, k), 0, 0, 0, 0, 0);
   std::vector<ibv_sge> sg(k);
   std::vector<ibv_send_wr> wr(k);
   struct ibv_send_wr *wrBad;
@@ -373,6 +443,7 @@ bool rdmaReadBatch(ibv_qp *qp, RdmaOpRegion *ror, int k, bool isSignaled,
 
 bool rdmaWriteBatch(ibv_qp *qp, RdmaOpRegion *ror, int k, bool isSignaled,
                     uint64_t wrID) {
+  rdmastats::add(0, 0, k, rdmastats::batch_bytes(ror, k), 0, 0, 0);
   std::vector<ibv_sge> sg(k);
   std::vector<ibv_send_wr> wr(k);
   struct ibv_send_wr *wrBad;
@@ -407,6 +478,7 @@ bool rdmaWriteBatch(ibv_qp *qp, RdmaOpRegion *ror, int k, bool isSignaled,
 bool rdmaCasRead(ibv_qp *qp, const RdmaOpRegion &cas_ror,
                  const RdmaOpRegion &read_ror, uint64_t compare, uint64_t swap,
                  bool isSignaled, uint64_t wrID) {
+  rdmastats::add(1, read_ror.size, 0, 0, 1, 0, 0);
 
   struct ibv_sge sg[2];
   struct ibv_send_wr wr[2];
@@ -441,6 +513,7 @@ bool rdmaCasRead(ibv_qp *qp, const RdmaOpRegion &cas_ror,
 bool rdmaReadCas(ibv_qp *qp, const RdmaOpRegion &read_ror,
                  const RdmaOpRegion &cas_ror, uint64_t compare, uint64_t swap,
                  bool isSignaled, uint64_t wrID) {
+  rdmastats::add(1, read_ror.size, 0, 0, 1, 0, 0);
 
   struct ibv_sge sg[2];
   struct ibv_send_wr wr[2];
@@ -475,6 +548,7 @@ bool rdmaReadCas(ibv_qp *qp, const RdmaOpRegion &read_ror,
 bool rdmaCasWrite(ibv_qp *qp, const RdmaOpRegion &cas_ror,
                   const RdmaOpRegion &write_ror, uint64_t compare, uint64_t swap,
                   bool isSignaled, uint64_t wrID) {
+  rdmastats::add(0, 0, 1, write_ror.size, 1, 0, 0);
 
   struct ibv_sge sg[2];
   struct ibv_send_wr wr[2];
@@ -509,6 +583,7 @@ bool rdmaCasWrite(ibv_qp *qp, const RdmaOpRegion &cas_ror,
 bool rdmaWriteFaa(ibv_qp *qp, const RdmaOpRegion &write_ror,
                   const RdmaOpRegion &faa_ror, uint64_t add_val,
                   bool isSignaled, uint64_t wrID) {
+  rdmastats::add(0, 0, 1, write_ror.size, 1, 0, 0);
 
   struct ibv_sge sg[2];
   struct ibv_send_wr wr[2];
@@ -542,6 +617,7 @@ bool rdmaWriteFaa(ibv_qp *qp, const RdmaOpRegion &write_ror,
 bool rdmaWriteCas(ibv_qp *qp, const RdmaOpRegion &write_ror,
                   const RdmaOpRegion &cas_ror, uint64_t compare, uint64_t swap,
                   bool isSignaled, uint64_t wrID) {
+  rdmastats::add(0, 0, 1, write_ror.size, 1, 0, 0);
 
   struct ibv_sge sg[2];
   struct ibv_send_wr wr[2];

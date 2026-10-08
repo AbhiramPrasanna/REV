@@ -34,6 +34,7 @@ enum RequestType : int {
 // node instead of a one-sided leaf read. Set by the benchmark app; default 100.
 extern int g_offload_rate;
 extern int g_offload_min_level;  // cache-boundary level below which we DON'T offload
+void chime_print_level_stats(int node_id);   // CHIME_LEVEL_STATS=1: per-level cache hits
 #endif
 
 #ifdef CACHE_LEAF_NODE
