@@ -563,6 +563,9 @@ int main(int argc, char *argv[]) {
            "(CHIME_SCAN_FROM_CACHE / CHIME_SCAN_OFFLOAD_ALWAYS)\n",
            dsm->getMyNodeID(), (int)flag("CHIME_SCAN_FROM_CACHE"),
            (int)flag("CHIME_SCAN_OFFLOAD_ALWAYS"));
+    const char *po = getenv("CHIME_PUSH_OPS");
+    printf("[CONFIG node %d] push ops: %s (CHIME_PUSH_OPS; applies only with offloading on)\n",
+           dsm->getMyNodeID(), (po && *po) ? po : "both");
   }
   if (g_time_based && !g_run_clients)
     printf("[CONFIG node %d] WARNING: time-bounded mode with no clients here\n",
@@ -869,6 +872,7 @@ int main(int argc, char *argv[]) {
   // above ran right after warmup, so its numbers describe the cache fill, not the
   // run). This is the [LEAFCACHE] line the sweep scripts parse.
   tree->leaf_cache_statistics();
+  chime_print_level_stats(dsm->getMyNodeID());   // prints only with CHIME_LEVEL_STATS=1
 
   printf("[END]\n");
   dsm->barrier("fin");

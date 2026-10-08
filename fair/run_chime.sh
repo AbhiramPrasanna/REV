@@ -60,6 +60,7 @@ else
   echo "CHIME setup ($TREE_SETUP): ${CHIME_INTERNAL_SPAN}/${CHIME_LEAF_SPAN}-entry inner/leaf nodes, keys inserted $( [ "$CHIME_SORTED_LOAD" = 1 ] && echo sorted || echo shuffled ) (stock load)"
 fi
 echo "  hotspot buffer + speculative read: $( [ "$CHIME_HOTSPOT" = 0 ] && echo "off (CHIME_HOTSPOT=0)" || echo "stock (on above 50 MB)" )"
+echo "  push ops: ${CHIME_PUSH_OPS:-both} (CHIME_PUSH_OPS) | scans pushed: $( [ "$CHIME_SCAN_OFFLOAD_ALWAYS" = 1 ] && echo always || echo "on a cache miss") | leaf cache arms: $CHIME_LEAF_SET, leaf share ${LEAF_CACHE_MB:+${LEAF_CACHE_MB} MB}${LEAF_CACHE_MB:-${LEAF_CACHE_PCT:-50}%} (scan admit ${LEAF_ADMIT_SCAN:-1.0})"
 echo "  each cell prints '>> tree:' (levels, inner and leaf nodes and MB) and '>> result:'"
 pin_report
 

@@ -111,10 +111,13 @@ workload_args() {
     point-zipf)    echo "$R $I $U 0   0 $ZIPF_THETA  $BULK $WARMUP $POINT_OP" ;;
     range-uniform) echo "0 0 0 100   1 0            $BULK $WARMUP $RANGE_OP" ;;
     range-zipf)    echo "0 0 0 100   0 $ZIPF_THETA  $BULK $WARMUP $RANGE_OP" ;;
+    # MIX_SCAN_PCT (default 50) of the operations are scans, the rest lookups
+    mixed-uniform) echo "$((100 - ${MIX_SCAN_PCT:-50})) 0 0 ${MIX_SCAN_PCT:-50}   1 0            $BULK $WARMUP $POINT_OP" ;;
+    mixed-zipf)    echo "$((100 - ${MIX_SCAN_PCT:-50})) 0 0 ${MIX_SCAN_PCT:-50}   0 $ZIPF_THETA  $BULK $WARMUP $POINT_OP" ;;
     *) echo "unknown WORKLOAD=$WORKLOAD" >&2; exit 1 ;;
   esac
 }
-needs_scan_range() { [[ "$WORKLOAD" == range-* ]]; }
+needs_scan_range() { [[ "$WORKLOAD" == range-* || "$WORKLOAD" == mixed-* ]]; }
 
 # Kill anything this user left running from a previous cell, on THIS node.
 #
