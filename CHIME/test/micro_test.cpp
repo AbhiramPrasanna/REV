@@ -436,6 +436,7 @@ void thread_run(int id) {
     g_lk_total.clear();
     g_scan_rows.clear();
     std::fill(need_clear, need_clear + MAX_APP_THREAD, true);
+    rdma_stats_reset();   // CHIME_RDMA_STATS=1: count only the measured phase
     ready = true;
     g_meas_start_ns.store(Timer::get_time_ns());
     warmup_cnt.store(-1);
@@ -563,6 +564,9 @@ int main(int argc, char *argv[]) {
            "(CHIME_SCAN_FROM_CACHE / CHIME_SCAN_OFFLOAD_ALWAYS)\n",
            dsm->getMyNodeID(), (int)flag("CHIME_SCAN_FROM_CACHE"),
            (int)flag("CHIME_SCAN_OFFLOAD_ALWAYS"));
+    const char *po = getenv("CHIME_PUSH_OPS");
+    printf("[CONFIG node %d] push ops: %s (CHIME_PUSH_OPS; applies only with offloading on)\n",
+           dsm->getMyNodeID(), (po && *po) ? po : "both");
   }
   if (g_time_based && !g_run_clients)
     printf("[CONFIG node %d] WARNING: time-bounded mode with no clients here\n",
@@ -827,6 +831,7 @@ int main(int argc, char *argv[]) {
          dsm->getMyNodeID(), (unsigned long)total_ops, meas_s,
          meas_s > 0 ? total_ops / meas_s / 1e6 : 0.0,
          g_time_based ? "time-bounded" : "op-bounded");
+  rdma_stats_print(dsm->getMyNodeID(), total_ops);   // CHIME_RDMA_STATS=1
 
   // All MAX_APP_THREAD slots: stats are indexed by DSM thread id, and main
   // registered first (id 0), so the workers are ids 1..kThreadCount -- reading
@@ -869,6 +874,7 @@ int main(int argc, char *argv[]) {
   // above ran right after warmup, so its numbers describe the cache fill, not the
   // run). This is the [LEAFCACHE] line the sweep scripts parse.
   tree->leaf_cache_statistics();
+  chime_print_level_stats(dsm->getMyNodeID());   // prints only with CHIME_LEVEL_STATS=1
 
   printf("[END]\n");
   dsm->barrier("fin");

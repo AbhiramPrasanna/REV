@@ -59,6 +59,24 @@ static inline bool should_offload(int tid) {
   int slot = ctr++ % 100;
   return slot < g_offload_rate;
 }
+
+// CHIME_PUSH_OPS=lookup|scan|both (default both, the behaviour before this
+// switch): which operations may be pushed while offloading is on. "lookup" keeps
+// every scan one-sided; "scan" keeps every lookup one-sided. Everything else about
+// the rule (miss-gated lookups, CHIME_SCAN_OFFLOAD_ALWAYS, the rate) is unchanged.
+static inline int push_ops_mask() {
+  static const int m = [] {
+    const char *e = getenv("CHIME_PUSH_OPS");
+    if (e == nullptr || *e == 0 || strcmp(e, "both") == 0) return 3;
+    if (strcmp(e, "lookup") == 0) return 1;
+    if (strcmp(e, "scan") == 0) return 2;
+    fprintf(stderr, "CHIME_PUSH_OPS must be lookup|scan|both (got '%s')\n", e);
+    exit(1);
+  }();
+  return m;
+}
+static inline bool push_lookups() { return (push_ops_mask() & 1) != 0; }
+static inline bool push_scans() { return (push_ops_mask() & 2) != 0; }
 #endif
 
 // Index-cache size (MB) as a RUNTIME knob, so a cache sweep needs no rebuild
@@ -117,6 +135,33 @@ PerThread<uint64_t> split_hopscotch;
 uint64_t latency[MAX_APP_THREAD][MAX_CORO_NUM][LATENCY_WINDOWS];
 volatile bool need_stop = false;
 volatile bool need_clear[MAX_APP_THREAD];
+
+// CHIME_LEVEL_STATS=1 (off by default): where the caches answer, by tree level, the
+// same counter DEX has (DEX_LEVEL_STATS). For every application lookup, counted
+// once where the cache boundary is known (Tree::search): the levels above the
+// boundary came from the inner-node cache (hits), the inner levels from the
+// boundary down were fetched or pushed (misses), and the leaf is a hit only when
+// the leaf cache served it. Level 0 is the leaf, as in DEX. Scans count their leaf
+// work separately (cached leaves served, leaves read) and how often their inner
+// path was missing. Lookups a scan issues internally are not counted as lookups.
+namespace lvlstats {
+constexpr int kLevels = 32;
+struct alignas(64) Row {
+  uint64_t hit[kLevels];
+  uint64_t miss[kLevels];
+  uint64_t scans, scan_leaf_hit, scan_leaf_read, scan_inner_miss, scan_inner_partial;
+};
+static Row rows[MAX_APP_THREAD];
+static inline bool on() {
+  static const bool v = [] { const char *e = getenv("CHIME_LEVEL_STATS"); return e != nullptr && e[0] == '1'; }();
+  return v;
+}
+static thread_local bool in_scan = false;
+struct ScanGuard {
+  ScanGuard() { in_scan = true; }
+  ~ScanGuard() { in_scan = false; }
+};
+}  // namespace lvlstats
 
 thread_local std::vector<CoroPush> Tree::workers;
 thread_local CoroQueue Tree::busy_waiting_queue;
@@ -280,6 +325,7 @@ inline void Tree::before_operation(CoroPull* sink) {
     leaf_cache_stale[tid]        = 0;
     leaf_cache_fill[tid]         = 0;
 #endif
+    if (lvlstats::on()) memset(&lvlstats::rows[tid], 0, sizeof(lvlstats::rows[tid]));
     need_clear[tid]              = false;
   }
 }
@@ -1843,6 +1889,8 @@ bool Tree::search(const Key &k, Value &v, CoroPull* sink) {
   GlobalAddress sibling_p;
   uint16_t level;
   int retry_flag = FIRST_TRY;
+  int lvl_boundary = 0;        // CHIME_LEVEL_STATS: level where this lookup's cache path ended
+  uint64_t lvl_leaf_hit0 = 0;  // leaf-cache hits before this lookup
 
   try_read_op[dsm->getMyThreadID()] ++;
 
@@ -1868,6 +1916,12 @@ bool Tree::search(const Key &k, Value &v, CoroPull* sink) {
   record_cache_hit_ratio(from_cache, level);
   assert(level != 0);
   v = define::kValueNull;
+  if (lvlstats::on() && !lvlstats::in_scan) {
+    lvl_boundary = level;
+#ifdef CACHE_LEAF_NODE
+    lvl_leaf_hit0 = leaf_cache_hit[dsm->getMyThreadID()];
+#endif
+  }
 
 #ifdef ENABLE_OFFLOAD
   // Cache-boundary pushdown (DEX-style): `p`/`level` are the deepest node the
@@ -1901,7 +1955,8 @@ bool Tree::search(const Key &k, Value &v, CoroPull* sink) {
 #else
     const bool leaf_cached = false;
 #endif
-    if (!leaf_cached && (int)level >= g_offload_min_level && should_offload(dsm->getMyThreadID())) {
+    if (!leaf_cached && (int)level >= g_offload_min_level && push_lookups() &&
+        should_offload(dsm->getMyThreadID())) {
       Value off_v = define::kValueNull;
       int ret = dsm->rpc_lookup(p, (int)level, k, off_v);
       v = (ret == 1) ? off_v : define::kValueNull;
@@ -1972,6 +2027,17 @@ search_finish:
 #ifdef TREE_ENABLE_READ_DELEGATION
   local_lock_table->release_local_read_lock(k, lock_res, search_res, v);  // handover the ret leaf addr
 #endif
+  if (lvl_boundary > 0) {   // CHIME_LEVEL_STATS (level 1 is the leaf here; printed as level 0)
+    auto &row = lvlstats::rows[dsm->getMyThreadID()];
+    const int top = std::min<int>(std::max<int>(rough_height.load(), lvl_boundary), lvlstats::kLevels);
+    for (int l = lvl_boundary + 1; l <= top; ++l) row.hit[l - 1]++;     // resolved by the cache
+    for (int l = 2; l <= lvl_boundary && l <= lvlstats::kLevels; ++l) row.miss[l - 1]++;  // fetched or pushed
+    bool leaf_hit = false;
+#ifdef CACHE_LEAF_NODE
+    leaf_hit = leaf_cache_hit[dsm->getMyThreadID()] > lvl_leaf_hit0;
+#endif
+    (leaf_hit ? row.hit[0] : row.miss[0])++;
+  }
   return search_res;
 }
 
@@ -2511,8 +2577,10 @@ re_read:
   SHOULD be called with other tree optimizations (e.g., HOPSCOTCH_LEAF_NODE, METADATA_REPLICATION) turned on
 */
 bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret) {  // [from, to)
+  lvlstats::ScanGuard lvl_scan_guard;   // CHIME_LEVEL_STATS: its inner searches are not lookups
   assert(dsm->is_register());
   before_operation(nullptr);
+  if (lvlstats::on()) lvlstats::rows[dsm->getMyThreadID()].scans++;
 
   // The legacy doorbell-batched covered-leaf read is opt-in (CHIME_RANGE_BATCHED=1,
   // for fabrics with full experimental verbs). The default serves covered leaves
@@ -2526,7 +2594,7 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
   // offload only on an inner-cache miss (complete miss or uncovered tail).
   // With offloading off (rate 0, "0 memory threads") this never fires.
   static const bool scan_offload_always = env_flag("CHIME_SCAN_OFFLOAD_ALWAYS");
-  if (scan_offload_always && should_offload(dsm->getMyThreadID())) {
+  if (scan_offload_always && push_scans() && should_offload(dsm->getMyThreadID())) {
     range_query_offload(from, to, ret);
     return true;
   }
@@ -2562,8 +2630,9 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
   // (should_offload == false at rate 0) we never offload. So: complete miss +
   // offload-on -> offload; anything else -> not offloaded.
   if (cache_search_result.empty()) {
+    if (lvlstats::on()) lvlstats::rows[dsm->getMyThreadID()].scan_inner_miss++;
 #ifdef ENABLE_OFFLOAD
-    if (should_offload(dsm->getMyThreadID())) {
+    if (push_scans() && should_offload(dsm->getMyThreadID())) {
       range_query_offload(from, to, ret);
       return true;
     }
@@ -2617,13 +2686,14 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
       if (iv.second > covered) covered = iv.second;  // extend the covered prefix
     }
     if (covered < to) {                              // uncovered tail [covered, to)
+      if (lvlstats::on()) lvlstats::rows[dsm->getMyThreadID()].scan_inner_partial++;
       // Handle the tail the way lookup offloads its uncached tail: if offloading is
       // enabled, push that sub-scan to the memory node (range_query_offload walks
       // the sibling chain locally); otherwise a robust per-key search (safe under an
       // incomplete cache). The COVERED prefix [from, covered) is still served locally
       // by the batched leaf read below.
 #ifdef ENABLE_OFFLOAD
-      if (should_offload(dsm->getMyThreadID())) range_query_offload(covered, to, ret);
+      if (push_scans() && should_offload(dsm->getMyThreadID())) range_query_offload(covered, to, ret);
       else
 #endif
         for (auto k = covered; k < to; k = k + 1) { cache_miss[dsm->getMyThreadID()] ++; search(k, ret[k]); }
@@ -2726,6 +2796,7 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
           const auto& a = probe_addr[base + i];
           if (leaf_guard_unlocked(lock_word) && cur_stamp == probe_ce[base + i]->stamp) {
             leaf_cache_hit[tid] ++;
+            if (lvlstats::on()) lvlstats::rows[tid].scan_leaf_hit++;
             leaf_harvest_range(&probe_ce[base + i]->leaf, clip_lo(a), clip_hi(a), ret);
           } else {
             leaf_cache_stale[tid] ++;
@@ -2743,6 +2814,7 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
       for (size_t base = 0; base < fetch_addr.size(); base += kLeafBatch) {
         const size_t n = std::min((size_t)kLeafBatch, fetch_addr.size() - base);
         leaf_cache_miss[tid] += n;
+        if (lvlstats::on()) lvlstats::rows[tid].scan_leaf_read += n;
         char *gbuf = range_buffer;                                  // 2n guards
         char *raws = range_buffer + 2 * n * define::leafGuardSize;   // n raw leaves
         assert((dsm->get_rbuf(nullptr)).is_safe(raws + n * define::allocationLeafSize));
@@ -2822,6 +2894,7 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
 #endif
 
     for (const auto& leaf_addr : leaf_addrs) {
+      if (lvlstats::on()) lvlstats::rows[dsm->getMyThreadID()].scan_leaf_read++;
       const auto& fence = leaf_fences[leaf_addr];
       const Key l_k = (fence.lowest < from) ? from : fence.lowest;   // clip to [from, to)
       const Key r_k = (fence.highest < to) ? fence.highest : to;
@@ -3590,4 +3663,37 @@ void Tree::clear_debug_info() {
   write_two_segments.clear();
   load_factor_sum.clear();
   split_hopscotch.clear();
+}
+
+
+// CHIME_LEVEL_STATS=1: print the per-level counts of the measured phase.
+void chime_print_level_stats(int node_id) {
+  if (!lvlstats::on()) return;
+  uint64_t hit[lvlstats::kLevels] = {0}, miss[lvlstats::kLevels] = {0};
+  uint64_t sc = 0, slh = 0, slr = 0, sim = 0, sip = 0;
+  for (int t = 0; t < MAX_APP_THREAD; ++t) {
+    const auto &r = lvlstats::rows[t];
+    for (int l = 0; l < lvlstats::kLevels; ++l) { hit[l] += r.hit[l]; miss[l] += r.miss[l]; }
+    sc += r.scans; slh += r.scan_leaf_hit; slr += r.scan_leaf_read;
+    sim += r.scan_inner_miss; sip += r.scan_inner_partial;
+  }
+  if (sc == 0 && hit[0] + miss[0] == 0) return;   // no clients ran here (the memory node)
+  uint64_t ih = 0, im = 0;
+  printf("\n----- PER-LEVEL CACHE HITS [node %d] (lookups; level 0 = leaf) -----\n", node_id);
+  for (int l = 0; l < lvlstats::kLevels; ++l) {
+    if (hit[l] + miss[l] == 0) continue;
+    printf("[LEVEL] level=%d hits=%lu misses=%lu hit_rate=%.4f\n", l, (unsigned long)hit[l],
+           (unsigned long)miss[l], (double)hit[l] / (double)(hit[l] + miss[l]));
+    if (l > 0) { ih += hit[l]; im += miss[l]; }
+  }
+  const uint64_t lv = hit[0] + miss[0];
+  printf("[KIND node %d] lookups=%lu inner_visits=%lu inner_hits=%lu inner_hit_pct=%.2f "
+         "leaf_visits=%lu leaf_hits=%lu leaf_hit_pct=%.2f\n", node_id, (unsigned long)lv,
+         (unsigned long)(ih + im), (unsigned long)ih, (ih + im) ? 100.0 * ih / (ih + im) : 0.0,
+         (unsigned long)lv, (unsigned long)hit[0], lv ? 100.0 * hit[0] / lv : 0.0);
+  if (sc)
+    printf("[SCANLEAF node %d] scans=%lu inner_complete_miss=%lu inner_partial=%lu "
+           "leaf_cache_hits=%lu leaf_reads=%lu cn_leaves_per_scan=%.2f leaf_hit_pct=%.2f\n",
+           node_id, (unsigned long)sc, (unsigned long)sim, (unsigned long)sip, (unsigned long)slh,
+           (unsigned long)slr, (double)(slh + slr) / sc, (slh + slr) ? 100.0 * slh / (slh + slr) : 0.0);
 }

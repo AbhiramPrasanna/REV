@@ -88,8 +88,8 @@ role="${1:?usage: run_leaf_cache.sh <memory|compute> [workload] [off|on] [0|1]}"
 # Run the memory node first for each cell, then the compute node.
 if [ $# -ge 2 ]; then
   case "$2" in
-    point-uniform|point-zipf|range-uniform|range-zipf) WORKLOADS="$2" ;;
-    *) echo "workload must be point-uniform|point-zipf|range-uniform|range-zipf (got '$2')" >&2; exit 1 ;;
+    point-uniform|point-zipf|range-uniform|range-zipf|mixed-uniform|mixed-zipf) WORKLOADS="$2" ;;
+    *) echo "workload must be point-|range-|mixed-uniform or -zipf (got '$2')" >&2; exit 1 ;;
   esac
 fi
 if [ $# -ge 3 ]; then
