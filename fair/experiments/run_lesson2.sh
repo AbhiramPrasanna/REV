@@ -17,6 +17,9 @@
 #       stock CHIME (inner nodes only) and CHIME-2P (leaf cache), each with
 #       0 (push off), 1, 2, 4, 8 and 16 memory server threads, plus stock CHIME
 #       as shipped (hotspot buffer on, push off); lookups and scans, uniform and Zipf
+#   e6  the leaf cache against CHIME as shipped (hotspot buffer on), lookups:
+#       leaf share {0,50%} x push {off,on} x cache {128..1024} x {uniform,zipf}
+#       (run after the rest: PARTS=e6)
 #   e5  how much skew does a leaf cache need?                (Zipf lookups)
 #       theta {0.5,0.8,1.2} (0.99 is in e1) x leaf share {0,50%} x push {off,on}
 #
@@ -61,7 +64,7 @@
 #                        set them from e1 and e2 if you run e4 in a second pass
 #   L2_TAG=l2smoke       block-name prefix; a smoke test with another tag never
 #                        mixes with the real results (the collector reads l2_*)
-#   PUSH_MTS="16"        memory server threads for push ON in e1, e2, e3, e5
+#   PUSH_MTS="16"        memory server threads for push ON in e1, e2, e3, e5, e6
 #                        (e4 always sweeps 1 2 4 8 16); "1 2 4 8 16" widens them
 #
 # After the run, push the logs of BOTH servers (the memory server's logs hold the
@@ -91,6 +94,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 : "${E4_SCAN_ALWAYS:=1}"
 : "${E5_CACHES:=64 256}"
 : "${E5_THETAS:=0.5 0.8 1.2}"
+: "${E6_CACHES:=128 256 512 1024}"
 DISTS="uniform zipf"
 T="$L2_TREE"
 
@@ -162,6 +166,18 @@ if part_on e5; then
     for p in 0 50; do
       blk "${L2_TAG}_e5_${tag}_leaf$p" e5 "theta $th, leaf $p%" "$p" both 0 "$th" "$E5_CACHES" "0 $PUSH_MTS" point-zipf 2.6
     done
+  done
+fi
+
+# ---- e6: the leaf cache against CHIME as shipped (hotspot buffer on) -----------
+# The same split as e1, but with CHIME's hotspot buffer and speculative read ON in
+# both arms, as in the August leaf-cache study (+40% for Zipf lookups there). With
+# the buffer on, a lookup costs about 11 us instead of 5 at the same one round trip
+# (buffer upkeep, and the buffer takes 30 MB of any cache above 50 MB). This tells
+# whether a cached leaf pays against that slower baseline on this tree.
+if part_on e6; then
+  for p in 0 50; do
+    blk "${L2_TAG}_e6_hot_leaf$p" e6 "hotspot on, leaf $p%" "$p" both 0 0.99 "$E6_CACHES" "0 $PUSH_MTS" "$(wls point)" 2.8 "CHIME_HOTSPOT=1"
   done
 fi
 

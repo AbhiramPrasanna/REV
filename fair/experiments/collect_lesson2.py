@@ -85,6 +85,7 @@ def main():
             out["leaf_rtt_per_lookup"] = rx(t, r"est\. leaf round trips/lookup=([0-9.]+)")
             out["push_ops_cfg"] = rx(t, r"push ops: (\w+)", str)
             out["scan_always_cfg"] = rx(t, r"offload_always=(\d)", int)
+            out["hotspot_cfg"] = rx(t, r"hotspot buffer \+ speculative read: (on|off)", str)
             out["remote_per_op"] = rx(t, r"remote ops / op\s*=\s*([0-9.]+)")
             out["lookup_pushdowns"] = rx(t, r"lookup pushdowns\s*=\s*(\d+)", int)
             out["scan_pushdowns"] = rx(t, r"scan\s+pushdowns \(RPC\)\s*=\s*(\d+)", int)
