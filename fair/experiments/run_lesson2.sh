@@ -26,7 +26,7 @@
 #            the same split without push, i.e. what freeing the space costs if
 #            the uncached levels are pulled instead.
 #
-# Parts (PARTS="a b c d e", all by default):
+# Parts (PARTS="a b c d e f", all by default):
 #   a  lookups: shipped | stock | 2p, threads 0..16, caches 8..1024     (252 cells)
 #   b  ablation, lookups, 16 threads: 2p with the network check kept (owner
 #      off) and 2p found by address only (by key off): what each piece adds (12)
@@ -37,6 +37,9 @@
 #   e  tree shapes: the bulk-built tree at 14 children per inner node (about 7
 #      levels) and 3 (about 15 levels); the 6-children tree (10 levels) is part
 #      a. shipped | stock pull | stock push | 2p push, caches 32 128 512  (44)
+#   f  how small the inner cache should be, lookups, 16 threads: CHIME-2P with
+#      16, 64 and 128 MB of inner nodes (rest leaves) at 128, 256 and 512 MB;
+#      part a gives the 32 MB point and the all-inner end (stock + push)  (16)
 #
 # Tree: TREE_SETUP=deep (bulk built, 6.25M leaves, 10 levels at 6 children,
 # 1.25M inner nodes, ~162 MB of them in CHIME's cache), 50M keys, 10M warmup +
@@ -77,7 +80,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 : "${L2_TAG:=l2b}"                       # l2_ = the earlier plan's runs (other build)
 : "${L2_TREE:=deep}"
-: "${PARTS:=a b c d e}"
+: "${PARTS:=a b c d e f}"
 : "${L2_THREADS:=36}"                    # client threads on the compute server, everywhere
 : "${L2_OPS_M:=30}"
 : "${L2_WARMUP_M:=10}"
@@ -90,11 +93,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 : "${SHAPE_CACHES:=32 128 512}"
 : "${SHAPE_FANOUTS:=14 3}"
 : "${ABL_CACHES:=64 256 1024}"
+: "${F_CACHES:=128 256 512}"
+: "${F_INNERS:=16 64 128}"            # part a gives the 32 MB point
 : "${INNER_MAX_MB:=32}"                  # 2p: inner cache = min(this, cache / 2)
 : "${ADMIT_PUSH:=0.1}"
 if [ "${SMOKE:-0}" = 1 ]; then
   L2_OPS_M=3; L2_WARMUP_M=2; MTS="0 16"; CACHES="32 256"; SHIP_CACHES="256"
   SCAN_CACHES="32"; MIX_CACHES="128"; SHAPE_CACHES="128"; SHAPE_FANOUTS="14"; ABL_CACHES="256"
+  F_CACHES="256"; F_INNERS="64"
 fi
 DISTS="uniform zipf"
 T="$L2_TREE"
@@ -171,6 +177,23 @@ if part_on e; then
     [ -n "$ship_cs" ] && blk ${L2_TAG}_e_f${f}_shipped e "fanout $f: CHIME as shipped" 0 both 0 "${ship_cs# }" 0 "$(wls point)" 2.8 "${SHIPPED[@]}" "${fo[@]}"
     blk ${L2_TAG}_e_f${f}_stock   e "fanout $f: stock CHIME" 0 both 0 "$SHAPE_CACHES" "0 $PUSH_MT" "$(wls point)" 2.6 "${fo[@]}"
     two_p ${L2_TAG}_e_f${f}_2p    e "fanout $f: CHIME-2P" "$SHAPE_CACHES" "$PUSH_MT" "$(wls point)" 2.6 both 0 "${fo[@]}"
+  done
+fi
+
+# ---- f: how small should the inner cache be? (lookups, push on) ----------------
+# CHIME-2P at a fixed budget with the inner cache at F_INNERS MB and the rest
+# leaves. Read with part a: stock CHIME at the same budget and threads is the
+# "all inner nodes, push only on a miss" end of each curve, and part a's CHIME-2P
+# is the 32 MB point (so 32 is not rerun here).
+if part_on f; then
+  for c in $F_CACHES; do
+    for inner in $F_INNERS; do
+      [ "$inner" -lt "$c" ] || continue
+      lmb=$(( c - inner ))
+      blk "${L2_TAG}_f_c${c}_in${inner}" f "CHIME-2P, ${inner} MB inner + hot leaves" "${lmb}mb" both 0 \
+        "$c" "$PUSH_MT" "$(wls point)" 2.6 "LEAF_CACHE_MB=$lmb" "CHIME_LEAF_BY_KEY=1" \
+        "CHIME_LEAF_OWNER=1" "CHIME_LEAF_ADMIT_PUSH=$ADMIT_PUSH"
+    done
   done
 fi
 
