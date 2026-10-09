@@ -15,6 +15,29 @@
 
 using TreeCacheSkipList = InlineSkipList<TreeCacheEntryComparator>;
 
+// The key range [lo, hi) of the LEAF a lookup was last sent to, as the parent
+// inner node states it (this build's leaves do not carry their own fence keys).
+// Set whenever a cached or freshly read inner node at level 1 picks a leaf child;
+// the leaf cache's key index (CHIME_LEAF_BY_KEY) reads it when it caches that
+// leaf. One per thread: operations do not interleave on a thread in micro_test.
+struct LeafRangeHint {
+  GlobalAddress leaf;
+  Key lo, hi;
+};
+inline thread_local LeafRangeHint g_leaf_range_hint;
+
+inline void note_leaf_child(const InternalNode *node, int idx, const GlobalAddress &child) {
+  // idx = -1 for the leftmost child, else the record whose pointer was taken
+  if (node->metadata.level != 1) return;
+  const auto &fk = node->metadata.fence_keys;
+  const auto &r = node->records;
+  auto &h = g_leaf_range_hint;
+  h.leaf = child;
+  h.lo = idx < 0 ? fk.lowest : r[idx].key;
+  h.hi = (idx + 1 >= (int)define::internalSpanSize || r[idx + 1].key == define::kkeyNull)
+             ? fk.highest : r[idx + 1].key;
+}
+
 class TreeCache {
 
 public:
@@ -166,6 +189,7 @@ inline const TreeCacheEntry *TreeCache::search_from_cache(const Key &k, GlobalAd
     if (k < records[0].key) {
       addr = node->metadata.leftmost_ptr;
       sibling_addr = records[0].ptr;  // cached nodes are kv-ordered
+      note_leaf_child(node, -1, addr);
     }
     else {
       bool find = false;
@@ -174,12 +198,14 @@ inline const TreeCacheEntry *TreeCache::search_from_cache(const Key &k, GlobalAd
           find = true;
           addr = records[i - 1].ptr;
           sibling_addr = (records[i].key == define::kkeyNull ? node->metadata.sibling_leftmost_ptr : records[i].ptr);
+          note_leaf_child(node, i - 1, addr);
           break;
         }
       }
       if (!find) {
         addr = records[define::internalSpanSize - 1].ptr;
         sibling_addr = node->metadata.sibling_leftmost_ptr;
+        note_leaf_child(node, define::internalSpanSize - 1, addr);
       }
     }
     level = node->metadata.level;

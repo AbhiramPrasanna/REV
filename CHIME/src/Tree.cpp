@@ -107,6 +107,23 @@ PerThread<uint64_t> leaf_cache_hit;  // served from a cached image
 PerThread<uint64_t> leaf_cache_miss;  // not resident -> remote read
 PerThread<uint64_t> leaf_cache_stale;  // resident but validation failed
 PerThread<uint64_t> leaf_cache_fill;  // images published
+PerThread<uint64_t> leaf_key_hit;     // CHIME_LEAF_BY_KEY: answered by key, no inner node
+PerThread<uint64_t> leaf_push_admit;  // CHIME_LEAF_ADMIT_PUSH: leaves read after a push
+
+// CHIME_LEAF_OWNER: the leaves this thread's current write operation has locked.
+// Each gets owner_write_begin at lock time and owner_write_end when the operation
+// returns (OwnerWriteScope). One list per thread: micro_test runs one operation
+// per thread at a time (no coroutines), and lock_node refuses a coroutine.
+static thread_local std::vector<GlobalAddress> owner_locked;
+struct OwnerWriteScope {
+  LeafCache *lc;
+  explicit OwnerWriteScope(LeafCache *lc) : lc(lc) {}
+  ~OwnerWriteScope() {
+    if (lc && leafcache::owner())
+      for (const auto &a : owner_locked) lc->owner_write_end(a);
+    owner_locked.clear();
+  }
+};
 #endif
 
 PerThread<double> cache_miss;
@@ -222,6 +239,13 @@ Tree::Tree(DSM *dsm, uint16_t tree_id, bool init_root) : dsm(dsm), tree_id(tree_
 #ifdef CACHE_LEAF_NODE
   leaf_cache = (leafcache::enabled() && g_leaf_cache_mb > 0)
                    ? new LeafCache(g_leaf_cache_mb) : nullptr;
+#if (defined ENABLE_OFFLOAD && !defined ENABLE_VAR_LEN_KV)
+  if (leafcache::owner() && pushw::enabled()) {
+    fprintf(stderr, "CHIME_LEAF_OWNER=1 cannot run with CHIME_PUSH_WRITES: the memory node "
+                    "would write leaves this node serves without a check\n");
+    exit(1);
+  }
+#endif
 #endif
 
   root_ptr_ptr = get_root_ptr_ptr();
@@ -324,6 +348,8 @@ inline void Tree::before_operation(CoroPull* sink) {
     leaf_cache_miss[tid]         = 0;
     leaf_cache_stale[tid]        = 0;
     leaf_cache_fill[tid]         = 0;
+    leaf_key_hit[tid]            = 0;
+    leaf_push_admit[tid]         = 0;
 #endif
     if (lvlstats::on()) memset(&lvlstats::rows[tid], 0, sizeof(lvlstats::rows[tid]));
     need_clear[tid]              = false;
@@ -418,6 +444,16 @@ re_acquire:
     //    the next probe anyway; dropping it here saves this node a guaranteed-stale
     //    probe on a leaf it is itself rewriting.
     if (leaf_cache) leaf_cache->invalidate(node_addr);
+    // 3. CHIME_LEAF_OWNER: no other node checks this leaf, so this node's own
+    //    images must not outlive the write (see LeafCache::owner_write_begin).
+    if (leaf_cache && leafcache::owner()) {
+      if (sink != nullptr) {
+        fprintf(stderr, "CHIME_LEAF_OWNER=1 needs one operation per thread at a time (no coroutines)\n");
+        abort();
+      }
+      leaf_cache->owner_write_begin(node_addr);
+      owner_locked.push_back(node_addr);
+    }
   }
 #endif
   return;
@@ -443,6 +479,9 @@ void Tree::unlock_node(const GlobalAddress &node_addr, uint64_t* lock_buffer, bo
 void Tree::insert(const Key &k, Value v, CoroPull* sink) {
   assert(dsm->is_register());
   before_operation(sink);
+#ifdef CACHE_LEAF_NODE
+  OwnerWriteScope owner_scope(leaf_cache);   // CHIME_LEAF_OWNER; a no-op otherwise
+#endif
 
   // handover
   bool write_handover = false;
@@ -613,17 +652,20 @@ re_read:
   if (k < records[0].key) {
     node_addr = node->metadata.leftmost_ptr;
     sibling_addr = node->records[0].ptr;
+    note_leaf_child(node, -1, node_addr);   // CHIME_LEAF_BY_KEY: the leaf's key range
     return true;
   }
   for (int i = 1; i < (int)define::internalSpanSize; ++ i) {
     if (k < records[i].key || records[i].key == define::kkeyNull) {
       node_addr = records[i - 1].ptr;
       sibling_addr = (records[i].key == define::kkeyNull ? node->metadata.sibling_leftmost_ptr : records[i].ptr);
+      note_leaf_child(node, i - 1, node_addr);
       return true;
     }
   }
   node_addr = records[define::internalSpanSize - 1].ptr;
   sibling_addr = node->metadata.sibling_leftmost_ptr;
+  note_leaf_child(node, define::internalSpanSize - 1, node_addr);
   return true;
 }
 
@@ -1635,6 +1677,9 @@ void Tree::node_write_and_unlock(NODE* node, const GlobalAddress& node_addr, uin
 void Tree::update(const Key &k, Value v, CoroPull* sink) {
   assert(dsm->is_register());
   before_operation(sink);
+#ifdef CACHE_LEAF_NODE
+  OwnerWriteScope owner_scope(leaf_cache);   // CHIME_LEAF_OWNER; a no-op otherwise
+#endif
 
   // handover
   bool write_handover = false;
@@ -1905,6 +1950,31 @@ bool Tree::search(const Key &k, Value &v, CoroPull* sink) {
     goto search_finish;
   }
 
+#ifdef CACHE_LEAF_NODE
+  // CHIME_LEAF_BY_KEY=1: look for the key in the cached leaves before touching any
+  // inner node, so a hot key is answered even when the inner nodes above its leaf
+  // are not cached (they are pushed instead). With CHIME_LEAF_OWNER=1 the image is
+  // served as is (0 round trips); otherwise it is checked like any cached leaf.
+  if (leaf_cache && leafcache::by_key()) {
+    const int tid = dsm->getMyThreadID();
+    Value kv = define::kValueNull;
+    const LeafCacheEntry *ce = leaf_cache->find_by_key(k, kv);
+    if (ce) {
+      const GlobalAddress la = ce->leaf_addr;
+      if (leafcache::owner() || leaf_cache_validate(la, ce->stamp, sink)) {
+        leaf_cache_hit[tid] ++;
+        leaf_key_hit[tid] ++;
+        v = kv;
+        search_res = true;
+        if (lvlstats::on() && !lvlstats::in_scan) lvlstats::rows[tid].hit[0]++;   // a leaf hit, no inner visit
+        goto search_finish;
+      }
+      leaf_cache_stale[tid] ++;
+      leaf_cache->invalidate(la);
+    }
+  }
+#endif
+
 #ifdef TREE_ENABLE_CACHE
   cache_entry = tree_cache->search_from_cache(k, p, sibling_p, level);
   if (cache_entry) from_cache = true;
@@ -1958,10 +2028,20 @@ bool Tree::search(const Key &k, Value &v, CoroPull* sink) {
     if (!leaf_cached && (int)level >= g_offload_min_level && push_lookups() &&
         should_offload(dsm->getMyThreadID())) {
       Value off_v = define::kValueNull;
-      int ret = dsm->rpc_lookup(p, (int)level, k, off_v);
+      GlobalAddress push_leaf;
+      uint64_t push_lo = 0, push_hi = 0;
+      int ret = dsm->rpc_lookup(p, (int)level, k, off_v, &push_leaf, &push_lo, &push_hi);
       v = (ret == 1) ? off_v : define::kValueNull;
       search_res = (ret == 1);
       offload_lookup_cnt[dsm->getMyThreadID()] ++;
+#ifdef CACHE_LEAF_NODE
+      // CHIME_LEAF_ADMIT_PUSH: the memory node said which leaf answered; maybe cache it
+      if (leaf_cache && ret == 1 && push_leaf != GlobalAddress::Null() &&
+          leafcache::admit_push_rate() > 0.0 && leafcache::admit(leafcache::admit_push_rate()))
+        leaf_admit_after_push(push_leaf, push_lo, push_hi, sink);
+#else
+      UNUSED(push_lo); UNUSED(push_hi);
+#endif
       goto search_finish;
     }
   }
@@ -2351,6 +2431,31 @@ bool Tree::leaf_read_full(const GlobalAddress& leaf_addr, char *raw_leaf_buffer,
 }
 
 
+// CHIME_LEAF_ADMIT_PUSH: cache the leaf a pushed lookup was answered from. The
+// memory node returned its address and its key range [lo, hi) (from the parent
+// inner node); the leaf is read here with the same seqlock-bracketed read a miss
+// uses (one extra round trip), published, and indexed by key.
+void Tree::leaf_admit_after_push(const GlobalAddress& leaf_addr, uint64_t lo, uint64_t hi,
+                                 CoroPull* sink) {
+  if (leaf_cache->get(leaf_addr) != nullptr) {   // already cached: just index it
+    if (leafcache::by_key()) leaf_cache->index_put(leaf_addr, lo, hi);
+    return;
+  }
+  auto raw_leaf_buffer = (dsm->get_rbuf(sink)).get_leaf_buffer();
+  auto leaf_buffer = (dsm->get_rbuf(sink)).get_leaf_buffer();
+  uint64_t owner_epoch = 0, stamp = 0;
+  bool cacheable = false;
+  const bool owner_clean = !leafcache::owner() || leaf_cache->owner_fill_begin(leaf_addr, owner_epoch);
+  if (!leaf_read_full(leaf_addr, raw_leaf_buffer, leaf_buffer, stamp, cacheable, sink)) return;
+  if (!cacheable || !owner_clean) return;
+  leaf_cache->put(leaf_addr, (LeafNode *)leaf_buffer, stamp);
+  if (leafcache::owner()) leaf_cache->owner_fill_end(leaf_addr, owner_epoch);
+  if (leafcache::by_key()) leaf_cache->index_put(leaf_addr, lo, hi);
+  leaf_push_admit[dsm->getMyThreadID()] ++;
+  leaf_cache_fill[dsm->getMyThreadID()] ++;
+}
+
+
 // Point-probe a decoded leaf image sitting in local memory. Reproduces exactly
 // the validation, turn-right and search semantics of the remote path in
 // leaf_node_search -- the image is the same logical LeafNode, it just did not
@@ -2443,11 +2548,17 @@ bool Tree::leaf_node_search(const GlobalAddress& node_addr, const GlobalAddress&
       }
     }
 #endif
+    // CHIME_LEAF_BY_KEY: the parent's key range for this leaf, if it was noted
+    const bool have_range = leafcache::by_key() && g_leaf_range_hint.leaf == node_addr;
+    const uint64_t range_lo = have_range ? key2int(g_leaf_range_hint.lo) : 0;
+    const uint64_t range_hi = have_range ? key2int(g_leaf_range_hint.hi) : 0;
     const LeafCacheEntry *ce = leaf_cache->get(node_addr);
     if (ce) {
       const uint64_t cached_stamp = ce->stamp;
-      if (leaf_cache_validate(node_addr, cached_stamp, sink)) {
+      // CHIME_LEAF_OWNER=1: this node is the only writer, so no check is needed
+      if (leafcache::owner() || leaf_cache_validate(node_addr, cached_stamp, sink)) {
         leaf_cache_hit[tid] ++;
+        if (have_range) leaf_cache->index_put(node_addr, range_lo, range_hi);
         return leaf_probe_local(&ce->leaf, node_addr, sibling_addr, k, v, from_cache, sink);
       }
       leaf_cache_stale[tid] ++;
@@ -2456,12 +2567,16 @@ bool Tree::leaf_node_search(const GlobalAddress& node_addr, const GlobalAddress&
     leaf_cache_miss[tid] ++;
     uint64_t stamp = 0;
     bool cacheable = false;
+    uint64_t owner_epoch = 0;   // CHIME_LEAF_OWNER: read before the leaf, checked after the publish
+    const bool owner_clean = !leafcache::owner() || leaf_cache->owner_fill_begin(node_addr, owner_epoch);
     if (leaf_read_full(node_addr, raw_leaf_buffer, leaf_buffer, stamp, cacheable, sink)) {
       // Point-path admission is a SEPARATE rate from the scan path's, and
       // defaults to 1.0. These fills are what produced the +40% on point-zipf,
       // so throttling scans must not touch them.
-      if (cacheable && leafcache::admit(leafcache::admit_point_rate())) {
+      if (cacheable && owner_clean && leafcache::admit(leafcache::admit_point_rate())) {
         leaf_cache->put(node_addr, leaf, stamp);
+        if (leafcache::owner()) leaf_cache->owner_fill_end(node_addr, owner_epoch);
+        if (have_range) leaf_cache->index_put(node_addr, range_lo, range_hi);
         leaf_cache_fill[tid] ++;
       }
       return leaf_probe_local(leaf, node_addr, sibling_addr, k, v, from_cache, sink);
@@ -2858,7 +2973,7 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
             read_leaf_retry[tid] ++;
             uint64_t s2 = 0; bool c2 = false;
             if (leaf_read_full(a, raw, leaf_buffer, s2, c2, nullptr)) {
-              if (c2 && leafcache::admit(leafcache::admit_scan_rate())) {
+              if (c2 && !leafcache::owner() && leafcache::admit(leafcache::admit_scan_rate())) {
                 leaf_cache->put(a, leaf, s2);
                 leaf_cache_fill[tid] ++;
               }
@@ -2882,7 +2997,9 @@ bool Tree::range_query(const Key &from, const Key &to, std::map<Key, Value> &ret
           // insert costs a ~480 B entry allocation + memcpy + LFU bookkeeping.
           // Default rate is 1.0 (admit everything = previous behaviour); lower
           // CHIME_LEAF_ADMIT_SCAN to stop paying for single-use leaves.
-          if (cacheable && leafcache::admit(leafcache::admit_scan_rate())) {
+          // CHIME_LEAF_OWNER: scans do not publish (their fills skip the owner
+          // protocol); point lookups and pushed-lookup admission fill the cache.
+          if (cacheable && !leafcache::owner() && leafcache::admit(leafcache::admit_scan_rate())) {
             leaf_cache->put(a, leaf, stamp_pre);
             leaf_cache_fill[tid] ++;
           }
@@ -3625,6 +3742,13 @@ void Tree::leaf_cache_statistics() {
       stale += leaf_cache_stale[i]; fill += leaf_cache_fill[i];
     }
     leaf_cache->statistics(hit, miss, stale, fill);
+    if (leafcache::by_key() || leafcache::owner() || leafcache::admit_push_rate() > 0.0) {
+      uint64_t kh = 0, pa = 0;
+      for (int i = 0; i < MAX_APP_THREAD; ++ i) { kh += leaf_key_hit[i]; pa += leaf_push_admit[i]; }
+      printf("[LEAFKEY] by_key=%d owner=%d admit_push=%.2f key_hits=%lu push_admits=%lu\n",
+             (int)leafcache::by_key(), (int)leafcache::owner(), leafcache::admit_push_rate(),
+             (unsigned long)kh, (unsigned long)pa);
+    }
   } else if (leafcache::enabled()) {
     printf("[LEAFCACHE] hit=0 miss=0 stale=0 hit_pct=0.000 resident=0 capacity=0"
            " budget_mb=0   (enabled but budget is 0 MB)\n");
@@ -3640,6 +3764,8 @@ void Tree::clear_debug_info() {
   leaf_cache_miss.clear();
   leaf_cache_stale.clear();
   leaf_cache_fill.clear();
+  leaf_key_hit.clear();
+  leaf_push_admit.clear();
 #endif
   cache_miss.clear();
   cache_hit.clear();

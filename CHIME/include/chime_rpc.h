@@ -115,9 +115,10 @@ inline bool read_internal_local(char *dsm_base, GlobalAddress addr,
 // rightward on split, so forward walking suffices. Mirrors leaf_node_search's
 // full-record scan (Tree.cpp:1893) + turn-right (Tree.cpp:1861/1906).
 //
-// Returns 1 and sets `v_out` if found; 2 if not found.
+// Returns 1 and sets `v_out` if found; 2 if not found. `found_at` (optional) gets
+// the leaf that held the key, and `turned` whether a sibling had to be followed.
 inline int lookup(char *dsm_base, GlobalAddress leaf_addr, const Key &k,
-                  Value &v_out) {
+                  Value &v_out, GlobalAddress *found_at = nullptr, bool *turned = nullptr) {
   static thread_local LeafScratch s;
   GlobalAddress addr = leaf_addr;
   for (int hops = 0; hops < 8; ++hops) {
@@ -131,6 +132,8 @@ inline int lookup(char *dsm_base, GlobalAddress leaf_addr, const Key &k,
       if (e.key == define::kkeyNull) continue;
       if (e.key == k) {
         v_out = e.value;
+        if (found_at) *found_at = addr;
+        if (turned) *turned = (hops > 0);
         return 1;
       }
       if (max_key < e.key) max_key = e.key;
@@ -153,11 +156,29 @@ inline int lookup(char *dsm_base, GlobalAddress leaf_addr, const Key &k,
 // misses are served by the MN, mirroring DEX. Faithfully replays
 // Tree::internal_node_search (Tree.cpp:387) then probes the leaf via lookup().
 // Returns 1 (found, v_out set) or 2 (not found).
+// Optional `leaf_out` / `lo_out` / `hi_out`: the leaf that answered and its key
+// range [lo, hi) as its parent states it, when this walk read that parent and the
+// key was in the leaf the parent named (Null leaf otherwise). The compute node
+// uses them to cache hot leaves (CHIME_LEAF_ADMIT_PUSH).
 inline int lookup_from(char *dsm_base, GlobalAddress node_addr, int level,
-                       const Key &k, Value &v_out) {
+                       const Key &k, Value &v_out, GlobalAddress *leaf_out = nullptr,
+                       uint64_t *lo_out = nullptr, uint64_t *hi_out = nullptr) {
   static thread_local InternalScratch is;
+  bool have_range = false;
+  uint64_t r_lo = 0, r_hi = 0;
+  if (leaf_out) *leaf_out = GlobalAddress::Null();
   for (int hops = 0; hops < 64; ++hops) {   // bounded descent (height + turn-rights)
-    if (level <= 1) return lookup(dsm_base, node_addr, k, v_out);  // leaf probe
+    if (level <= 1) {                        // leaf probe
+      GlobalAddress at;
+      bool turned = false;
+      int r = lookup(dsm_base, node_addr, k, v_out, &at, &turned);
+      if (r == 1 && have_range && !turned && leaf_out) {
+        *leaf_out = at;
+        if (lo_out) *lo_out = r_lo;
+        if (hi_out) *hi_out = r_hi;
+      }
+      return r;
+    }
 
     InternalNode *node = nullptr;
     for (int spin = 0; !read_internal_local(dsm_base, node_addr, is, node); ++spin)
@@ -181,18 +202,26 @@ inline int lookup_from(char *dsm_base, GlobalAddress node_addr, int level,
                 return a.key < b.key;
               });
 #endif
+    // the child's key range, kept only when the child is a leaf (level 1 parent)
+    Key c_lo = fk.lowest, c_hi = fk.highest;
     if (k < records[0].key) {
       node_addr = node->metadata.leftmost_ptr;
+      c_hi = records[0].key;
     } else {
       GlobalAddress child = records[define::internalSpanSize - 1].ptr;
+      c_lo = records[define::internalSpanSize - 1].key;
       for (int i = 1; i < (int)define::internalSpanSize; ++i) {
         if (k < records[i].key || records[i].key == define::kkeyNull) {
           child = records[i - 1].ptr;
+          c_lo = records[i - 1].key;
+          if (records[i].key != define::kkeyNull) c_hi = records[i].key;
           break;
         }
       }
       node_addr = child;
     }
+    have_range = (level == 1);
+    if (have_range) { r_lo = key2int(c_lo); r_hi = key2int(c_hi); }
   }
   return 2;
 }

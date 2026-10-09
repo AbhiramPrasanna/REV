@@ -3,12 +3,16 @@
 
     python3 fair/experiments/collect_lesson2.py
 
-Reads fair/results/l2_manifest.csv (what each block ran) and every
-fair/results/l2_*/chime/sweep_mt<k>/summary_compute.csv (one row per cell), and
+    L2_TAG=l2b python3 fair/experiments/collect_lesson2.py   (l2b = the default)
+
+Reads fair/results/<tag>_manifest.csv (what each block ran) and every
+fair/results/<tag>_*/chime/sweep_mt<k>/summary_compute.csv (one row per cell), and
 adds, from each cell's compute log:
     index_hit_pct      index-cache hit rate        ([READPATH] line)
     leaf_rtt_per_lookup estimated leaf round trips per lookup ([READPATH])
     push_ops_cfg       CHIME_PUSH_OPS as the binary saw it ([CONFIG] line)
+    leaf_by_key_cfg, leaf_owner_cfg, leaf_admit_push_cfg   e7 switches ([CONFIG] line)
+    leaf_key_hits, leaf_push_admits   lookups answered by key, leaves cached after a push ([LEAFKEY])
     scan_always_cfg    CHIME_SCAN_OFFLOAD_ALWAYS as the binary saw it
     remote_per_op      network operations per operation (reporter, if printed)
     lookup_pushdowns, scan_pushdowns   pushed operations (reporter, if printed)
@@ -32,6 +36,7 @@ import os
 import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+TAG = os.environ.get("L2_TAG", "l2b")   # run_lesson2.sh's block prefix
 RES = os.path.join(os.path.dirname(HERE), "results")
 
 
@@ -54,7 +59,7 @@ def local_log(path):
 
 def main():
     man = {}
-    mf = os.path.join(RES, "l2_manifest.csv")
+    mf = os.path.join(RES, TAG + "_manifest.csv")
     if os.path.exists(mf):
         # arm names may hold commas (written unquoted by the first runs): the first two
         # and the last seven fields are fixed, the arm is whatever lies between
@@ -67,7 +72,7 @@ def main():
             r.update(dict(zip(cols, f[-7:])))
             man[r["block"]] = r
     rows, levels = [], []
-    for csvf in sorted(glob.glob(os.path.join(RES, "l2_*", "chime", "sweep_mt*", "summary_compute.csv"))):
+    for csvf in sorted(glob.glob(os.path.join(RES, TAG + "_*", "chime", "sweep_mt*", "summary_compute.csv"))):
         parts = csvf.replace("\\", "/").split("/")
         block = parts[-4]
         mt = int(re.search(r"sweep_mt(\d+)", parts[-2]).group(1))
@@ -86,6 +91,16 @@ def main():
             out["push_ops_cfg"] = rx(t, r"push ops: (\w+)", str)
             out["scan_always_cfg"] = rx(t, r"offload_always=(\d)", int)
             out["hotspot_cfg"] = rx(t, r"hotspot buffer \+ speculative read: (on|off)", str)
+            # tree shape (part e sweeps the bulk build's children per inner node)
+            out["inner_fanout_cfg"] = rx(t, r"bottom-up build, \d+ keys per leaf, (\d+) children", int)
+            out["tree_height"] = rx(t, r"\[TREE\] height=(\d+)", int)
+            out["tree_inner_nodes"] = rx(t, r"\[TREE\].*?inner_nodes=(\d+)", int)
+            # e7: corrected leaf cache (CHIME_LEAF_BY_KEY / _OWNER / _ADMIT_PUSH)
+            out["leaf_by_key_cfg"] = rx(t, r"leaf cache by key=(\d)", int)
+            out["leaf_owner_cfg"] = rx(t, r"leaf cache by key=\d owner=(\d)", int)
+            out["leaf_admit_push_cfg"] = rx(t, r"leaf cache by key=\d owner=\d admit_push=([0-9.]+)")
+            out["leaf_key_hits"] = rx(t, r"\[LEAFKEY\].*?key_hits=(\d+)", int)
+            out["leaf_push_admits"] = rx(t, r"\[LEAFKEY\].*?push_admits=(\d+)", int)
             out["remote_per_op"] = rx(t, r"remote ops / op\s*=\s*([0-9.]+)")
             out["lookup_pushdowns"] = rx(t, r"lookup pushdowns\s*=\s*(\d+)", int)
             out["scan_pushdowns"] = rx(t, r"scan\s+pushdowns \(RPC\)\s*=\s*(\d+)", int)
@@ -144,7 +159,7 @@ def main():
                                "cache_mb": r.get("cache_mb", ""), "level": int(lv), "hits": h,
                                "misses": m, "hit_pct": round(100.0 * h / max(1, h + m), 3)})
     if not rows:
-        print("no l2_* results under", RES)
+        print("no %s_* results under" % TAG, RES)
         return
     keys = []
     for r in rows:

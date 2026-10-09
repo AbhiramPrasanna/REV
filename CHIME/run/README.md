@@ -23,9 +23,13 @@ Run CHIME's offload benchmark across your two RDMA machines and get **throughput
 | script | study |
 |---|---|
 | `run_memory.sh` / `run_compute.sh` | the plain offload off/on A/B (this README) |
-| `run_cache_stress.sh` | cache 64/32/16 MB × offload — see [`../EXPERIMENTS_cache_stress.md`](../EXPERIMENTS_cache_stress.md) |
-| `run_span_sweep.sh` | inner-node fanout sweep |
-| **`run_leaf_cache.sh`** | **leaf-node caching off/on × cache × offload — see [`../LEAFCACHE.md`](../LEAFCACHE.md)** |
+| **`run_leaf_cache.sh`** | **leaf-node caching off/on × cache × offload — see [`../LEAFCACHE.md`](../LEAFCACHE.md)**; `fair/run_chime.sh` drives it |
+
+The older CHIME studies (`run_cache_stress.sh`, `run_dex_cache_sweep.sh`,
+`run_leaf_study.sh`, `run_span_sweep.sh`, `run_stress_sweep.sh`) were removed on
+2026-10-08: the Lesson 2 sweep, `fair/experiments/run_lesson2.sh`, replaces them.
+`git log --diff-filter=D --name-only -- CHIME/run` finds the commit; `git show
+<commit>^:CHIME/run/<script>` brings one back.
 
 ## 0. Configure the RDMA NIC (run ON each server, once, then rebuild)
 
