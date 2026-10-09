@@ -387,3 +387,17 @@ Two sanity checks before believing any of it:
 tree these **must be identical** for `CACHE_LEAF=0` and `CACHE_LEAF=1`, with
 offload off and on. A mismatch means the cached-image path returned different
 results from the remote path — treat it as a bug, not as noise.
+
+## Hot leaves without their inner nodes (2026-10-08, all off by default)
+
+Three runtime switches turn the leaf cache into the one CHIME-2P uses in the
+Lesson 2 sweep (`fair/experiments/run_lesson2.sh`):
+
+| switch | what it does |
+|---|---|
+| `CHIME_LEAF_BY_KEY=1` | a lookup looks for its key in the cached leaves first, through a key index of hints (`[lo, hi)` from the parent inner node, `CHIME_LEAF_KEY_GRANULE` keys per index run). A hit must find the key in the cached image, so a stale hint only costs a miss. The inner cache can then shrink to the top levels and the rest of the budget holds hot leaves. Uses the whole leaf budget (no power-of-two rounding); the index is charged to it. |
+| `CHIME_LEAF_OWNER=1` | the compute node is the only writer of the leaves it caches (one client node, no pushed writes; both are checked at start), so a cached leaf is served with no network check: 0 round trips. Its own writes drop the image when they lock the leaf and again when the operation returns, and a fill that a write overtakes drops what it published (per-slot write epochs). Scans do not publish in this mode. |
+| `CHIME_LEAF_ADMIT_PUSH=r` | a pushed lookup's reply now carries the answering leaf's address and key range; with probability `r` the compute node reads that leaf (one extra round trip) and caches it, so hot leaves keep entering the cache while lookups are pushed. |
+
+`test/leaf_key_index_test.cpp` checks the index and the owner protocol without
+RDMA (`CHIME_LEAF_BY_KEY=1 CHIME_LEAF_OWNER=1 ./leaf_key_index_test`).
