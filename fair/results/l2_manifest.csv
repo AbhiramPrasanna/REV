@@ -1,0 +1,23 @@
+block,part,arm,leaf_pct,push_ops,scan_always,theta,workloads,caches,memthreads
+l2_e1_leaf0,e1,leaf 0%,0,both,0,0.99,point-uniform point-zipf,64 128 256 512 1024,0 16
+l2_e1_leaf25,e1,leaf 25%,25,both,0,0.99,point-uniform point-zipf,64 128 256 512 1024,0 16
+l2_e1_leaf50,e1,leaf 50%,50,both,0,0.99,point-uniform point-zipf,64 128 256 512 1024,0 16
+l2_e1_leaf75,e1,leaf 75%,75,both,0,0.99,point-uniform point-zipf,64 128 256 512 1024,0 16
+l2_e2_stock,e2,pull, one read per leaf,0,both,0,0.99,range-uniform range-zipf,32 128 512,0
+l2_e2_batch,e2,pull, batched, no leaf reuse,1mb,both,0,0.99,range-uniform range-zipf,32 128 512,0
+l2_e2_leaf,e2,pull, batched + leaf cache,50,both,0,0.99,range-uniform range-zipf,32 128 512,0
+l2_e2_pushmiss,e2,push on a miss + leaf cache,50,both,0,0.99,range-uniform range-zipf,32 128 512,16
+l2_e2_pushall,e2,push every scan,0,both,1,0.99,range-uniform range-zipf,32 128 512,16
+l2_e3_pull,e3,pull everything,0,both,0,0.99,mixed-uniform mixed-zipf,32 128 512,0
+l2_e3_lookups,e3,push lookups only,0,lookup,0,0.99,mixed-uniform mixed-zipf,32 128 512,16
+l2_e3_scans,e3,push scans only,0,scan,1,0.99,mixed-uniform mixed-zipf,32 128 512,16
+l2_e3_both,e3,push both,0,both,1,0.99,mixed-uniform mixed-zipf,32 128 512,16
+l2_e4_stock,e4,stock CHIME (inner nodes only),0,both,0,0.99,point-uniform point-zipf range-uniform range-zipf,16 32 64 128 256 512 1024,0 1 2 4 8 16
+l2_e4_2p,e4,CHIME-2P (leaf cache),50,both,1,0.99,point-uniform point-zipf range-uniform range-zipf,16 32 64 128 256 512 1024,0 1 2 4 8 16
+l2_e4_shipped,e4,stock CHIME as shipped (hotspot on),0,both,0,0.99,point-uniform point-zipf range-uniform range-zipf,16 32 64 128 256 512 1024,0
+l2_e5_t05_leaf0,e5,theta 0.5, leaf 0%,0,both,0,0.5,point-zipf,64 256,0 16
+l2_e5_t05_leaf50,e5,theta 0.5, leaf 50%,50,both,0,0.5,point-zipf,64 256,0 16
+l2_e5_t08_leaf0,e5,theta 0.8, leaf 0%,0,both,0,0.8,point-zipf,64 256,0 16
+l2_e5_t08_leaf50,e5,theta 0.8, leaf 50%,50,both,0,0.8,point-zipf,64 256,0 16
+l2_e5_t12_leaf0,e5,theta 1.2, leaf 0%,0,both,0,1.2,point-zipf,64 256,0 16
+l2_e5_t12_leaf50,e5,theta 1.2, leaf 50%,50,both,0,1.2,point-zipf,64 256,0 16
