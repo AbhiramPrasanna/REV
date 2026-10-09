@@ -56,7 +56,15 @@ def main():
     man = {}
     mf = os.path.join(RES, "l2_manifest.csv")
     if os.path.exists(mf):
-        for r in csv.DictReader(open(mf)):
+        # arm names may hold commas (written unquoted by the first runs): the first two
+        # and the last seven fields are fixed, the arm is whatever lies between
+        cols = ["leaf_pct", "push_ops", "scan_always", "theta", "workloads", "caches", "memthreads"]
+        for line in open(mf).read().splitlines()[1:]:
+            f = next(csv.reader([line])) if line.count('"') >= 2 else line.split(",")
+            if len(f) < 10:
+                continue
+            r = {"block": f[0], "part": f[1], "arm": ",".join(f[2:-7]).strip().strip('"')}
+            r.update(dict(zip(cols, f[-7:])))
             man[r["block"]] = r
     rows, levels = [], []
     for csvf in sorted(glob.glob(os.path.join(RES, "l2_*", "chime", "sweep_mt*", "summary_compute.csv"))):
@@ -122,6 +130,9 @@ def main():
                 if busy:
                     out["mn_busy_cores"] = round(sum(busy) / len(busy) / 100.0, 3)
                     out["mn_busy_cores_peak"] = round(max(busy) / 100.0, 3)
+                elif agg:   # push on but almost nothing was pushed (the cache answered): idle
+                    out["mn_busy_cores"] = 0.0
+                    out["mn_busy_cores_peak"] = round(max(a for a, _ in agg) / 100.0, 3)
             out["log_found"] = 1 if log else 0
             rows.append(out)
             for lv, h, m in re.findall(r"\[LEVEL\] level=(\d+) hits=(\d+) misses=(\d+)", t):

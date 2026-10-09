@@ -115,7 +115,7 @@ blk() {       # id part arm leaf_pct push_ops scan_always theta caches memthread
   add_block "$id" chime "$T" "$n" "CACHES=$caches" "MEMTHREADS=$mts" "WORKLOADS=$wl" \
     "${COMMON[@]}" "CHIME_LEAF_SET=$leafset" ${leafenv[@]+"${leafenv[@]}"} \
     "CHIME_PUSH_OPS=$po" "CHIME_SCAN_OFFLOAD_ALWAYS=$sa" "ZIPF_THETA=$th" "$@" "@min=$min"
-  MANIFEST+=("$id,$part,$arm,$lp,$po,$sa,$th,$wl,$caches,$mts")
+  MANIFEST+=("$id,$part,\"$arm\",$lp,$po,$sa,$th,$wl,$caches,$mts")
 }
 
 # ---- e1: inner nodes or leaves, for lookups ---------------------------------
