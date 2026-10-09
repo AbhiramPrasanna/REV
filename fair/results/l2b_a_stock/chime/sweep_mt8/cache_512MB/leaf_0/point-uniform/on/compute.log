@@ -1,0 +1,283 @@
+nodes 2, threads 36, mix R/I/U/S=100/0/0/0, uniform, bulk 50M warmup 10M op 30M, offload 100%, scan_range 100
+[4mshared memory size: 64GB, 0x7feeda800000[0m
+[4mrdma cache size: 4GB[0m
+[4mMachine NR: 2[0m
+[4mCompute server 1 start up [10.30.1.6]
+[0m
+I connect server 0
+[CONFIG node 1] bulk load: bottom-up build, 8 keys per leaf, 6 children per inner node (CHIME_BULK_BUILD / CHIME_BUILD_LEAF_KEYS / CHIME_BUILD_INNER_FANOUT)
+[CONFIG node 1] clients on this node: yes (CHIME_MN_CLIENTS)
+[CONFIG node 1] leaf cache by key=0 owner=0 admit_push=0.00 granule=16 (CHIME_LEAF_BY_KEY / CHIME_LEAF_OWNER / CHIME_LEAF_ADMIT_PUSH / CHIME_LEAF_KEY_GRANULE)
+[CONFIG node 1] scan path: from_cache=1 offload_always=0 (CHIME_SCAN_FROM_CACHE / CHIME_SCAN_OFFLOAD_ALWAYS)
+[CONFIG node 1] push ops: both (CHIME_PUSH_OPS; applies only with offloading on)
+[CACHE node 1] total=512 MB index=512 MB leaf=0 MB
+[CONFIG node 1] dir threads = 8 (CHIME_DIR_THREADS, max 16) -- MUST match the other node
+[CORES node 1] linear pinning: app threads -> CPUs 0..35, main -> 79, dir threads -> 79 (REV_DIR_CPUS)
+[CONFIG] hotspot buffer + speculative read: off (CHIME_HOTSPOT; stock CHIME: on above 50 MB)
+workload generated: keyspace=50001000 bulk=50000000 warmup=9999972 op=29999988
+[4mKey space set: keySpaceSize=50000000[0m
+I am 71
+I am 37
+I am 41
+I am 47
+I am 69
+I am 48
+I am 62
+I am 36
+I am 45
+I am 51
+I am 60
+I am 59
+I am 52
+I am 58
+I am 49
+I am 50
+I am 40
+I am 61
+I am 53
+I am 54
+I am 43
+I am 39
+I am 42
+I am 46
+I am 44
+I am 64
+I am 56
+I am 57
+I am 65
+I am 63
+I am 66
+I am 70
+I am 55
+I am 67
+I am 38
+I am 68
+[build] leaves: 10% (625001/6250000)
+[build] leaves: 20% (1250002/6250000)
+[build] leaves: 30% (1875003/6250000)
+[build] leaves: 40% (2500004/6250000)
+[build] leaves: 50% (3125005/6250000)
+[build] leaves: 60% (3750006/6250000)
+[build] leaves: 70% (4375007/6250000)
+[build] leaves: 80% (5000008/6250000)
+[build] leaves: 90% (5625009/6250000)
+[build] inner level 1: 1041667 nodes
+[build] inner level 2: 173611 nodes
+[build] inner level 3: 28935 nodes
+[build] inner level 4: 4823 nodes
+[build] inner level 5: 804 nodes
+[build] inner level 6: 134 nodes
+[build] inner level 7: 23 nodes
+[build] inner level 8: 4 nodes
+[build] inner level 9: 1 nodes
+[build] done in 18.9s: height=10 leaves=6250000 inner_nodes=1250002 (8 keys per leaf, 6 children per inner node)
+[TREE] height=10 leaves=6250000 inner_nodes=1250002 keys_per_leaf=8.00 inner_MB=399.4 leaf_MB=2104.0 total_MB=2503.4 (internal span 16, leaf span 16, node bytes inner=335 leaf=353)
+node 1 warmup done in 24s
+[INDEX] --- post-bulk-load cache occupancy (cache = 512 MB) ---
+ ----- [TreeCache]:  cache size=512 MB free_size=349.886 MB skiplist_node_cnt=1249923 ----- 
+consumed cache size = 162.114 MB
+ ----- [IdxCache]:  cache size=0 MB free_size=0.000 MB ---- 
+consumed hotspot buffer size = 0.000000 MB
+
+[LEAFCACHE] off
+1, throughput 5.4553 Mops
+1, throughput 5.4512 Mops
+1, throughput 5.4504 Mops
+1, throughput 5.4545 Mops
+1, throughput 5.4589 Mops
+1, throughput 5.4577 Mops
+1, throughput 5.4505 Mops
+1, throughput 5.4487 Mops
+1, throughput 5.4477 Mops
+1, throughput 5.4547 Mops
+1, throughput 5.3477 Mops
+1, throughput 0.1123 Mops
+[RESULT node 1] ops=29999988 elapsed=5.560s throughput=5.3953 Mops mode=op-bounded
+[RDMA node 1] ops=29999988 posts=30001758 read_wr=43124272 read_bytes=4934646014 write_wr=0 write_bytes=0 atomic_wr=0 send_wr=2219 send_bytes=90979
+[RDMA node 1] per_op: round_trips=1.0001 reads=1.4375 writes=0.0000 atomics=0.0000 sends=0.0001 verbs=1.4376 bytes=164.5
+
+==================== LATENCY BUCKETS (500 ns) [node 1] ====================
+[LOOKUP]
+  ALL                n=29999988   mean=    6.55us  p50=   6.50us  p90=   8.50us  p99=  10.50us  p99.9=  13.50us  max>= 90.00us
+  DIRECT (1-sided)   n=29997769   mean=    6.55us  p50=   6.50us  p90=   8.50us  p99=  10.50us  p99.9=  13.50us  max>= 90.00us
+  OFFLOAD (rpc)      n=2219       mean=   13.28us  p50=  13.50us  p90=  15.50us  p99=  23.50us  p99.9=  28.50us  max>= 61.50us
+[ALL OPS]
+  ALL                n=29999988   mean=    6.55us  p50=   6.50us  p90=   8.50us  p99=  10.50us  p99.9=  13.50us  max>= 90.00us
+  DIRECT (1-sided)   n=29997769   mean=    6.55us  p50=   6.50us  p90=   8.50us  p99=  10.50us  p99.9=  13.50us  max>= 90.00us
+  OFFLOAD (rpc)      n=2219       mean=   13.28us  p50=  13.50us  p90=  15.50us  p99=  23.50us  p99.9=  28.50us  max>= 61.50us
+
+----- 500 ns bucket CDF (all ops) [node 1] -----
+  bucket [lo,hi) ns             count        pct       cdf
+  [     1500,     2000)            1    0.0000%   0.0000%
+  [     3000,     3500)           24    0.0001%   0.0001%
+  [     3500,     4000)         7476    0.0249%   0.0250%
+  [     4000,     4500)       259604    0.8653%   0.8904%
+  [     4500,     5000)      1769963    5.8999%   6.7902%
+  [     5000,     5500)      4066979   13.5566%  20.3468%
+  [     5500,     6000)      4751068   15.8369%  36.1837%
+  [     6000,     6500)      4509648   15.0322%  51.2159%
+  [     6500,     7000)      4645820   15.4861%  66.7020%
+  [     7000,     7500)      4156032   13.8534%  80.5554%
+  [     7500,     8000)      2810705    9.3690%  89.9244%
+  [     8000,     8500)      1496125    4.9871%  94.9115%
+  [     8500,     9000)       713119    2.3771%  97.2886%
+  [     9000,     9500)       333596    1.1120%  98.4006%
+  [     9500,    10000)       167671    0.5589%  98.9595%
+  [    10000,    10500)        94949    0.3165%  99.2760%
+  [    10500,    11000)        61452    0.2048%  99.4808%
+  [    11000,    11500)        43456    0.1449%  99.6257%
+  [    11500,    12000)        32025    0.1068%  99.7324%
+  [    12000,    12500)        23210    0.0774%  99.8098%
+  [    12500,    13000)        16376    0.0546%  99.8644%
+  [    13000,    13500)        11028    0.0368%  99.9011%
+  [    13500,    14000)         7589    0.0253%  99.9264%
+  [    14000,    14500)         5328    0.0178%  99.9442%
+  [    14500,    15000)         3935    0.0131%  99.9573%
+  [    15000,    15500)         2953    0.0098%  99.9671%
+  [    15500,    16000)         2245    0.0075%  99.9746%
+  [    16000,    16500)         1670    0.0056%  99.9802%
+  [    16500,    17000)         1363    0.0045%  99.9847%
+  [    17000,    17500)         1037    0.0035%  99.9882%
+  [    17500,    18000)          812    0.0027%  99.9909%
+  [    18000,    18500)          567    0.0019%  99.9928%
+  [    18500,    19000)          467    0.0016%  99.9943%
+  [    19000,    19500)          341    0.0011%  99.9955%
+  [    19500,    20000)          234    0.0008%  99.9963%
+  [    20000,    20500)          167    0.0006%  99.9968%
+  [    20500,    21000)          132    0.0004%  99.9973%
+  [    21000,    21500)          101    0.0003%  99.9976%
+  [    21500,    22000)           87    0.0003%  99.9979%
+  [    22000,    22500)           60    0.0002%  99.9981%
+  [    22500,    23000)           53    0.0002%  99.9983%
+  [    23000,    23500)           51    0.0002%  99.9984%
+  [    23500,    24000)           28    0.0001%  99.9985%
+  [    24000,    24500)           25    0.0001%  99.9986%
+  [    24500,    25000)           39    0.0001%  99.9987%
+  [    25000,    25500)           29    0.0001%  99.9988%
+  [    25500,    26000)           13    0.0000%  99.9989%
+  [    26000,    26500)           27    0.0001%  99.9990%
+  [    26500,    27000)           21    0.0001%  99.9990%
+  [    27000,    27500)           18    0.0001%  99.9991%
+  [    27500,    28000)           22    0.0001%  99.9992%
+  [    28000,    28500)           22    0.0001%  99.9992%
+  [    28500,    29000)           10    0.0000%  99.9993%
+  [    29000,    29500)           16    0.0001%  99.9993%
+  [    29500,    30000)            9    0.0000%  99.9994%
+  [    30000,    30500)            8    0.0000%  99.9994%
+  [    30500,    31000)            9    0.0000%  99.9994%
+  [    31000,    31500)            4    0.0000%  99.9994%
+  [    31500,    32000)            1    0.0000%  99.9994%
+  [    32000,    32500)            2    0.0000%  99.9994%
+  [    32500,    33000)            1    0.0000%  99.9994%
+  [    33000,    33500)            2    0.0000%  99.9995%
+  [    33500,    34000)            1    0.0000%  99.9995%
+  [    34000,    34500)            1    0.0000%  99.9995%
+  [    34500,    35000)            3    0.0000%  99.9995%
+  [    35000,    35500)            2    0.0000%  99.9995%
+  [    35500,    36000)            4    0.0000%  99.9995%
+  [    38000,    38500)            2    0.0000%  99.9995%
+  [    38500,    39000)            1    0.0000%  99.9995%
+  [    40000,    40500)            1    0.0000%  99.9995%
+  [    40500,    41000)            1    0.0000%  99.9995%
+  [    41500,    42000)            1    0.0000%  99.9995%
+  [    42000,    42500)            4    0.0000%  99.9995%
+  [    42500,    43000)            4    0.0000%  99.9995%
+  [    43000,    43500)            1    0.0000%  99.9995%
+  [    43500,    44000)            1    0.0000%  99.9995%
+  [    44000,    44500)            1    0.0000%  99.9995%
+  [    44500,    45000)            1    0.0000%  99.9996%
+  [    45500,    46000)            1    0.0000%  99.9996%
+  [    46500,    47000)            2    0.0000%  99.9996%
+  [    47000,    47500)            1    0.0000%  99.9996%
+  [    47500,    48000)            1    0.0000%  99.9996%
+  [    48000,    48500)            3    0.0000%  99.9996%
+  [    48500,    49000)            1    0.0000%  99.9996%
+  [    49000,    49500)            1    0.0000%  99.9996%
+  [    49500,    50000)            3    0.0000%  99.9996%
+  [    50000,    50500)            1    0.0000%  99.9996%
+  [    50500,    51000)            2    0.0000%  99.9996%
+  [    51000,    51500)            1    0.0000%  99.9996%
+  [    51500,    52000)            1    0.0000%  99.9996%
+  [    52500,    53000)            1    0.0000%  99.9996%
+  [    53000,    53500)            1    0.0000%  99.9996%
+  [    53500,    54000)            1    0.0000%  99.9996%
+  [    54500,    55000)            2    0.0000%  99.9996%
+  [    55000,    55500)            1    0.0000%  99.9996%
+  [    55500,    56000)            1    0.0000%  99.9996%
+  [    56000,    56500)            3    0.0000%  99.9996%
+  [    56500,    57000)            1    0.0000%  99.9996%
+  [    57000,    57500)            1    0.0000%  99.9997%
+  [    58500,    59000)            1    0.0000%  99.9997%
+  [    59000,    59500)            1    0.0000%  99.9997%
+  [    59500,    60000)            2    0.0000%  99.9997%
+  [    60000,    60500)            1    0.0000%  99.9997%
+  [    60500,    61000)            3    0.0000%  99.9997%
+  [    61000,    61500)            2    0.0000%  99.9997%
+  [    61500,    62000)            5    0.0000%  99.9997%
+  [    62000,    62500)            3    0.0000%  99.9997%
+  [    62500,    63000)            3    0.0000%  99.9997%
+  [    63000,    63500)           10    0.0000%  99.9998%
+  [    63500,    64000)            2    0.0000%  99.9998%
+  [    64000,    64500)            5    0.0000%  99.9998%
+  [    64500,    65000)            2    0.0000%  99.9998%
+  [    65000,    65500)            4    0.0000%  99.9998%
+  [    65500,    66000)            1    0.0000%  99.9998%
+  [    66000,    66500)            2    0.0000%  99.9998%
+  [    66500,    67000)            1    0.0000%  99.9998%
+  [    67000,    67500)            3    0.0000%  99.9998%
+  [    70000,    70500)            1    0.0000%  99.9998%
+  [    71000,    71500)            1    0.0000%  99.9998%
+  [    72000,    72500)            1    0.0000%  99.9998%
+  [    75500,    76000)            1    0.0000%  99.9998%
+  [    77500,    78000)            2    0.0000%  99.9998%
+  [    78000,    78500)            4    0.0000%  99.9999%
+  [    78500,    79000)            1    0.0000%  99.9999%
+  [    79000,    79500)            3    0.0000%  99.9999%
+  [    79500,    80000)            1    0.0000%  99.9999%
+  [    80000,    80500)            1    0.0000%  99.9999%
+  [    80500,    81000)            7    0.0000%  99.9999%
+  [    81000,    81500)            2    0.0000%  99.9999%
+  [    81500,    82000)            3    0.0000%  99.9999%
+  [    82000,    82500)            4    0.0000%  99.9999%
+  [    83000,    83500)            3    0.0000%  99.9999%
+  [    83500,    84000)            3    0.0000%  99.9999%
+  [    84000,    84500)            3    0.0000% 100.0000%
+  [    84500,    85000)            1    0.0000% 100.0000%
+  [    85000,    85500)            2    0.0000% 100.0000%
+  [    86000,    86500)            2    0.0000% 100.0000%
+  [    86500,    87000)            1    0.0000% 100.0000%
+  [    87000,    87500)            1    0.0000% 100.0000%
+  [    87500,    88000)            1    0.0000% 100.0000%
+  [    88000,    88500)            2    0.0000% 100.0000%
+  [    88500,    89000)            1    0.0000% 100.0000%
+  [    89500,    90000)            1    0.0000% 100.0000%
+
+----- OFFLOADED TASKS [node 1] -----
+  ops total                = 29999988
+  ops direct (1-sided)     = 29997769 (99.99%)
+  ops offload (rpc)        = 2219 (0.01%)
+  lookup pushdowns         = 2219
+  scan   pushdowns (RPC)   = 0
+    kv pairs returned      = 0
+    leaves scanned remotely= 0
+    kv / scan pushdown     = 0.00
+    leaves / scan pushdown = 0.00
+=========================================================================
+
+[CORRECTNESS node 1] lookup found 29999413 / 29999988 = 99.9981%
+[READPATH node 1] lookups=29999988  index-cache hit=100.0%  per lookup: leaf=1.000 speculative=0.000 (right 0.0%) hop-reads=1.000 (two-segment 0.437) retries=0.000 invalid=0.000 sibling=0.000  => est. leaf round trips/lookup=1.000
+[LEAFCACHE] off
+
+----- PER-LEVEL CACHE HITS [node 1] (lookups; level 0 = leaf) -----
+[LEVEL] level=0 hits=0 misses=29999972 hit_rate=0.0000
+[LEVEL] level=1 hits=29997753 misses=2219 hit_rate=0.9999
+[LEVEL] level=2 hits=29998186 misses=1786 hit_rate=0.9999
+[LEVEL] level=3 hits=29998186 misses=1786 hit_rate=0.9999
+[LEVEL] level=4 hits=29998186 misses=1786 hit_rate=0.9999
+[LEVEL] level=5 hits=29998186 misses=1786 hit_rate=0.9999
+[LEVEL] level=6 hits=29998186 misses=1786 hit_rate=0.9999
+[LEVEL] level=7 hits=29998186 misses=1786 hit_rate=0.9999
+[LEVEL] level=8 hits=29998186 misses=1786 hit_rate=0.9999
+[LEVEL] level=9 hits=29998186 misses=1786 hit_rate=0.9999
+[KIND node 1] lookups=29999972 inner_visits=269999748 inner_hits=269983241 inner_hit_pct=99.99 leaf_visits=29999972 leaf_hits=0 leaf_hit_pct=0.00
+[END]
