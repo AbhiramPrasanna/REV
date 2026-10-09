@@ -194,6 +194,60 @@ inline bool keep_speculative() {
   return v;
 }
 
+// ---- hot leaves without the inner nodes above them (all off by default) ---
+// CHIME_LEAF_BY_KEY=1: a lookup looks for its key in the cached leaves FIRST,
+// before any inner node, through a key index (below). A hot key is then answered
+// even when the inner nodes above its leaf are not cached, so the inner cache can
+// shrink to the top levels (the rest is pushed) and the space goes to hot leaves.
+// The index holds hints only: a hit must find the key in the cached image itself.
+inline bool by_key() {
+  static const bool v = [] {
+    const char *e = getenv("CHIME_LEAF_BY_KEY");
+    return e && atoi(e) != 0;
+  }();
+  return v;
+}
+
+// CHIME_LEAF_OWNER=1: this compute node is the ONLY writer of every leaf it caches
+// (one client node, no pushed writes; micro_test and Tree refuse anything else),
+// so a cached leaf is served with no network check at all: a hit costs 0 round
+// trips, as in DEX, where each compute node owns its key range. Its own writes
+// keep the cache correct (owner_write_begin/end, owner_fill_begin/end below).
+inline bool owner() {
+  static const bool v = [] {
+    const char *e = getenv("CHIME_LEAF_OWNER");
+    return e && atoi(e) != 0;
+  }();
+  return v;
+}
+
+// CHIME_LEAF_ADMIT_PUSH=r (0..1, default 0): a pushed lookup never reads its leaf,
+// so hot leaves could never enter the cache while lookups are pushed. The memory
+// node now returns the leaf's address and key range with the answer; with
+// probability r the compute node then reads that leaf (one extra round trip) and
+// caches it. 0 = never (the behaviour before this switch).
+inline double admit_push_rate() {
+  static const double v = [] {
+    const char *e = getenv("CHIME_LEAF_ADMIT_PUSH");
+    double d = e ? atof(e) : 0.0;
+    return d < 0.0 ? 0.0 : (d > 1.0 ? 1.0 : d);
+  }();
+  return v;
+}
+
+// CHIME_LEAF_KEY_GRANULE=W (default 16): the key index splits the key space into
+// runs of W consecutive integer keys; a leaf is indexed under every run it
+// overlaps (at most kMaxGranules). 16 is about two leaves of the bulk-built trees
+// (8 keys per leaf over dense integer keys).
+inline uint64_t key_granule() {
+  static const uint64_t v = [] {
+    const char *e = getenv("CHIME_LEAF_KEY_GRANULE");
+    long long d = e ? atoll(e) : 16;
+    return (uint64_t)(d < 1 ? 1 : d);
+  }();
+  return v;
+}
+
 }  // namespace leafcache
 
 
@@ -221,6 +275,16 @@ public:
   // the caller decides (Tree::leaf_cache_validate) because validation needs RDMA.
   const LeafCacheEntry *get(const GlobalAddress &leaf_addr);
 
+  // Is `leaf_addr` resident? Like get(), but does not count as a use (LFU).
+  bool contains(const GlobalAddress &leaf_addr) const {
+    auto *set = table + set_of(leaf_addr) * kWays;
+    for (int i = 0; i < kWays; ++i) {
+      auto *e = set[i];
+      if (e && e->leaf_addr == leaf_addr) return true;
+    }
+    return false;
+  }
+
   // Publish a decoded image. `stamp` must have been observed with the seqlock
   // protocol described at the top of this file; callers that could not close the
   // seqlock must simply not call this.
@@ -233,11 +297,58 @@ public:
   void statistics(uint64_t hit, uint64_t miss, uint64_t stale, uint64_t fill) const;
 
   uint64_t capacity_entries() const { return (uint64_t)nsets * kWays; }
-  uint64_t budget_bytes() const { return capacity_entries() * sizeof(LeafCacheEntry); }
+  uint64_t budget_bytes() const {
+    return capacity_entries() * sizeof(LeafCacheEntry) + key_index_bytes() + owner_bytes();
+  }
   int size_mb() const { return cache_size_mb; }
+
+  // ---- key index (CHIME_LEAF_BY_KEY=1) -------------------------------------
+  // Record that `leaf_addr` holds keys [lo, hi) (integer keys, from the parent
+  // inner node). Hints only, never trusted on their own.
+  void index_put(const GlobalAddress &leaf_addr, uint64_t lo, uint64_t hi);
+  // The cached leaf that holds key `k`, with its value in `v`, or nullptr. Only a
+  // leaf whose cached image CONTAINS k counts, so a stale or torn index entry can
+  // only cause a miss, never a wrong answer.
+  const LeafCacheEntry *find_by_key(const Key &k, Value &v);
+
+  // ---- owner mode (CHIME_LEAF_OWNER=1) -------------------------------------
+  // A writer calls begin right after it locks a leaf and end once its operation
+  // is over; a filler reads the epoch BEFORE its remote read (fill_begin: false =
+  // a write is in flight, do not cache) and calls fill_end right after it
+  // publishes, which drops the image again if any write began in between. With
+  // that, an image published by a fill can never outlive a later write.
+  void owner_write_begin(const GlobalAddress &leaf_addr);
+  void owner_write_end(const GlobalAddress &leaf_addr);
+  bool owner_fill_begin(const GlobalAddress &leaf_addr, uint64_t &epoch0) const;
+  void owner_fill_end(const GlobalAddress &leaf_addr, uint64_t epoch0);
 
 private:
   static constexpr int kWays = 8;
+
+  // key index: set-associative table of [lo, hi) -> leaf address hints
+  struct KeyHint {
+    std::atomic<uint64_t> lo, hi, addr;   // addr 0 = empty way
+  };
+  static constexpr int kIndexWays = 8;
+  static constexpr int kMaxGranules = 4;
+  KeyHint *kindex = nullptr;
+  uint64_t ksets = 0;                     // 0 = no key index
+  uint64_t key_index_bytes() const { return ksets * kIndexWays * sizeof(KeyHint); }
+  static uint64_t mix64(uint64_t x) {
+    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+  }
+
+  // owner mode: per-slot count of writes in flight and a write epoch
+  static constexpr uint64_t kOwnerSlots = 1ULL << 16;
+  std::atomic<uint32_t> *o_active = nullptr;
+  std::atomic<uint64_t> *o_epoch = nullptr;
+  uint64_t owner_bytes() const {
+    return o_active ? kOwnerSlots * (sizeof(std::atomic<uint32_t>) + sizeof(std::atomic<uint64_t>)) : 0;
+  }
+  uint64_t owner_slot(const GlobalAddress &a) const { return mix64(a.to_uint64()) & (kOwnerSlots - 1); }
 
   uint64_t set_of(const GlobalAddress &addr) const {
     // Leaf addresses are allocation-size-strided within a chunk, so hashing the
@@ -247,13 +358,14 @@ private:
     x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
     x ^= x >> 27; x *= 0x94d049bb133111ebULL;
     x ^= x >> 31;
-    return x & (nsets - 1);
+    return full_budget ? x % nsets : x & (nsets - 1);
   }
 
   void retire(LeafCacheEntry *e);
 
   int cache_size_mb;
-  uint64_t nsets;               // power of two
+  uint64_t nsets;               // power of two, unless full_budget
+  bool full_budget = false;     // CHIME_LEAF_BY_KEY: use the whole budget, not the largest power of two
   LeafCacheEntry **table;       // nsets * kWays slots
 
   tbb::concurrent_queue<LeafCacheEntry *> gc;
@@ -262,22 +374,54 @@ private:
 
 
 inline LeafCache::LeafCache(int cache_size_mb) : cache_size_mb(cache_size_mb) {
-  uint64_t want = (uint64_t)cache_size_mb * define::MB / sizeof(LeafCacheEntry);
+  // Everything the leaf cache needs comes out of its budget: the owner-mode
+  // tables (~0.75 MB) and, with the key index, two index ways per cached leaf.
+  int64_t budget = (int64_t)cache_size_mb * define::MB;
+  if (leafcache::owner()) {
+    o_active = new std::atomic<uint32_t>[kOwnerSlots]();
+    o_epoch = new std::atomic<uint64_t>[kOwnerSlots]();
+    budget -= (int64_t)owner_bytes();
+  }
+  const uint64_t per_leaf = sizeof(LeafCacheEntry) +
+                            (leafcache::by_key() ? 2 * sizeof(KeyHint) : 0);
+  uint64_t want = budget > 0 ? (uint64_t)budget / per_leaf : 0;
   uint64_t sets = want / kWays;
   uint64_t p = 1;
   while (p * 2 <= sets) p *= 2;   // largest power of two that fits the budget
   if (p < 64) p = 64;             // floor so a tiny budget still works
   nsets = p;
+  // The power-of-two rounding above can leave up to half the budget unused. The
+  // new by-key mode uses all of it (modulo set index); the default keeps the
+  // rounding so earlier runs are reproduced exactly.
+  if (leafcache::by_key() && sets > p) { nsets = sets; full_budget = true; }
   table = (LeafCacheEntry **)calloc(nsets * kWays, sizeof(LeafCacheEntry *));
   assert(table);
+  if (leafcache::by_key()) {
+    ksets = (2 * capacity_entries()) / kIndexWays;   // two hints per cached leaf
+    kindex = new KeyHint[ksets * kIndexWays];
+    for (uint64_t i = 0; i < ksets * kIndexWays; ++i) {
+      kindex[i].lo.store(0); kindex[i].hi.store(0); kindex[i].addr.store(0);
+    }
+  }
   printf(" ----- [LeafCache]: budget=%d MB -> %lu sets x %d ways = %lu leaves"
          " (%lu B/leaf, %.1f MB) -----\n",
          cache_size_mb, (unsigned long)nsets, kWays,
          (unsigned long)capacity_entries(), (unsigned long)sizeof(LeafCacheEntry),
          (double)budget_bytes() / define::MB);
+  if (leafcache::by_key() || leafcache::owner())
+    printf(" ----- [LeafCache]: by_key=%d (index %.1f MB, granule %lu keys) owner=%d"
+           " (no network check on a hit) admit_push=%.2f -----\n",
+           (int)leafcache::by_key(), (double)key_index_bytes() / define::MB,
+           (unsigned long)leafcache::key_granule(), (int)leafcache::owner(),
+           leafcache::admit_push_rate());
 }
 
-inline LeafCache::~LeafCache() { free(table); }
+inline LeafCache::~LeafCache() {
+  free(table);
+  delete[] kindex;
+  delete[] o_active;
+  delete[] o_epoch;
+}
 
 
 inline const LeafCacheEntry *LeafCache::get(const GlobalAddress &leaf_addr) {
@@ -353,6 +497,87 @@ inline void LeafCache::invalidate(const GlobalAddress &leaf_addr) {
       retire(e);
     }
   }
+}
+
+
+inline void LeafCache::index_put(const GlobalAddress &leaf_addr, uint64_t lo, uint64_t hi) {
+  if (!kindex || !(lo < hi)) return;
+  const uint64_t W = leafcache::key_granule();
+  const uint64_t g0 = lo / W, g1 = (hi - 1) / W;
+  if (g1 - g0 >= (uint64_t)kMaxGranules) return;   // too wide: address lookups only
+  const uint64_t a = leaf_addr.to_uint64();
+  for (uint64_t g = g0; g <= g1; ++g) {
+    KeyHint *set = kindex + (mix64(g) % ksets) * kIndexWays;
+    int way = -1;
+    for (int i = 0; i < kIndexWays && way < 0; ++i)       // already indexed here
+      if (set[i].addr.load(std::memory_order_relaxed) == a) way = i;
+    for (int i = 0; i < kIndexWays && way < 0; ++i) {     // an empty way
+      uint64_t z = 0;
+      if (set[i].addr.load(std::memory_order_relaxed) == 0 &&
+          set[i].addr.compare_exchange_strong(z, a)) way = i;
+    }
+    for (int i = 0; i < kIndexWays && way < 0; ++i) {     // a way whose leaf left the cache
+      uint64_t old = set[i].addr.load(std::memory_order_relaxed);
+      if (old && !contains(GlobalAddress(old)) &&
+          set[i].addr.compare_exchange_strong(old, a)) way = i;
+    }
+    if (way < 0) {                                         // otherwise any way
+      way = (int)(mix64(a ^ g) % kIndexWays);
+      set[way].addr.store(a, std::memory_order_relaxed);
+    }
+    // Racing writers may leave a way with one leaf's address and another's range;
+    // find_by_key only trusts the image, so that costs a miss at worst.
+    set[way].lo.store(lo, std::memory_order_relaxed);
+    set[way].hi.store(hi, std::memory_order_relaxed);
+  }
+}
+
+
+inline const LeafCacheEntry *LeafCache::find_by_key(const Key &k, Value &v) {
+  if (!kindex) return nullptr;
+  const uint64_t ki = key2int(k);
+  const KeyHint *set = kindex + (mix64(ki / leafcache::key_granule()) % ksets) * kIndexWays;
+  for (int i = 0; i < kIndexWays; ++i) {
+    const uint64_t a = set[i].addr.load(std::memory_order_relaxed);
+    if (!a) continue;
+    if (ki < set[i].lo.load(std::memory_order_relaxed) ||
+        ki >= set[i].hi.load(std::memory_order_relaxed)) continue;
+    const LeafCacheEntry *e = get(GlobalAddress(a));
+    if (!e || !e->leaf.metadata.valid) continue;
+    for (int j = 0; j < (int)define::leafSpanSize; ++j) {
+      const auto &r = e->leaf.records[j];
+      if (r.key != define::kkeyNull && r.key == k) {
+        v = r.value;
+        return e;
+      }
+    }
+  }
+  return nullptr;
+}
+
+
+inline void LeafCache::owner_write_begin(const GlobalAddress &leaf_addr) {
+  const uint64_t s = owner_slot(leaf_addr);
+  o_active[s].fetch_add(1);
+  o_epoch[s].fetch_add(1);
+  invalidate(leaf_addr);
+}
+
+inline void LeafCache::owner_write_end(const GlobalAddress &leaf_addr) {
+  const uint64_t s = owner_slot(leaf_addr);
+  invalidate(leaf_addr);
+  o_epoch[s].fetch_add(1);
+  o_active[s].fetch_sub(1);
+}
+
+inline bool LeafCache::owner_fill_begin(const GlobalAddress &leaf_addr, uint64_t &epoch0) const {
+  const uint64_t s = owner_slot(leaf_addr);
+  epoch0 = o_epoch[s].load();
+  return o_active[s].load() == 0;
+}
+
+inline void LeafCache::owner_fill_end(const GlobalAddress &leaf_addr, uint64_t epoch0) {
+  if (o_epoch[owner_slot(leaf_addr)].load() != epoch0) invalidate(leaf_addr);
 }
 
 

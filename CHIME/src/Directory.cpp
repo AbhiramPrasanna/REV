@@ -187,10 +187,18 @@ void Directory::process_message(const RawMessage *m) {
     Key k;
     memcpy(k.data(), &m->k, define::keyLen);
     Value v_result = define::kValueNull;
-    int ret = chime_offload::lookup_from((char *)dCon->dsmPool, m->addr, m->level, k, v_result);
+    GlobalAddress leaf_at;
+    uint64_t leaf_lo = 0, leaf_hi = 0;
+    int ret = chime_offload::lookup_from((char *)dCon->dsmPool, m->addr, m->level, k, v_result,
+                                         &leaf_at, &leaf_lo, &leaf_hi);
     send = (RawMessage *)dCon->message->getSendPool();
     send->level = ret;                 // 1 = found, 2 = not found
     if (ret == 1) send->v = v_result;  // inline value back to the CN
+    // The leaf that answered and its key range (Null when unknown), so the CN can
+    // cache hot leaves (CHIME_LEAF_ADMIT_PUSH); ignored by a CN that does not.
+    send->addr = leaf_at;
+    send->k = leaf_lo;
+    send->aux = leaf_hi;
     break;
   }
 

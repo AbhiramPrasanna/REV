@@ -162,6 +162,10 @@ private:
   // Harvest [l_k, r_k) out of a decoded leaf image into a range-query result.
   static void leaf_harvest_range(const LeafNode* leaf, const Key& l_k, const Key& r_k,
                                  std::map<Key, Value>& ret);
+  // CHIME_LEAF_ADMIT_PUSH: read and cache the leaf a pushed lookup was answered
+  // from (address and integer key range [lo, hi) come back with the reply).
+  void leaf_admit_after_push(const GlobalAddress& leaf_addr, uint64_t lo, uint64_t hi,
+                             CoroPull* sink);
 #endif
 
   // search

@@ -238,7 +238,12 @@ public:
   // internal node). The MN traverses the rest -- internals + leaf -- locally and
   // returns the value, so cache misses are served by the MN (DEX-style).
   // Returns 1 (found, `result` set) or 2 (not found).
-  int rpc_lookup(const GlobalAddress &node_addr, int level, const Key &k, Value &result) {
+  // Optional: `leaf_out` / `lo_out` / `hi_out` receive the leaf that answered and
+  // its integer key range [lo, hi), when the memory node could tell it (Null leaf
+  // otherwise); CHIME_LEAF_ADMIT_PUSH uses them to cache hot leaves.
+  int rpc_lookup(const GlobalAddress &node_addr, int level, const Key &k, Value &result,
+                 GlobalAddress *leaf_out = nullptr, uint64_t *lo_out = nullptr,
+                 uint64_t *hi_out = nullptr) {
     RawMessage m;
     m.type = RpcType::RPC_LOOKUP;
     m.addr = node_addr;
@@ -249,6 +254,9 @@ public:
     rpc_call_dir(m, node_addr.nodeID, thread_id % chime::num_dir());
     auto *mm = rpc_wait();
     if (mm->level == 1) result = mm->v;
+    if (leaf_out) *leaf_out = mm->addr;
+    if (lo_out) *lo_out = mm->k;
+    if (hi_out) *hi_out = mm->aux;
     return mm->level;
   }
 

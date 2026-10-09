@@ -558,6 +558,23 @@ int main(int argc, char *argv[]) {
   g_run_clients = g_mn_clients || dsm->getMyNodeID() != 0;
   printf("[CONFIG node %d] clients on this node: %s (CHIME_MN_CLIENTS)\n",
          dsm->getMyNodeID(), g_run_clients ? "yes" : "no");
+#ifdef CACHE_LEAF_NODE
+  // CHIME_LEAF_OWNER=1 serves cached leaves with no network check, which is
+  // correct only while ONE node writes the tree (the bulk build runs on the last
+  // node, the compute node). Refuse a second client node.
+  {
+    const int client_nodes = g_mn_clients ? kNodeCount : kNodeCount - 1;
+    if (leafcache::owner() && client_nodes != 1) {
+      fprintf(stderr, "CHIME_LEAF_OWNER=1 needs exactly one client node (got %d; set CHIME_MN_CLIENTS=0 "
+                      "with one compute node)\n", client_nodes);
+      exit(1);
+    }
+    printf("[CONFIG node %d] leaf cache by key=%d owner=%d admit_push=%.2f granule=%lu"
+           " (CHIME_LEAF_BY_KEY / CHIME_LEAF_OWNER / CHIME_LEAF_ADMIT_PUSH / CHIME_LEAF_KEY_GRANULE)\n",
+           dsm->getMyNodeID(), (int)leafcache::by_key(), (int)leafcache::owner(),
+           leafcache::admit_push_rate(), (unsigned long)leafcache::key_granule());
+  }
+#endif
   {
     auto flag = [](const char *n) { const char *s = getenv(n); return s && atoi(s) != 0; };
     printf("[CONFIG node %d] scan path: from_cache=%d offload_always=%d "

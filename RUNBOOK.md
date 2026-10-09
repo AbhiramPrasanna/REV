@@ -340,6 +340,10 @@ are invalid. Both also allocate across both nodes.
 
 ### C1 — CHIME: reproduce leafstudy2
 
+> `CHIME/run/run_leaf_study.sh` was removed on 2026-10-08 (superseded by
+> `fair/experiments/run_lesson2.sh`); for this reproduction restore it with
+> `git show <removal commit>^:CHIME/run/run_leaf_study.sh > CHIME/run/run_leaf_study.sh`.
+
 leafstudy2 came from `run_leaf_study.sh` with an explicit 4-point cache list at the
 `15070de` code (HEAD's CHIME code is identical to `15070de`). Stash the uncommitted CHIME
 edits (§0.6) for an exact reproduction.
