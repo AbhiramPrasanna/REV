@@ -45,6 +45,12 @@ def rx(text, pat, cast=float):
     return cast(m.group(1)) if m else ""
 
 
+def rx_last(text, pat, cast=float):
+    """The last match: counters printed both after warmup and after the measured phase."""
+    m = re.findall(pat, text)
+    return cast(m[-1]) if m else ""
+
+
 def local_log(path):
     """The log path recorded on the server, mapped into this checkout."""
     if os.path.exists(path):
@@ -99,8 +105,8 @@ def main():
             out["leaf_by_key_cfg"] = rx(t, r"leaf cache by key=(\d)", int)
             out["leaf_owner_cfg"] = rx(t, r"leaf cache by key=\d owner=(\d)", int)
             out["leaf_admit_push_cfg"] = rx(t, r"leaf cache by key=\d owner=\d admit_push=([0-9.]+)")
-            out["leaf_key_hits"] = rx(t, r"\[LEAFKEY\].*?key_hits=(\d+)", int)
-            out["leaf_push_admits"] = rx(t, r"\[LEAFKEY\].*?push_admits=(\d+)", int)
+            out["leaf_key_hits"] = rx_last(t, r"\[LEAFKEY\].*?key_hits=(\d+)", int)
+            out["leaf_push_admits"] = rx_last(t, r"\[LEAFKEY\].*?push_admits=(\d+)", int)
             out["remote_per_op"] = rx(t, r"remote ops / op\s*=\s*([0-9.]+)")
             out["lookup_pushdowns"] = rx(t, r"lookup pushdowns\s*=\s*(\d+)", int)
             out["scan_pushdowns"] = rx(t, r"scan\s+pushdowns \(RPC\)\s*=\s*(\d+)", int)
