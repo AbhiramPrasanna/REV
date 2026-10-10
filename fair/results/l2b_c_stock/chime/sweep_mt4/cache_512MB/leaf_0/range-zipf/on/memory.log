@@ -1,0 +1,473 @@
+nodes 2, threads 36, mix R/I/U/S=0/0/0/100, zipf-0.99, bulk 50M warmup 10M op 30M, offload 100%, scan_range 100
+[4mshared memory size: 64GB, 0x7fc71e000000[0m
+[4mrdma cache size: 4GB[0m
+[4mMachine NR: 2[0m
+[4mCompute server 0 start up [10.30.1.8]
+[0m
+I connect server 1
+[4mMemory server 0 start up (4/16 dir threads active)[0m
+[4mdir 0 launch! (core 79 of 80)
+[0m
+[4mdir 1 launch! (core 78 of 80)
+[0m
+[4mdir 3 launch! (core 76 of 80)
+[0m
+[4mdir 2 launch! (core 77 of 80)
+[0m
+[CONFIG node 0] bulk load: bottom-up build, 8 keys per leaf, 6 children per inner node (CHIME_BULK_BUILD / CHIME_BUILD_LEAF_KEYS / CHIME_BUILD_INNER_FANOUT)
+[CONFIG node 0] clients on this node: no (CHIME_MN_CLIENTS)
+[CONFIG node 0] leaf cache by key=0 owner=0 admit_push=0.00 granule=16 (CHIME_LEAF_BY_KEY / CHIME_LEAF_OWNER / CHIME_LEAF_ADMIT_PUSH / CHIME_LEAF_KEY_GRANULE)
+[CONFIG node 0] scan path: from_cache=1 offload_always=1 (CHIME_SCAN_FROM_CACHE / CHIME_SCAN_OFFLOAD_ALWAYS)
+[CONFIG node 0] push ops: both (CHIME_PUSH_OPS; applies only with offloading on)
+[CACHE node 0] total=512 MB index=512 MB leaf=0 MB
+index cache = 512 MB (CHIME_CACHE_MB)
+[CONFIG] leaf cache = OFF  (CHIME_CACHE_LEAF / CHIME_LEAF_CACHE_PCT)
+[CONFIG node 0] dir threads = 4 (CHIME_DIR_THREADS, max 16) -- MUST match the other node
+[CORES node 0] linear pinning: app threads -> CPUs 0..35, main -> 0, dir threads -> 79,78,77,76,75,74,73,72,71,70,69,68,67,66,65,64,63,62,61,60,59,58,57,56,55,54,53,52,51,50,49,48,47,46,45,44,43,42,41,40,39,38,37,36,35,34,33,32,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0 (REV_DIR_CPUS)
+[GEOMETRY] leaf    : span=16 val=8B trans=329B alloc=353B
+[GEOMETRY] internal: span=16        trans=319B alloc=335B
+[GEOMETRY] internal/leaf = 0.97x  (OK: internal < leaf)
+[GEOMETRY] tree ~= 3.12M leaves * 329B = 0.96 GB
+[GEOMETRY] index ~= 63.4 MB (leaves 100% full; TRUE value is HIGHER --
+[GEOMETRY]          read '[TreeCache] consumed cache size' below)
+[CONFIG] hotspot buffer + speculative read: off (CHIME_HOTSPOT; stock CHIME: on above 50 MB)
+[CONFIG] offload rate = 100%, min cache-boundary level = 2 (offload cache MISSES only)
+[CONFIG] warmup offload rate = 0% (CHIME_WARMUP_OFFLOAD); measured phase uses 100%
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=1           4990 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=1
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+workload generated: keyspace=50001000 bulk=50000000 warmup=9999972 op=29999988
+[4mKey space set: keySpaceSize=50000000[0m
+I am 0
+I am 3
+I am 2
+I am 5
+I am 1
+I am 4
+I am 16
+I am 29
+I am 33
+I am 34
+I am 11
+I am 19
+I am 35
+I am 7
+I am 13
+I am 14
+I am 23
+I am 21
+I am 32
+I am 6
+I am 8
+I am 31
+I am 12
+I am 10
+I am 17
+I am 28
+I am 24
+I am 26
+I am 22
+I am 20
+I am 27
+I am 25
+I am 15
+I am 18
+I am 30
+I am 9
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=36          332 ns/msg
+  dir 1: active=  0.00%  msgs=36          255 ns/msg
+  dir 2: active=  0.00%  msgs=36          291 ns/msg
+  dir 3: active=  0.00%  msgs=36          479 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=144
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=6           470 ns/msg
+  dir 1: active=  0.00%  msgs=6           532 ns/msg
+  dir 2: active=  0.00%  msgs=6           741 ns/msg
+  dir 3: active=  0.00%  msgs=6           660 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=24
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=1           1884 ns/msg
+  dir 1: active=  0.00%  msgs=1           524 ns/msg
+  dir 2: active=  0.00%  msgs=1           1549 ns/msg
+  dir 3: active=  0.00%  msgs=1           1131 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=4
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active=  0.00%  msgs=0           0 ns/msg
+  dir 1: active=  0.00%  msgs=0           0 ns/msg
+  dir 2: active=  0.00%  msgs=0           0 ns/msg
+  dir 3: active=  0.00%  msgs=0           0 ns/msg
+  AGGREGATE active = 0.00% (of 4 dir-threads; 0.00% per-thread avg)  msgs=0
+[CONFIG] warmup finished with offload 0%; measured phase now at 100%
+node 0 warmup done in 44s
+0, throughput 0.0000 Mops
+[RESULT node 0] ops=0 elapsed=0.000s throughput=0.0000 Mops mode=op-bounded
+[RDMA node 0] ops=0 posts=274684 read_wr=0 read_bytes=0 write_wr=0 write_bytes=0 atomic_wr=0 send_wr=274684 send_bytes=11262044
+
+==================== LATENCY BUCKETS (500 ns) [node 0] ====================
+[ALL OPS]
+  ALL                       (no samples)
+  DIRECT (1-sided)          (no samples)
+  OFFLOAD (rpc)             (no samples)
+
+----- 500 ns bucket CDF (all ops) [node 0] -----
+  (no samples)
+
+----- OFFLOADED TASKS [node 0] -----
+  ops total                = 0
+  ops direct (1-sided)     = 0 (0.00%)
+  ops offload (rpc)        = 0 (0.00%)
+  lookup pushdowns         = 0
+  scan   pushdowns (RPC)   = 0
+    kv pairs returned      = 0
+    leaves scanned remotely= 0
+    kv / scan pushdown     = 0.00
+    leaves / scan pushdown = 0.00
+=========================================================================
+
+[LEAFCACHE] off
+[END]
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 71.08%  msgs=202636      7016 ns/msg
+  dir 1: active= 71.56%  msgs=195540      7320 ns/msg
+  dir 2: active= 71.18%  msgs=203307      7003 ns/msg
+  dir 3: active= 71.60%  msgs=201163      7118 ns/msg
+  AGGREGATE active = 285.43% (of 4 dir-threads; 71.36% per-thread avg)  msgs=802646
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.69%  msgs=272820      7088 ns/msg
+  dir 1: active= 97.28%  msgs=274731      7082 ns/msg
+  dir 2: active= 96.83%  msgs=273711      7075 ns/msg
+  dir 3: active= 97.38%  msgs=274569      7093 ns/msg
+  AGGREGATE active = 388.17% (of 4 dir-threads; 97.04% per-thread avg)  msgs=1095831
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=273752      7062 ns/msg
+  dir 1: active= 97.26%  msgs=275178      7069 ns/msg
+  dir 2: active= 96.80%  msgs=275011      7040 ns/msg
+  dir 3: active= 97.36%  msgs=275074      7079 ns/msg
+  AGGREGATE active = 388.08% (of 4 dir-threads; 97.02% per-thread avg)  msgs=1099015
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.67%  msgs=275041      7029 ns/msg
+  dir 1: active= 97.25%  msgs=275445      7062 ns/msg
+  dir 2: active= 96.80%  msgs=276089      7012 ns/msg
+  dir 3: active= 97.34%  msgs=275548      7066 ns/msg
+  AGGREGATE active = 388.06% (of 4 dir-threads; 97.01% per-thread avg)  msgs=1102123
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275481      7018 ns/msg
+  dir 1: active= 97.25%  msgs=275384      7063 ns/msg
+  dir 2: active= 96.81%  msgs=276176      7011 ns/msg
+  dir 3: active= 97.34%  msgs=275680      7062 ns/msg
+  AGGREGATE active = 388.07% (of 4 dir-threads; 97.02% per-thread avg)  msgs=1102721
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275512      7017 ns/msg
+  dir 1: active= 97.25%  msgs=275304      7065 ns/msg
+  dir 2: active= 96.81%  msgs=276016      7015 ns/msg
+  dir 3: active= 97.33%  msgs=275639      7062 ns/msg
+  AGGREGATE active = 388.05% (of 4 dir-threads; 97.01% per-thread avg)  msgs=1102471
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275498      7018 ns/msg
+  dir 1: active= 97.24%  msgs=275751      7053 ns/msg
+  dir 2: active= 96.81%  msgs=275941      7017 ns/msg
+  dir 3: active= 97.33%  msgs=275736      7060 ns/msg
+  AGGREGATE active = 388.04% (of 4 dir-threads; 97.01% per-thread avg)  msgs=1102926
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.67%  msgs=275013      7031 ns/msg
+  dir 1: active= 97.24%  msgs=276005      7046 ns/msg
+  dir 2: active= 96.80%  msgs=276105      7012 ns/msg
+  dir 3: active= 97.32%  msgs=275537      7065 ns/msg
+  AGGREGATE active = 388.03% (of 4 dir-threads; 97.01% per-thread avg)  msgs=1102660
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.67%  msgs=275572      7016 ns/msg
+  dir 1: active= 97.24%  msgs=275865      7050 ns/msg
+  dir 2: active= 96.81%  msgs=276138      7012 ns/msg
+  dir 3: active= 97.33%  msgs=275378      7069 ns/msg
+  AGGREGATE active = 388.04% (of 4 dir-threads; 97.01% per-thread avg)  msgs=1102953
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.67%  msgs=275185      7026 ns/msg
+  dir 1: active= 97.24%  msgs=275909      7049 ns/msg
+  dir 2: active= 96.80%  msgs=276061      7013 ns/msg
+  dir 3: active= 97.32%  msgs=275294      7071 ns/msg
+  AGGREGATE active = 388.03% (of 4 dir-threads; 97.01% per-thread avg)  msgs=1102449
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275585      7015 ns/msg
+  dir 1: active= 97.23%  msgs=275843      7050 ns/msg
+  dir 2: active= 96.80%  msgs=276363      7006 ns/msg
+  dir 3: active= 97.32%  msgs=275856      7056 ns/msg
+  AGGREGATE active = 388.01% (of 4 dir-threads; 97.00% per-thread avg)  msgs=1103647
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275689      7012 ns/msg
+  dir 1: active= 97.23%  msgs=275614      7056 ns/msg
+  dir 2: active= 96.80%  msgs=276112      7012 ns/msg
+  dir 3: active= 97.32%  msgs=275358      7069 ns/msg
+  AGGREGATE active = 388.01% (of 4 dir-threads; 97.00% per-thread avg)  msgs=1102773
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275728      7011 ns/msg
+  dir 1: active= 97.24%  msgs=275546      7058 ns/msg
+  dir 2: active= 96.79%  msgs=276571      7000 ns/msg
+  dir 3: active= 97.32%  msgs=275276      7071 ns/msg
+  AGGREGATE active = 388.01% (of 4 dir-threads; 97.00% per-thread avg)  msgs=1103121
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275459      7018 ns/msg
+  dir 1: active= 97.24%  msgs=275281      7065 ns/msg
+  dir 2: active= 96.79%  msgs=276610      6999 ns/msg
+  dir 3: active= 97.33%  msgs=275180      7074 ns/msg
+  AGGREGATE active = 388.02% (of 4 dir-threads; 97.00% per-thread avg)  msgs=1102530
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275383      7020 ns/msg
+  dir 1: active= 97.24%  msgs=275536      7059 ns/msg
+  dir 2: active= 96.80%  msgs=276296      7007 ns/msg
+  dir 3: active= 97.32%  msgs=275399      7068 ns/msg
+  AGGREGATE active = 388.02% (of 4 dir-threads; 97.01% per-thread avg)  msgs=1102614
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275285      7023 ns/msg
+  dir 1: active= 97.24%  msgs=275663      7055 ns/msg
+  dir 2: active= 96.80%  msgs=276336      7006 ns/msg
+  dir 3: active= 97.33%  msgs=275254      7072 ns/msg
+  AGGREGATE active = 388.03% (of 4 dir-threads; 97.01% per-thread avg)  msgs=1102538
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.67%  msgs=275223      7025 ns/msg
+  dir 1: active= 97.24%  msgs=275369      7063 ns/msg
+  dir 2: active= 96.79%  msgs=276681      6997 ns/msg
+  dir 3: active= 97.32%  msgs=275304      7070 ns/msg
+  AGGREGATE active = 388.02% (of 4 dir-threads; 97.00% per-thread avg)  msgs=1102577
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.67%  msgs=275267      7024 ns/msg
+  dir 1: active= 97.24%  msgs=275520      7059 ns/msg
+  dir 2: active= 96.79%  msgs=276535      7001 ns/msg
+  dir 3: active= 97.32%  msgs=275681      7060 ns/msg
+  AGGREGATE active = 388.02% (of 4 dir-threads; 97.00% per-thread avg)  msgs=1103003
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275855      7008 ns/msg
+  dir 1: active= 97.24%  msgs=275350      7063 ns/msg
+  dir 2: active= 96.80%  msgs=276763      6995 ns/msg
+  dir 3: active= 97.33%  msgs=275261      7072 ns/msg
+  AGGREGATE active = 388.02% (of 4 dir-threads; 97.01% per-thread avg)  msgs=1103229
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.65%  msgs=275795      7009 ns/msg
+  dir 1: active= 97.23%  msgs=275490      7059 ns/msg
+  dir 2: active= 96.79%  msgs=276553      7000 ns/msg
+  dir 3: active= 97.32%  msgs=275399      7068 ns/msg
+  AGGREGATE active = 388.01% (of 4 dir-threads; 97.00% per-thread avg)  msgs=1103237
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275972      7005 ns/msg
+  dir 1: active= 97.24%  msgs=275535      7058 ns/msg
+  dir 2: active= 96.80%  msgs=276416      7004 ns/msg
+  dir 3: active= 97.32%  msgs=275247      7072 ns/msg
+  AGGREGATE active = 388.02% (of 4 dir-threads; 97.00% per-thread avg)  msgs=1103170
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.67%  msgs=275534      7017 ns/msg
+  dir 1: active= 97.24%  msgs=275477      7060 ns/msg
+  dir 2: active= 96.79%  msgs=276719      6996 ns/msg
+  dir 3: active= 97.32%  msgs=275330      7070 ns/msg
+  AGGREGATE active = 388.02% (of 4 dir-threads; 97.01% per-thread avg)  msgs=1103060
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275486      7017 ns/msg
+  dir 1: active= 97.24%  msgs=275312      7064 ns/msg
+  dir 2: active= 96.79%  msgs=276833      6993 ns/msg
+  dir 3: active= 97.32%  msgs=275277      7071 ns/msg
+  AGGREGATE active = 388.01% (of 4 dir-threads; 97.00% per-thread avg)  msgs=1102908
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275661      7013 ns/msg
+  dir 1: active= 97.24%  msgs=275277      7065 ns/msg
+  dir 2: active= 96.79%  msgs=276604      6999 ns/msg
+  dir 3: active= 97.32%  msgs=275468      7066 ns/msg
+  AGGREGATE active = 388.01% (of 4 dir-threads; 97.00% per-thread avg)  msgs=1103010
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275547      7016 ns/msg
+  dir 1: active= 97.24%  msgs=275192      7068 ns/msg
+  dir 2: active= 96.80%  msgs=276650      6998 ns/msg
+  dir 3: active= 97.32%  msgs=275229      7072 ns/msg
+  AGGREGATE active = 388.02% (of 4 dir-threads; 97.00% per-thread avg)  msgs=1102618
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.66%  msgs=275453      7019 ns/msg
+  dir 1: active= 97.24%  msgs=275298      7064 ns/msg
+  dir 2: active= 96.79%  msgs=276453      7003 ns/msg
+  dir 3: active= 97.32%  msgs=275079      7076 ns/msg
+  AGGREGATE active = 388.01% (of 4 dir-threads; 97.00% per-thread avg)  msgs=1102283
+
+----- REMOTE CPU LOAD (memory node dir-threads, 2s window) -----
+  dir 0: active= 96.65%  msgs=276017      7004 ns/msg
+  dir 1: active= 97.24%  msgs=275320      7064 ns/msg
+  dir 2: active= 96.80%  msgs=276500      7002 ns/msg
+  dir 3: active= 97.32%  msgs=275299      7070 ns/msg
+  AGGREGATE active = 388.01% (of 4 dir-threads; 97.00% per-thread avg)  msgs=1103136
