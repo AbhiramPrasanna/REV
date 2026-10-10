@@ -1,0 +1,104 @@
+1791521737.423 
+1791521737.423 ######## 2026-10-08 21:55:37  block l2b_a_shipped  (chime, tree=deep, 60 cells)  DEX_PUSH_READS_DEEPEST=0;CHIME_LEAF_SET=0;CHIME_SCAN_OFFLOAD_ALWAYS=0;CACHES=64 128 256 512 1024;MEMTHREADS=0 1 2 4 8 16;WORKLOADS=point-uniform point-zipf;THREADS=36;OPS_M=30;WARMUP_M=10;REV_PARK_CMP_DIRS=1;CHIME_HOTSPOT=0;CHIME_PUSH_OPS=both;LEAF_CACHE_MB=;LEAF_ADMIT_SCAN=1.0;CHIME_LEAF_BY_KEY=0;CHIME_LEAF_OWNER=0;CHIME_LEAF_ADMIT_PUSH=0;CHIME_LEVEL_STATS=1;CHIME_RDMA_STATS=1;CHIME_LEAF_SET=0;CHIME_PUSH_OPS=both;CHIME_SCAN_OFFLOAD_ALWAYS=0;ZIPF_THETA=0.99;CHIME_HOTSPOT=1;@min=2.8
+1791521737.449 == fair run: RUN_ID=l2b_a_shipped role=compute systems=[chime] profile=full
+1791521737.449    memory threads=[0 1 2 4 8 16] caches=[64 128 256 512 1024] workloads=[point-uniform point-zipf]
+1791521737.451 >> [cs-dis-srv06s] cleanup: stopping leftover newbench / micro_test / DART processes and memcached
+1791521740.616 
+1791521740.616 ######################## chime (compute) ########################
+1791521740.626 CHIME setup (deep): 16/16-entry inner/leaf nodes, tree bulk-built with 8 keys per leaf and 6 children per inner node
+1791521740.627   hotspot buffer + speculative read: stock (on above 50 MB)
+1791521740.628   push ops: both (CHIME_PUSH_OPS) | scans pushed: on a cache miss | leaf cache arms: 0, leaf share 50% (scan admit 1.0)
+1791521740.628   each cell prints '>> tree:' (levels, inner and leaf nodes and MB) and '>> result:'
+1791521740.654 pinning (cs-dis-srv06s): clients -> CPUs 0..35; directory threads -> 79
+1791521740.655 ==================================================================
+1791521740.655 >>> CHIME fair: memory threads 0 (offload off, dir threads 1), compute
+1791521740.655 ==================================================================
+1791521740.665 >> SWEEP: workloads=[point-uniform point-zipf]  offload=[off]  role=compute
+1791521740.665 >>        point op=30M  range op=30M scan_range=100  zipf theta=0.99
+1791521740.665 >>        LEAF CACHE axis CACHE_LEAF=[0], leaf share=50% of the TOTAL cache (inner+leaf = the sweep point)
+1791521740.665 >>        results -> /home/apa222/REV/fair/results/l2b_a_shipped/chime/sweep_mt0
+1791521740.665 >>        CACHE SWEEP CHIME_CACHE_MB=[64 128 256 512 1024] (runtime, no rebuild)
+1791521740.703 >> [compute] waiting for the memory node to register (serverNum -> 1)
+1791521740.704 >> [compute] memory node is up (serverNum=1)
+1791521741.707 
+1791521741.707 ############################################################
+1791521741.707 ## OFFLOAD=off (rate=0)  role=compute  WORKLOAD=point-uniform
+1791521741.707 ## TOTAL cache=64MB  CACHE_LEAF=0  leaf share=50%
+1791521741.707 ## /home/apa222/REV/CHIME/build_fair/micro_test 2 36 100 0 0 0 1 0 50 10 30 0
+1791521741.707 ## log: /home/apa222/REV/fair/results/l2b_a_shipped/chime/sweep_mt0/cache_64MB/leaf_0/point-uniform/off/compute.log
+1791521741.707 ############################################################
+1791521741.707 
+1791521741.713 nodes 2, threads 36, mix R/I/U/S=100/0/0/0, uniform, bulk 50M warmup 10M op 30M, offload 0%, scan_range 100
+1791521741.713 [4mshared memory size: 64GB, 0x7feeda800000[0m
+1791521741.713 [4mrdma cache size: 4GB[0m
+1791521764.026 [4mMachine NR: 2[0m
+1791521766.250 [4mCompute server 1 start up [10.30.1.6]
+1791521766.250 [0m
+1791521766.297 I connect server 0
+1791521766.343 [CONFIG node 1] bulk load: bottom-up build, 8 keys per leaf, 6 children per inner node (CHIME_BULK_BUILD / CHIME_BUILD_LEAF_KEYS / CHIME_BUILD_INNER_FANOUT)
+1791521766.343 [CONFIG node 1] clients on this node: yes (CHIME_MN_CLIENTS)
+1791521766.343 [CONFIG node 1] leaf cache by key=0 owner=0 admit_push=0.00 granule=16 (CHIME_LEAF_BY_KEY / CHIME_LEAF_OWNER / CHIME_LEAF_ADMIT_PUSH / CHIME_LEAF_KEY_GRANULE)
+1791521766.343 [CONFIG node 1] scan path: from_cache=1 offload_always=0 (CHIME_SCAN_FROM_CACHE / CHIME_SCAN_OFFLOAD_ALWAYS)
+1791521766.343 [CONFIG node 1] push ops: both (CHIME_PUSH_OPS; applies only with offloading on)
+1791521766.343 [CACHE node 1] total=64 MB index=64 MB leaf=0 MB
+1791521766.343 [CONFIG node 1] dir threads = 1 (CHIME_DIR_THREADS, max 16) -- MUST match the other node
+1791521766.343 [CORES node 1] linear pinning: app threads -> CPUs 0..35, main -> 79, dir threads -> 79 (REV_DIR_CPUS)
+1791521766.733 [CONFIG] hotspot buffer + speculative read: on (CHIME_HOTSPOT; stock CHIME: on above 50 MB)
+1791521773.488 workload generated: keyspace=50001000 bulk=50000000 warmup=9999972 op=29999988
+1791521773.696 [4mKey space set: keySpaceSize=50000000[0m
+1791521773.705 I am 36
+1791521773.706 I am 40
+1791521773.706 I am 41
+1791521773.706 I am 37
+1791521773.706 I am 43
+1791521773.706 I am 39
+1791521773.706 I am 45
+1791521773.706 I am 71
+1791521773.706 I am 47
+1791521773.706 I am 38
+1791521773.706 I am 64
+1791521773.706 I am 44
+1791521773.706 I am 49
+1791521773.706 I am 46
+1791521773.706 I am 68
+1791521773.706 I am 48
+1791521773.706 I am 56
+1791521773.706 I am 58
+1791521773.706 I am 65
+1791521773.706 I am 66
+1791521773.706 I am 67
+1791521773.706 I am 69
+1791521773.707 I am 62
+1791521773.707 I am 51
+1791521773.707 I am 55
+1791521773.707 I am 57
+1791521773.707 I am 53
+1791521773.707 I am 61
+1791521773.707 I am 63
+1791521773.707 I am 42
+1791521773.707 I am 60
+1791521773.707 I am 50
+1791521773.707 I am 59
+1791521773.707 I am 54
+1791521773.707 I am 70
+1791521773.707 I am 52
+1791521776.250 [build] leaves: 10% (625001/6250000)
+1791521777.802 [build] leaves: 20% (1250002/6250000)
+1791521779.362 [build] leaves: 30% (1875003/6250000)
+1791521780.913 [build] leaves: 40% (2500004/6250000)
+1791521782.465 [build] leaves: 50% (3125005/6250000)
+1791521784.016 [build] leaves: 60% (3750006/6250000)
+1791521785.568 [build] leaves: 70% (4375007/6250000)
+1791521787.120 [build] leaves: 80% (5000008/6250000)
+1791521788.677 [build] leaves: 90% (5625009/6250000)
+1791521792.183 [build] inner level 1: 1041667 nodes
+1791521792.512 [build] inner level 2: 173611 nodes
+1791521792.567 [build] inner level 3: 28935 nodes
+1791521792.577 [build] inner level 4: 4823 nodes
+1791521792.578 [build] inner level 5: 804 nodes
+1791521792.578 [build] inner level 6: 134 nodes
+1791521792.578 [build] inner level 7: 23 nodes
+1791521792.578 [build] inner level 8: 4 nodes
+1791521792.578 [build] inner level 9: 1 nodes
+1791521792.578 [build] done in 18.9s: height=10 leaves=6250000 inner_nodes=1250002 (8 keys per leaf, 6 children per inner node)
+1791521792.598 [TREE] height=10 leaves=6250000 inner_nodes=1250002 keys_per_leaf=8.00 inner_MB=399.4 leaf_MB=2104.0 total_MB=2503.4 (internal span 16, leaf span 16, node bytes inner=335 leaf=353)
