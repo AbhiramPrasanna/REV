@@ -172,7 +172,9 @@ def main():
         for k in r:
             if k not in keys:
                 keys.append(k)
-    dst = os.path.join(RES, "lesson2_all.csv")
+    # L2_OUT / L2_LEVELS_OUT: other file names, for blocks of another sweep in the
+    # same format (collect_lesson3.py reads its CHIME part this way)
+    dst = os.path.join(RES, os.environ.get("L2_OUT", "lesson2_all.csv"))
     with open(dst, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=keys)
         w.writeheader()
@@ -185,7 +187,7 @@ def main():
              and int(r["inner_cache_mb"]) + int(r.get("leaf_cache_mb") or 0) != int(r["total_cache_mb"])]
     print(f"wrote {dst}: {len(rows)} cells from {len({r['block'] for r in rows})} blocks")
     if levels:
-        lv = os.path.join(RES, "lesson2_levels.csv")
+        lv = os.path.join(RES, os.environ.get("L2_LEVELS_OUT", "lesson2_levels.csv"))
         with open(lv, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(levels[0].keys()))
             w.writeheader()
