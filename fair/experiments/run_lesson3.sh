@@ -49,8 +49,9 @@
 #        -> dex/build_1024_1024_mn_only_v64, CHIME/build_span64_64_v64
 #   RUN_ID=l3_build ./fair/build.sh dart
 #   grep -c "value_bytes" dex/build_1024_1024_mn_only_v64/newbench    # >= 1
-# DART's memory server needs hugepages above its 20 GiB region (server 8):
-#   sudo sysctl -w vm.nr_hugepages=16384      # 32 GiB
+# Hugepages on the memory server (server 8): DEX and CHIME map a 64 GB pool and
+# DART a 20 GiB region, one system at a time, so keep CHIME's setting:
+#   sudo sysctl -w vm.nr_hugepages=36864      # 72 GiB (fewer: DEX/CHIME 'mmap failed!')
 #
 # Run (memory first, same variables on both, one terminal each, no tmux):
 #   server 8:  cd ~/REV && bash fair/experiments/run_lesson3.sh memory  2>&1 | tee ~/l3_memory.out
@@ -155,12 +156,14 @@ fi
 
 [ "${DRY_RUN:-0}" = 1 ] && { run_plan; exit 0; }
 
-# DART's memory server pins its region in hugepages
+# The memory server maps DEX's and CHIME's 64 GB pool (and DART's region) in
+# hugepages: stop before the first block if there are too few
 if [ "$ROLE" = memory ]; then
   hp=$(awk '/HugePages_Total/{print $2}' /proc/meminfo 2>/dev/null)
-  if [ -n "$hp" ] && [ "$((hp * 2))" -le "$L3_DART_MEM_MB" ]; then
-    echo "WARNING: $hp hugepages ($((hp * 2)) MiB) do not exceed DART's ${L3_DART_MEM_MB} MiB region." >&2
-    echo "         sudo sysctl -w vm.nr_hugepages=16384   before the DART blocks" >&2
+  if [ -n "$hp" ] && [ "$hp" -lt 34816 ]; then
+    echo "ERROR: $hp hugepages ($((hp * 2)) MiB); DEX and CHIME need a 64 GB pool plus buffers." >&2
+    echo "       sudo sysctl -w vm.nr_hugepages=36864   then rerun" >&2
+    exit 1
   fi
 fi
 
