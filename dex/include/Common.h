@@ -40,7 +40,22 @@
 
 #define ADD_ROUND(x, n) ((x) = ((x) + 1) % (n))
 
-#define MESSAGE_SIZE 96 // byte
+// Value bytes (cmake -DDEX_VALUE_LEN=<B>). The default 8 is the real 8 B Value
+// every existing DEX result used. A larger value is SIMULATED, the way CHIME's
+// simulatedValLen is: each leaf entry carries DEX_VALUE_LEN - 8 padding bytes
+// after its 8 B value (so a leaf holds fewer entries and every leaf read moves
+// the wider entries), and every RPC message carries the same padding (so a
+// pushed lookup's reply moves a whole value). Range-scan results still return
+// 8 B per value.
+#ifndef DEX_VALUE_LEN
+#define DEX_VALUE_LEN 8
+#endif
+#define DEX_VALUE_PAD (DEX_VALUE_LEN - 8)
+static_assert(DEX_VALUE_LEN >= 8, "DEX_VALUE_LEN must be at least the 8 B Value");
+
+// One message slot: the 40 B UD header plus a RawMessage (96 B when values are
+// 8 B, as before; grown in 16 B steps to fit the padded value).
+#define MESSAGE_SIZE (96 + ((DEX_VALUE_PAD + 15) / 16) * 16) // byte
 
 #define POST_RECV_PER_RC_QP 128
 

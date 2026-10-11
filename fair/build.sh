@@ -27,17 +27,18 @@ build_dex() {
     both)    mn_only=OFF ;;
     *) echo "DEX_PLACEMENT must be mn_only or both (got '$DEX_PLACEMENT')" >&2; exit 1 ;;
   esac
-  echo "== DEX ($TREE_SETUP): inner=${DEX_INNER_PAGE}B leaf=${DEX_LEAF_PAGE}B, placement=$DEX_PLACEMENT, manual pushdown"
+  echo "== DEX ($TREE_SETUP): inner=${DEX_INNER_PAGE}B leaf=${DEX_LEAF_PAGE}B, value=${VALUE_B}B, placement=$DEX_PLACEMENT, manual pushdown"
   rm -rf "$DEX_BUILD" && mkdir -p "$DEX_BUILD" && cd "$DEX_BUILD"
+  local vopt=(); [ "$VALUE_B" != 8 ] && vopt=(-DDEX_VALUE_LEN="$VALUE_B")
   cmake -DCMAKE_BUILD_TYPE=Release \
         -DMANUAL_PUSHDOWN=ON \
         -DMN_ONLY_PLACEMENT="$mn_only" \
-        -DDEX_INNER_PAGE="$DEX_INNER_PAGE" -DDEX_LEAF_PAGE="$DEX_LEAF_PAGE" ..
+        -DDEX_INNER_PAGE="$DEX_INNER_PAGE" -DDEX_LEAF_PAGE="$DEX_LEAF_PAGE" "${vopt[@]}" ..
   make -j"$(nproc)" newbench
   grep -q -- "-DMANUAL_PUSHDOWN" CMakeFiles/newbench.dir/flags.make
   if [ "$mn_only" = ON ]; then grep -q -- "-DMN_ONLY_PLACEMENT" CMakeFiles/newbench.dir/flags.make; fi
   # Record what this binary was built for; run_dex.sh refuses a mismatch.
-  printf 'inner_page=%s leaf_page=%s placement=%s\n' "$DEX_INNER_PAGE" "$DEX_LEAF_PAGE" "$DEX_PLACEMENT" > build_stamp.txt
+  printf '%s\n' "$DEX_STAMP" > build_stamp.txt
   echo "   ok: $DEX_BUILD/newbench"
 }
 
@@ -46,9 +47,11 @@ build_chime() {
   echo "   (CHIME's NIC macros live in include/Rdma.h; if this server was never set up,"
   echo "    run CHIME/run/configure_nic.sh on it first)"
   rm -rf "$CHIME_BUILD" && mkdir -p "$CHIME_BUILD" && cd "$CHIME_BUILD"
+  # pushed requests and replies carry the whole value when it is wider than 8 B
+  local pad=0; [ "$VALUE_B" -gt 8 ] && pad=$((VALUE_B - 8))
   cmake -DENABLE_OFFLOAD=ON -DCACHE_LEAF_NODE=ON \
         -DCHIME_VALUE_LEN="$VALUE_B" -DCHIME_INTERNAL_SPAN="$CHIME_INTERNAL_SPAN" \
-        -DCHIME_LEAF_SPAN="$CHIME_LEAF_SPAN" ..
+        -DCHIME_LEAF_SPAN="$CHIME_LEAF_SPAN" -DCHIME_RPC_VALUE_PAD="$pad" ..
   make -j"$(nproc)" micro_test
   # Record what this binary was built for; run_chime.sh refuses a mismatch.
   printf 'inner_span=%s leaf_span=%s value=%s\n' "$CHIME_INTERNAL_SPAN" "$CHIME_LEAF_SPAN" "$VALUE_B" > build_stamp.txt

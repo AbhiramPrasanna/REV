@@ -31,7 +31,11 @@ struct RawMessage {
   uint64_t k;         // key for B+-Tree RPC
   uint64_t v;         // value for B+-Tree RPC
   // Updated node
+#if DEX_VALUE_PAD > 0
+  uint8_t value_pad[DEX_VALUE_PAD]; // the rest of a simulated DEX_VALUE_LEN value
+#endif
 } __attribute__((packed));
+static_assert(sizeof(RawMessage) + 40 <= MESSAGE_SIZE, "RawMessage outgrew its message slot");
 
 class RawMessageConnection : public AbstractMessageConnection {
 

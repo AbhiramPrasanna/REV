@@ -120,6 +120,10 @@ RESULTS_DIR="$FAIR_DIR/results/$RUN_ID"
 # one DEX build per geometry/placement, so switching TREE_SETUP never runs a
 # binary built for the other geometry (run_dex.sh also checks [GEOMETRY]).
 DEX_BUILD="$REV_DIR/dex/build_${DEX_INNER_PAGE}_${DEX_LEAF_PAGE}_${DEX_PLACEMENT}"
+# values other than 8 B get their own build directories (DEX and CHIME below), so
+# a wide-value build never replaces the 8 B builds every earlier result used
+VALUE_SUFFIX=""; [ "$VALUE_B" != 8 ] && VALUE_SUFFIX="_v${VALUE_B}"
+DEX_BUILD="${DEX_BUILD}${VALUE_SUFFIX}"
 # one CHIME build per node format (build_fair = the 16/16 builds used so far);
 # run_chime.sh checks the stamp.
 if [ "$CHIME_INTERNAL_SPAN:$CHIME_LEAF_SPAN" = 16:16 ]; then
@@ -127,6 +131,11 @@ if [ "$CHIME_INTERNAL_SPAN:$CHIME_LEAF_SPAN" = 16:16 ]; then
 else
   CHIME_BUILD="$REV_DIR/CHIME/build_span${CHIME_INTERNAL_SPAN}_${CHIME_LEAF_SPAN}"
 fi
+CHIME_BUILD="${CHIME_BUILD}${VALUE_SUFFIX}"
+# DEX's build stamp names the value size only when it is not 8 B, so the stamps
+# of the existing 8 B builds still match
+DEX_STAMP="inner_page=$DEX_INNER_PAGE leaf_page=$DEX_LEAF_PAGE placement=$DEX_PLACEMENT"
+[ "$VALUE_B" != 8 ] && DEX_STAMP="$DEX_STAMP value=$VALUE_B"
 DART_DIR="$REV_DIR/DART"
 
 # ---------------------------------------------------------------------------
