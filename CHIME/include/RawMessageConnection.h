@@ -29,6 +29,9 @@ struct RawMessage {
   uint64_t k;         // key (offloading): LOOKUP key, SCAN `from`, or reply max_key
   uint64_t v;         // value (offloading): SCAN `to`
   uint64_t aux;       // RPC_WRITE: the CN's expected sibling of `addr` (0 = unknown)
+#if CHIME_RPC_VALUE_PAD > 0
+  uint8_t value_pad[CHIME_RPC_VALUE_PAD]; // the rest of a value wider than 8 B (Common.h)
+#endif
 } __attribute__((packed));
 // A message travels in a MESSAGE_SIZE slot that also carries the UD header.
 static_assert(sizeof(RawMessage) + 40 <= MESSAGE_SIZE, "RawMessage outgrew its message slot");

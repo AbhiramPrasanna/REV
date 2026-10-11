@@ -125,6 +125,12 @@ set(CHIME_VALUE_LEN "" CACHE STRING "Override simulatedValLen (value bytes); emp
 if(NOT CHIME_VALUE_LEN STREQUAL "")
     add_definitions(-DCHIME_VALUE_LEN=${CHIME_VALUE_LEN})
 endif()
+# Bytes added to every RPC message so pushed requests and replies carry the whole
+# value (CHIME_VALUE_LEN - 8 when values are wider than 8 B). Empty or 0 = none.
+set(CHIME_RPC_VALUE_PAD "" CACHE STRING "Value bytes beyond 8 carried by each RPC message; empty = 0")
+if(NOT CHIME_RPC_VALUE_PAD STREQUAL "")
+    add_definitions(-DCHIME_RPC_VALUE_PAD=${CHIME_RPC_VALUE_PAD})
+endif()
 
 #Tree Options (compile into CHIME/baselines; these options should be set up one after one; CHIME is the B+ tree that turns on all options)
 option (HOPSCOTCH_LEAF_NODE "+ Hopscotch leaf node" ON)

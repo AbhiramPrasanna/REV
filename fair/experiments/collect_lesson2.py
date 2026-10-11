@@ -45,6 +45,12 @@ def rx(text, pat, cast=float):
     return cast(m.group(1)) if m else ""
 
 
+def rx_last(text, pat, cast=float):
+    """The last match: counters printed both after warmup and after the measured phase."""
+    m = re.findall(pat, text)
+    return cast(m[-1]) if m else ""
+
+
 def local_log(path):
     """The log path recorded on the server, mapped into this checkout."""
     if os.path.exists(path):
@@ -99,8 +105,8 @@ def main():
             out["leaf_by_key_cfg"] = rx(t, r"leaf cache by key=(\d)", int)
             out["leaf_owner_cfg"] = rx(t, r"leaf cache by key=\d owner=(\d)", int)
             out["leaf_admit_push_cfg"] = rx(t, r"leaf cache by key=\d owner=\d admit_push=([0-9.]+)")
-            out["leaf_key_hits"] = rx(t, r"\[LEAFKEY\].*?key_hits=(\d+)", int)
-            out["leaf_push_admits"] = rx(t, r"\[LEAFKEY\].*?push_admits=(\d+)", int)
+            out["leaf_key_hits"] = rx_last(t, r"\[LEAFKEY\].*?key_hits=(\d+)", int)
+            out["leaf_push_admits"] = rx_last(t, r"\[LEAFKEY\].*?push_admits=(\d+)", int)
             out["remote_per_op"] = rx(t, r"remote ops / op\s*=\s*([0-9.]+)")
             out["lookup_pushdowns"] = rx(t, r"lookup pushdowns\s*=\s*(\d+)", int)
             out["scan_pushdowns"] = rx(t, r"scan\s+pushdowns \(RPC\)\s*=\s*(\d+)", int)
@@ -166,7 +172,9 @@ def main():
         for k in r:
             if k not in keys:
                 keys.append(k)
-    dst = os.path.join(RES, "lesson2_all.csv")
+    # L2_OUT / L2_LEVELS_OUT: other file names, for blocks of another sweep in the
+    # same format (collect_lesson3.py reads its CHIME part this way)
+    dst = os.path.join(RES, os.environ.get("L2_OUT", "lesson2_all.csv"))
     with open(dst, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=keys)
         w.writeheader()
@@ -179,7 +187,7 @@ def main():
              and int(r["inner_cache_mb"]) + int(r.get("leaf_cache_mb") or 0) != int(r["total_cache_mb"])]
     print(f"wrote {dst}: {len(rows)} cells from {len({r['block'] for r in rows})} blocks")
     if levels:
-        lv = os.path.join(RES, "lesson2_levels.csv")
+        lv = os.path.join(RES, os.environ.get("L2_LEVELS_OUT", "lesson2_levels.csv"))
         with open(lv, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(levels[0].keys()))
             w.writeheader()
