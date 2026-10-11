@@ -1,64 +1,66 @@
 #!/bin/bash
 # ===========================================================================
-# run_lesson3.sh <memory|compute> -- the Lesson 3 sweep:
-#   "Execution placement can make up for inherent weakness. Prior work argues
-#    for radix trees over B+tree indexes (DART) because of read amplification
-#    and RDMA traffic. Pushing cuts the B+tree's round trips and network bytes
-#    and lets it compete with the radix tree."
+# run_lesson3.sh <memory|compute> -- Lesson 3, on DART's own configuration:
+#   "Execution placement can make up for inherent weakness. DART (SIGMOD'26)
+#    argues for a radix tree over B+trees because of read amplification and
+#    RDMA traffic, and reports DART ahead of DEX by 1.3x and of CHIME by 2-3x on
+#    YCSB C. We rerun its configuration and add push."
 #
-# DART runs exactly as shipped (only ips[0] points at the memory server). It has
-# no compute-side node cache and its memory server does no index work, so its
-# lookups are one flat line at every cache size: the reference. DEX and CHIME run
-# on the SAME 10-level tree as Lesson 2 (TREE_SETUP=deep: 50M keys, 6.25M
-# leaves of 8 keys, 6 children per inner node, 1.25M inner nodes), with the same
-# 36 clients, 10M warmup + 30M measured lookups, uniform and Zipf 0.99 keys.
+# DART's setup (DART paper Section 5.1) and what this script does with it:
+#   keys      60M random 8 B integers        KEYS_M=60 (DART's generator spreads
+#                                            keys over 2^64; the B+trees hash theirs)
+#   values    64 B                           VALUE_B=64 in all three: DART natively,
+#                                            DEX and CHIME with simulated wide values
+#                                            (DEX_VALUE_LEN, CHIME_VALUE_LEN +
+#                                            CHIME_RPC_VALUE_PAD: every leaf entry and
+#                                            every RPC message carries the whole value)
+#   B+trees   as shipped (not stated)        TREE_SETUP=model: DEX 1 KB pages and its
+#                                            sorted load, CHIME 64-entry nodes, CHIME's
+#                                            own insert load, CHIME's hotspot buffer as
+#                                            shipped (on above 50 MB)
+#   workload  YCSB C, Zipf 0.99 (+ uniform)  part a; YCSB A (50% updates) in part b
+#   cache     ~1 MB for every system, and    1 8 32 128 400 MB (DART keeps no node
+#             a 1-400 MB sweep (Fig. 13)     cache in this build: a flat line)
+#   machines  3 + 3 servers, 168 clients     1 + 1 servers, 36 clients (state it)
+# DART runs exactly as shipped (only ips[0] points at the memory server).
 #
-# Parts (PARTS="a b c", all by default):
-#   a  DEX on the Lesson 2 tree: DEX (pull, 0 memory server threads) and
-#      DEX+Push (push from the deepest cached node, 1 2 4 8 16 threads), caches
-#      8..1024 MB, lookups                                            (96 cells)
-#      CHIME, CHIME+Push and CHIME+Push+Leaf on this tree are Lesson 2's part a
-#      (l2b); collect_lesson3.py reads them from lesson2_all.csv, nothing reruns.
-#   b  DART as shipped, lookups, at 8, 128 and 1024 MB: the cache value is
-#      passed the way DART's own sweep passes it and has no effect, so the three
-#      are repeats of the reference                                    (6 cells)
-#   c  simple tuning, node size: each B+tree with the node size it ships with
-#      (TREE_SETUP=model: DEX 1 KB pages, CHIME 64-entry nodes), pull against
-#      push with 8 and 16 threads, caches 8 16 32 128 MB, lookups. With part a
-#      (16-entry nodes, 10 levels) it shows the trade: big nodes read more
-#      bytes per level but make the tree short; push takes away the height
-#      cost, so small nodes stop costing round trips                  (48 cells)
+# Parts (PARTS="a b", both by default):
+#   a  YCSB C (lookups), uniform and Zipf 0.99, caches 1 8 32 128 400 MB:
+#        DART                                                       (6 cells: 1, 128,
+#                                                                    400 MB, repeats)
+#        DEX           pull (0 memory server threads)                         (10)
+#        DEX, own push DEX's rule (bottom four levels), 16 threads            (10)
+#        DEX+Push      push from the deepest cached node, 4 8 16 threads      (30)
+#        CHIME         as shipped, pull                                       (10)
+#        CHIME+Push    as shipped + push, 4 8 16 threads                      (30)
+#        CHIME+Push+Leaf  hot leaves (Lesson 2), Zipf, 8-400 MB, 4 8 16       (12)
+#  b  YCSB A (50% lookups, 50% updates), Zipf 0.99, caches 1 and 128 MB:
+#        DART, DEX, DEX+Push (16), CHIME, CHIME+Push (16; updates as CHIME
+#        does them)                                                          (10)
+#  118 cells, ~8.5 h. SMOKE=1: 3M + 3M ops, 1 and 128 MB, 16 threads, ~2 h (loading 60M keys dominates).
 #
-# Every cell records throughput, p99, round trips per lookup and network bytes
-# per lookup, which collect_lesson3.py turns into read amplification (bytes per
-# 16 B key-value pair):
-#   DEX    [newbench] "Avg. rdma read / op", "rdma rpc / op", "rdma read size/ op"
-#          (the request is already in the read size; the 33 B reply is added)
-#   CHIME  [RDMA node N] per_op round_trips / sends / bytes (CHIME_RDMA_STATS=1;
-#          the 41 B reply of each pushed request is added)
-#   DART   per-thread "avg rtt count" and "avg bandwidth consumption"; this build
-#          does not count the shortcut-table search, so one round trip of 128 B
-#          is added, the way DART's own DYNAMIC path counts it (art-node.cc:136)
-# and memory server cores busy (DEX: memory log; CHIME: memory log; DART: 0).
+# Every cell records throughput, p99, round trips and network bytes per op;
+# collect_lesson3.py adds each RPC reply, DART's uncounted shortcut-table read,
+# and read amplification = bytes / (8 B key + value).
 #
 # Build on BOTH servers first, from ~/REV (DART: ips[0] must be 10.30.1.8):
 #   git pull
-#   RUN_ID=l3_build TREE_SETUP=deep  ./fair/build.sh dex      # dex/build_288_352_mn_only
-#   RUN_ID=l3_build TREE_SETUP=model ./fair/build.sh dex      # dex/build_1024_1024_mn_only (part c)
-#   RUN_ID=l3_build TREE_SETUP=model ./fair/build.sh chime    # CHIME/build_span64_64      (part c)
+#   RUN_ID=l3_build TREE_SETUP=model VALUE_B=64 ./fair/build.sh dex chime
+#        -> dex/build_1024_1024_mn_only_v64, CHIME/build_span64_64_v64
 #   RUN_ID=l3_build ./fair/build.sh dart
-#   grep -n '"10.30.1.8"' DART/src/main/compute.cc            # ips[0]
+#   grep -c "value_bytes" dex/build_1024_1024_mn_only_v64/newbench    # >= 1
+# DART's memory server needs hugepages above its 20 GiB region (server 8):
+#   sudo sysctl -w vm.nr_hugepages=16384      # 32 GiB
 #
 # Run (memory first, same variables on both, one terminal each, no tmux):
 #   server 8:  cd ~/REV && bash fair/experiments/run_lesson3.sh memory  2>&1 | tee ~/l3_memory.out
 #   server 6:  cd ~/REV && bash fair/experiments/run_lesson3.sh compute 2>&1 | tee ~/l3_compute.out
 #
 # Useful variables (set the SAME on both servers):
-#   PARTS="a b"     run only some parts
+#   PARTS="a"       run only some parts
 #   DRY_RUN=1       print the plan and the time estimate, run nothing
 #   SKIP_TO=<block> resume from a block after a failure
-#   SMOKE=1         3M warmup + 3M measured ops, caches 8 and 1024, threads 0 and 16,
-#                   one DART cell per distribution: a ~25 minute check
+#   SMOKE=1         the short check above
 #   L3_TAG=l3smoke  block-name prefix (keeps a smoke test apart from the real run)
 #
 # Results: fair/results/<tag>_<part>_*/{dex,dart,chime}/..., merged by
@@ -67,56 +69,80 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 : "${L3_TAG:=l3}"
-: "${PARTS:=a b c}"
+: "${PARTS:=a b}"
 : "${L3_THREADS:=36}"                    # clients on the compute server, as Lessons 1 and 2
+: "${L3_KEYS_M:=60}"                     # DART paper: 60M keys
+: "${L3_VALUE_B:=64}"                    # DART paper: 64 B values
 : "${L3_OPS_M:=30}"
 : "${L3_WARMUP_M:=10}"
-: "${MTS:=1 2 4 8 16}"                   # DEX+Push memory server threads (0 = DEX, part a)
-: "${CACHES:=8 16 32 64 128 256 512 1024}"
-: "${DART_CACHES:=8 128 1024}"           # no effect on DART: three repeats
-: "${C_CACHES:=8 16 32 128}"
-: "${C_MTS:=0 8 16}"
+: "${L3_DART_MEM_MB:=20480}"             # DART's memory-server region (60M x 64 B + index)
+: "${CACHES:=1 8 32 128 400}"
+: "${DART_CACHES:=1 128 400}"            # no effect on DART: repeats
+: "${LEAF_CACHES:=8 32 128 400}"         # the leaf split needs room beyond the top levels
+: "${MTS:=4 8 16}"                       # memory server threads, push on
+: "${OWN_MT:=16}"                        # DEX's own push rule
+: "${B_CACHES:=1 128}"
+: "${B_MT:=16}"
+: "${INNER_MAX_MB:=32}"                  # CHIME+Push+Leaf: inner = min(this, cache / 2)
 if [ "${SMOKE:-0}" = 1 ]; then
-  L3_OPS_M=3; L3_WARMUP_M=3; MTS="16"; CACHES="8 1024"; DART_CACHES="8"
-  C_CACHES="8"; C_MTS="0 16"
+  L3_OPS_M=3; L3_WARMUP_M=3; CACHES="1 128"; DART_CACHES="1"; LEAF_CACHES="128"
+  MTS="16"; B_CACHES="128"
 fi
 part_on() { [[ " $PARTS " == *" $1 "* ]]; }
-LOOKUPS="point-uniform point-zipf"
+C_WL="point-uniform point-zipf"
+A_WL="point-zipf"
 
-RUNENV=("THREADS=$L3_THREADS" "OPS_M=$L3_OPS_M" "WARMUP_M=$L3_WARMUP_M" "REV_PARK_CMP_DIRS=1")
+RUNENV=("THREADS=$L3_THREADS" "KEYS_M=$L3_KEYS_M" "VALUE_B=$L3_VALUE_B" "OPS_M=$L3_OPS_M"
+        "WARMUP_M=$L3_WARMUP_M" "ZIPF_THETA=0.99" "REV_PARK_CMP_DIRS=1")
 DEXENV=("${RUNENV[@]}" "DEX_SAFE_PT=1")
-# CHIME as in Lesson 2: hotspot buffer off, inner nodes only, [RDMA] counters on
-CHIMEENV=("${RUNENV[@]}" "CHIME_HOTSPOT=0" "CHIME_PUSH_OPS=both" "LEAF_CACHE_MB="
+DARTENV=("${RUNENV[@]}" "DART_MEM_MB=$L3_DART_MEM_MB")
+# CHIME as shipped: hotspot buffer on (CHIME turns it on by itself above 50 MB)
+CHIMEENV=("${RUNENV[@]}" "CHIME_HOTSPOT=1" "CHIME_PUSH_OPS=both" "LEAF_CACHE_MB="
           "CHIME_LEAF_BY_KEY=0" "CHIME_LEAF_OWNER=0" "CHIME_LEAF_ADMIT_PUSH=0"
-          "CHIME_LEVEL_STATS=0" "CHIME_RDMA_STATS=1" "ZIPF_THETA=0.99")
+          "CHIME_LEVEL_STATS=0" "CHIME_RDMA_STATS=1")
 
 MANIFEST=()   # chime blocks, in collect_lesson2.py's manifest format
-dex_pair() {  # id-prefix tree caches memthreads(push) min
-  local id=$1 tree=$2 cs=$3 mts=$4 min=$5 n
-  n=$(count_cells "$cs" 0 "$LOOKUPS")
-  add_block "${id}_dex" dex "$tree" "$n" "CACHES=$cs" "MEMTHREADS=0" "WORKLOADS=$LOOKUPS" "${DEXENV[@]}" "@min=$min"
-  n=$(count_cells "$cs" "$mts" "$LOOKUPS")
-  add_block "${id}_dexpush" dexr "$tree" "$n" "CACHES=$cs" "MEMTHREADS=$mts" "WORKLOADS=$LOOKUPS" "${DEXENV[@]}" "@min=$min"
+dex_blk() {   # id system(dex|dexr) caches memthreads workloads min [VAR=..]
+  local id=$1 sys=$2 cs=$3 mts=$4 wl=$5 min=$6; shift 6
+  add_block "$id" "$sys" model "$(count_cells "$cs" "$mts" "$wl")" "CACHES=$cs" \
+    "MEMTHREADS=$mts" "WORKLOADS=$wl" "${DEXENV[@]}" "$@" "@min=$min"
+}
+chime_blk() { # id part arm caches memthreads workloads min [VAR=..]
+  local id=$1 part=$2 arm=$3 cs=$4 mts=$5 wl=$6 min=$7; shift 7
+  add_block "$id" chime model "$(count_cells "$cs" "$mts" "$wl")" "CACHES=$cs" \
+    "MEMTHREADS=$mts" "WORKLOADS=$wl" "${CHIMEENV[@]}" "CHIME_LEAF_SET=0" \
+    "CHIME_SCAN_OFFLOAD_ALWAYS=0" "$@" "@min=$min"
+  MANIFEST+=("$id,$part,\"$arm\",0,both,0,0.99,$wl,$cs,$mts")
+}
+dart_blk() {  # id caches workloads [VAR=..]
+  local id=$1 cs=$2 wl=$3; shift 3
+  add_block "$id" dart model "$(count_cells "$cs" 0 "$wl")" "CACHES=$cs" "MEMTHREADS=0" \
+    "WORKLOADS=$wl" "${DARTENV[@]}" "$@" "@min=3"
 }
 
-# ---- a: DEX on the Lesson 2 tree ---------------------------------------------
-part_on a && dex_pair "${L3_TAG}_a" deep "$CACHES" "$MTS" 2.4
-
-# ---- b: DART as shipped ----------------------------------------------------------
-if part_on b; then
-  n=$(count_cells "$DART_CACHES" 0 "$LOOKUPS")
-  add_block "${L3_TAG}_b_dart" dart deep "$n" "CACHES=$DART_CACHES" "MEMTHREADS=0" \
-    "WORKLOADS=$LOOKUPS" "${RUNENV[@]}" "@min=2"
+# ---- a: YCSB C ------------------------------------------------------------------
+if part_on a; then
+  dart_blk  "${L3_TAG}_a_dart" "$DART_CACHES" "$C_WL"
+  dex_blk   "${L3_TAG}_a_dex"     dex  "$CACHES" 0         "$C_WL" 3
+  dex_blk   "${L3_TAG}_a_dexown"  dex  "$CACHES" "$OWN_MT" "$C_WL" 3
+  dex_blk   "${L3_TAG}_a_dexpush" dexr "$CACHES" "$MTS"    "$C_WL" 3
+  chime_blk "${L3_TAG}_a_chime" a "CHIME as shipped (+ push when threads > 0)" \
+    "$CACHES" "0 $MTS" "$C_WL" 6
+  for c in $LEAF_CACHES; do
+    inner=$(( c / 2 < INNER_MAX_MB ? c / 2 : INNER_MAX_MB )); lmb=$(( c - inner ))
+    chime_blk "${L3_TAG}_a_leaf_c$c" a "CHIME+Push+Leaf (${inner} MB inner + hot leaves)" \
+      "$c" "$MTS" "$A_WL" 6 "CHIME_HOTSPOT=0" "LEAF_CACHE_MB=$lmb" "CHIME_LEAF_SET=1" \
+      "CHIME_LEAF_BY_KEY=1" "CHIME_LEAF_OWNER=1" "CHIME_LEAF_ADMIT_PUSH=0.1"
+  done
 fi
 
-# ---- c: node size as shipped (TREE_SETUP=model) -------------------------------------
-if part_on c; then
-  push_mts=""; for m in $C_MTS; do [ "$m" -gt 0 ] && push_mts="$push_mts $m"; done
-  dex_pair "${L3_TAG}_c" model "$C_CACHES" "${push_mts# }" 2.4
-  n=$(count_cells "$C_CACHES" "$C_MTS" "$LOOKUPS")
-  add_block "${L3_TAG}_c_chime" chime model "$n" "CACHES=$C_CACHES" "MEMTHREADS=$C_MTS" \
-    "WORKLOADS=$LOOKUPS" "${CHIMEENV[@]}" "CHIME_LEAF_SET=0" "CHIME_SCAN_OFFLOAD_ALWAYS=0" "@min=4"
-  MANIFEST+=("${L3_TAG}_c_chime,c,\"CHIME, 64-entry nodes (as shipped)\",0,both,0,0.99,$LOOKUPS,$C_CACHES,$C_MTS")
+# ---- b: YCSB A (50% updates) -----------------------------------------------------
+if part_on b; then
+  U=("UPDATE_PCT=50")
+  dart_blk  "${L3_TAG}_b_dart" "$B_CACHES" "$A_WL" "${U[@]}"
+  dex_blk   "${L3_TAG}_b_dex"     dex  "$B_CACHES" 0      "$A_WL" 3 "${U[@]}"
+  dex_blk   "${L3_TAG}_b_dexpush" dexr "$B_CACHES" "$B_MT" "$A_WL" 3 "${U[@]}"
+  chime_blk "${L3_TAG}_b_chime" b "CHIME as shipped, YCSB A" "$B_CACHES" "0 $B_MT" "$A_WL" 6 "${U[@]}"
 fi
 
 apply_skip; show_plan
@@ -128,6 +154,15 @@ if [ "$ROLE" = compute ] && [ "${DRY_RUN:-0}" != 1 ] && [ "${#MANIFEST[@]}" -gt 
 fi
 
 [ "${DRY_RUN:-0}" = 1 ] && { run_plan; exit 0; }
+
+# DART's memory server pins its region in hugepages
+if [ "$ROLE" = memory ]; then
+  hp=$(awk '/HugePages_Total/{print $2}' /proc/meminfo 2>/dev/null)
+  if [ -n "$hp" ] && [ "$((hp * 2))" -le "$L3_DART_MEM_MB" ]; then
+    echo "WARNING: $hp hugepages ($((hp * 2)) MiB) do not exceed DART's ${L3_DART_MEM_MB} MiB region." >&2
+    echo "         sudo sysctl -w vm.nr_hugepages=16384   before the DART blocks" >&2
+  fi
+fi
 
 # DEX and DART run under sudo: ask once, keep the ticket fresh for the whole run
 echo "== sudo: enter your password once; it is kept fresh until the run ends"

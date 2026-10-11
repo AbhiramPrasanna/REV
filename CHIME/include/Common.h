@@ -36,7 +36,16 @@
 #define CACHELINE_ALIGN_BIT 6
 #define MAX_KEY_SPACE_SIZE 60000000
 // #define KEY_SPACE_LIMIT
-#define MESSAGE_SIZE 96 // byte
+// CHIME_RPC_VALUE_PAD (cmake -DCHIME_RPC_VALUE_PAD=<B>, default 0): bytes added to
+// every RPC message so a pushed request and its reply carry a whole value when
+// values are wider than the 8 B Value field (simulatedValLen - 8). 0 keeps every
+// message as before.
+#ifndef CHIME_RPC_VALUE_PAD
+#define CHIME_RPC_VALUE_PAD 0
+#endif
+// One message slot: the 40 B UD header plus a RawMessage (96 B as before when the
+// pad is 0; grown in 16 B steps to fit it).
+#define MESSAGE_SIZE (96 + ((CHIME_RPC_VALUE_PAD + 15) / 16) * 16) // byte
 #define RAW_RECV_CQ_COUNT 4096 // 128
 #define MAX_TREE_HEIGHT 20
 

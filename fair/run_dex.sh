@@ -26,7 +26,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/params.sh"
 OUT="$RESULTS_DIR/dex"; mkdir -p "$OUT"
 BIN="$DEX_BUILD/newbench"
 [ -x "$BIN" ] || { echo "build first: RUN_ID=$RUN_ID TREE_SETUP=$TREE_SETUP ./fair/build.sh dex" >&2; exit 1; }
-want="inner_page=$DEX_INNER_PAGE leaf_page=$DEX_LEAF_PAGE placement=$DEX_PLACEMENT"
+want="$DEX_STAMP"
 have="$(cat "$DEX_BUILD/build_stamp.txt" 2>/dev/null || echo none)"
 if [ "$have" != "$want" ]; then
   echo "DEX binary in $DEX_BUILD was built for [$have], this run wants [$want]." >&2

@@ -38,6 +38,13 @@ if(DEX_LEAF_PAGE)
   add_definitions(-DDEX_LEAF_PAGE=${DEX_LEAF_PAGE})
   message(STATUS "DEX_LEAF_PAGE=${DEX_LEAF_PAGE}")
 endif()
+# Value bytes (default 8, the real Value). Larger values are simulated with
+# padding in every leaf entry and RPC message (include/Common.h, DEX_VALUE_LEN).
+set(DEX_VALUE_LEN "" CACHE STRING "DEX value bytes (default 8)")
+if(DEX_VALUE_LEN)
+  add_definitions(-DDEX_VALUE_LEN=${DEX_VALUE_LEN})
+  message(STATUS "DEX_VALUE_LEN=${DEX_VALUE_LEN}")
+endif()
 
 if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0 -mssse3 -march=native")

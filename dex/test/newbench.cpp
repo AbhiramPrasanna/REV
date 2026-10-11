@@ -537,6 +537,7 @@ void parse_args(int argc, char *argv[]) {
             << " inner_entries=" << cachepush::BTreeInner<Key>::maxEntries
             << " leaf_entries=" << cachepush::BTreeLeaf<Key, Value>::maxEntries
             << " slot=" << cachepush::pageSize
+            << " value_bytes=" << DEX_VALUE_LEN
 #ifdef MN_ONLY_PLACEMENT
             << " placement=mn_only"
 #else

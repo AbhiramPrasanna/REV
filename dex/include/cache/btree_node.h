@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <utility>
 
+#include "Common.h" // DEX_VALUE_PAD
+
 namespace cachepush {
 // #define MINI 1
 
@@ -215,9 +217,23 @@ struct BTreeLeafBase : public NodeBase {
   static const PageType typeMarker = PageType::BTreeLeaf;
 };
 
+#if DEX_VALUE_PAD > 0
+// A leaf entry whose value is DEX_VALUE_LEN bytes: the real 8 B value followed by
+// padding (Common.h). Same .first / .second as std::pair.
+template <class K, class P> struct PaddedKV {
+  K first;
+  P second;
+  uint8_t value_pad_[DEX_VALUE_PAD];
+};
+#endif
+
 template <class Key, class Payload> struct BTreeLeaf : public BTreeLeafBase {
   // This is the element type of the leaf node
+#if DEX_VALUE_PAD > 0
+  using KeyValueType = PaddedKV<Key, Payload>;
+#else
   using KeyValueType = std::pair<Key, Payload>;
+#endif
   // Leaf fanout from leafPageSize (the leaf size knob).
   static const uint64_t maxEntries =
       (leafPageSize - (sizeof(Key) * 2 + sizeof(uint64_t) * 2) -
@@ -286,12 +302,22 @@ template <class Key, class Payload> struct BTreeLeaf : public BTreeLeafBase {
     return success;
   }
 
-  uint32_t range_scan(Key k, uint32_t num, KeyValueType *&array) {
+  // `array` is the caller's key-value buffer (std::pair<Key, Value>): the same
+  // type as an entry when values are 8 B, copied pair by pair when they are padded.
+  template <class Out>
+  uint32_t range_scan(Key k, uint32_t num, Out *&array) {
     auto pos = lowerBound(k);
     if ((pos < count) && data[pos].first == k) {
       uint32_t remain_count = count - pos;
       uint32_t copy_count = std::min<uint32_t>(remain_count, num);
-      memcpy(array, data + pos, copy_count * sizeof(KeyValueType));
+      if constexpr (sizeof(Out) == sizeof(KeyValueType)) {
+        memcpy(array, data + pos, copy_count * sizeof(KeyValueType));
+      } else {
+        for (uint32_t i = 0; i < copy_count; ++i) {
+          array[i].first = data[pos + i].first;
+          array[i].second = data[pos + i].second;
+        }
+      }
       return copy_count;
     }
     return 0;
