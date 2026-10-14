@@ -17,6 +17,7 @@
 #include "rdma/rdma.hpp"
 #include "ycsb/ycsb.hpp"
 #include "prheart/prheart.hpp"
+#include "prheart/est_cache.hpp"                // EST entry cache, off unless DART_EST_CACHE_MB > 0
 
 #include "dart_microbench/workload_gen.h"  // in-memory working-set generator (test_func=1)
 #include "dart_microbench/bench_stats.h"   // p50/p99/p99.9 + LOCAL/REMOTE via rtt (run phase)
@@ -420,13 +421,40 @@ static void microbench_core(
     uint64_t per   = (total + used_thread_num - 1) / used_thread_num;
     uint64_t s = std::min<uint64_t>(per * thread_index, total);
     uint64_t e = std::min<uint64_t>(per * (thread_index + 1), total);
-    ycsb.prepare_workload(recs.begin() + s, recs.begin() + e);
+    // DART_WARMUP_M (run phase only; unset or 0 = as released): the run records
+    // then hold DART_WARMUP_M million extra operations (run_dart.sh raises
+    // --run_max_request by that much), and each thread runs the first
+    // DART_WARMUP_M/threads of its slice before the timer starts, uncounted. They
+    // are fresh draws from the same distribution, so nothing measured is replayed.
+    uint64_t warm = 0;
+    if (collect_stats) {
+        if (const char* w = std::getenv("DART_WARMUP_M"))
+            warm = std::strtoull(w, nullptr, 10) * 1000000ULL / used_thread_num;
+        warm = std::min<uint64_t>(warm, e - s);
+    }
+    ycsb.prepare_workload(recs.begin() + s + warm, recs.begin() + e);
 
     if (rdma_cli.size() == memory_machine_num) {
         for (int i = 0; i < memory_machine_num; ++i) {
             if (rdma_cli[i])
                 rdma_cli[i]->run(race_cli[i]->start(used_thread_num));
         }
+    }
+
+    if (warm) {
+        YCSB::Benchmark warmup;
+        warmup.register_read([&](span key, str& result) { prheart_tree.search(key); });
+        warmup.register_insert([&](span key, span value) { prheart_tree.insert(key, value); });
+        warmup.register_update([&](span key, span value) { prheart_tree.update(key, value); });
+        warmup.register_scan([&](span a, span b, vec<str>& r) { prheart_tree.scan(a, b, r); });
+        warmup.register_remove([&](span key) { prheart_tree.remove(key); });
+        warmup.prepare_workload(recs.begin() + s, recs.begin() + s + warm);
+        warmup.start_benchmark();
+        rtt = access_size = 0;                 // the measured phase counts from here
+        est_cache::reset_my_counters();
+        if (thread_index == 0)
+            std::printf("[WARMUP] %lu operations per thread before the measured phase\n",
+                        (unsigned long)warm);
     }
 
     time_counter.reset_time_counter();
@@ -1019,6 +1047,10 @@ int main(int argc, char** argv) {
         log_warn << "prepare done, start to run" << std::endl;
     }
 
+    // EST entry cache (DART_EST_CACHE_MB): starts empty now, after the load and the
+    // skip-table build; does nothing when the variable is unset or 0.
+    est_cache::begin_run(is_microbench, mb_insert_pct, mb_remove_pct);
+
     // create threads
     std::vector<std::thread> threads;
     for (uint32_t thread_ind = 0; thread_ind < run_thread_num; ++thread_ind) {
@@ -1057,6 +1089,7 @@ int main(int argc, char** argv) {
     if (is_microbench) {
         dart_bench::Reporter::print(com_ind);
     }
+    est_cache::report();
 
 
     // collect and show results

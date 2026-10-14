@@ -35,8 +35,15 @@ if [ "$role" = compute ]; then
   for b in monitor compute; do [ -x "$DART_DIR/bin/$b" ] || { echo "missing $DART_DIR/bin/$b; run ./fair/build.sh dart" >&2; exit 1; }; done
   grep -q "\"$MEM_IP\"" "$DART_DIR/src/main/compute.cc" || \
     echo "WARNING: DART compute.cc ips[0] is not $MEM_IP; the shortcut-table connection will fail." >&2
+  # DART_EST_CACHE=1: also cache hot Express Skip Table entries in the part of the
+  # cache budget the EST directory does not need (cache - DART_DIR_MB), as DART's
+  # paper does above its 1 MB default (DART/include/prheart/est_cache.hpp). 0 (the
+  # default) runs DART as released. DART_WARMUP_M: millions of fresh operations run
+  # before the measured phase, as DEX and CHIME warm up (0 = as released).
+  : "${DART_EST_CACHE:=0}" "${DART_DIR_MB:=1}" "${DART_WARMUP_M:=0}"
+  echo "DART: EST entry cache $( [ "$DART_EST_CACHE" = 1 ] && echo "on (cache - ${DART_DIR_MB} MB)" || echo off), warmup ${DART_WARMUP_M}M ops"
   csv="$OUT/dart.csv"
-  [ -f "$csv" ] || echo "system,workload,dist,cache_mb,memthreads,offload,leaf,tput_mops,p99_us,mean_us,rtt_per_op,log" > "$csv"
+  [ -f "$csv" ] || echo "system,workload,dist,cache_mb,memthreads,offload,leaf,tput_mops,p99_us,mean_us,rtt_per_op,log,est_cache_mb,warmup_m,est_hit_pct" > "$csv"
   echo "DART fair sweep (compute): $cells cells -> $OUT"
   i=0
   for wl in $WORKLOADS; do
@@ -49,13 +56,15 @@ if [ "$role" = compute ]; then
       i=$((i+1)); tag="dart_${wl}_cache${cache}"
       mlog="$OUT/${tag}.monitor.log"; clog="$OUT/${tag}.compute.log"
       th_b=$(( cache * 1048576 / THREADS ))
-      echo ">>> [$(date +%H:%M:%S)] ($i/$cells) $tag"
+      est_mb=0
+      if [ "$DART_EST_CACHE" = 1 ] && [ "$cache" -gt "$DART_DIR_MB" ]; then est_mb=$(( cache - DART_DIR_MB )); fi
+      echo ">>> [$(date +%H:%M:%S)] ($i/$cells) $tag  (EST entry cache ${est_mb} MB)"
       sudo killall -9 monitor compute 2>/dev/null; sleep 1
       sudo "$DART_DIR/bin/monitor" \
         --monitor_addr="0.0.0.0:$MON_PORT" --memory_num=1 --compute_num=1 \
         --load_thread_num="$THREADS" --run_thread_num="$THREADS" --coro_num=1 \
         --mem_mb="$DART_MEM_MB" --th_b="$th_b" --test_func=1 --bucket=256 \
-        --run_max_request=$((OPS_M * 1000000)) --payload_byte="$VALUE_B" \
+        --run_max_request=$(( (OPS_M + DART_WARMUP_M) * 1000000 )) --payload_byte="$VALUE_B" \
         --mb_read_pct=$read --mb_scan_pct=$scan \
         --mb_insert_pct=0 --mb_update_pct="$upd" --mb_remove_pct=0 \
         --mb_uniform=$uni --mb_theta_x100="$theta" \
@@ -63,7 +72,7 @@ if [ "$role" = compute ]; then
         > "$mlog" 2>&1 &
       mon=$!
       sleep 2
-      sudo "$DART_DIR/bin/compute" \
+      sudo env DART_EST_CACHE_MB="$est_mb" DART_WARMUP_M="$DART_WARMUP_M" "$DART_DIR/bin/compute" \
         --monitor_addr="$CMP_IP:$MON_PORT" --nic_index="$DART_CMP_NIC" --ib_port="$DART_IB_PORT" \
         --numa_node_total_num=2 --numa_node_group=0 > "$clog" 2>&1
       wait "$mon" 2>/dev/null
@@ -71,8 +80,9 @@ if [ "$role" = compute ]; then
       mean=$(strip_ansi < "$mlog" | grep -oE 'Average latency = [0-9.eE+-]+' | tail -1 | grep -oE '[0-9.eE+-]+$')
       p99=$(strip_ansi < "$clog" | awk '/\[ALL OPS\]/{f=1; next} f && match($0,/p99=[ ]*[0-9.]+/){s=substr($0,RSTART,RLENGTH);gsub(/p99=[ ]*/,"",s);print s; exit}')
       rtt=$(strip_ansi < "$clog" | sed -nE 's/.*rtt \/ op[^0-9]*([0-9.]+).*/\1/p' | tail -1)
-      echo "dart,$wl,$(wl_dist "$wl"),$cache,NA,off,NA,${thp:-NA},${p99:-NA},${mean:-NA},${rtt:-NA},$mlog" >> "$csv"
-      echo "    -> ${thp:-NA} Mops  p99 ${p99:-NA} us"
+      hit=$(strip_ansi < "$clog" | sed -nE 's/.*\[ESTCACHE\] mb=.* hit_pct=([0-9.]+).*/\1/p' | tail -1)
+      echo "dart,$wl,$(wl_dist "$wl"),$cache,NA,off,NA,${thp:-NA},${p99:-NA},${mean:-NA},${rtt:-NA},$mlog,$est_mb,$DART_WARMUP_M,${hit:-NA}" >> "$csv"
+      echo "    -> ${thp:-NA} Mops  p99 ${p99:-NA} us  EST entry hits ${hit:-NA}%"
       sudo killall -9 monitor compute 2>/dev/null
       sleep 3
     done
