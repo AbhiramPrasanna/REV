@@ -3,6 +3,7 @@
 #include "rdma/rdma.hpp"
 
 #include "prheart/art-node.hpp"
+#include "prheart/est_cache.hpp"
 #include "race/hash.h"
 
 
@@ -215,6 +216,19 @@ PrheartNode PrheartTree::get_root(span key) {
         key_.data = (char*)prefix.data();
         value.data = buffer;
         value.len = 0;
+        // est_cache (off unless DART_EST_CACHE_MB > 0): a cached express node needs
+        // no EST search; a search that does go out is counted (1 rtt, 128 B).
+        uint64_t est_tag = 0;
+        if (est_cache::enabled()) {
+            est_tag = est_cache::tag_of((const uint8_t*)prefix.data(), prefix.size());
+            uint64_t cached;
+            if (est_tag && est_cache::lookup(est_tag, cached)) {
+                std::memcpy(&node, &cached, sizeof(uint64_t));
+                return PrheartNode(this, static_cast<PrheartNodeType>(node.type), node.fptr, node.pos);
+            }
+            rtt++;
+            access_size += 128;
+        }
         uint64_t pattern = RACE::hash(key_.data, key_.len) >> 64;
         uint64_t mem_idx = pattern % memory_machine_num;
         rdma_cli[mem_idx]->run(race_cli[mem_idx]->search(&key_, &value));
@@ -231,7 +245,14 @@ PrheartNode PrheartTree::get_root(span key) {
         //     log_info << "value len:" << value.len << " value data:" << uint64_t(value.data) << std::endl;
         // log_info << "pos: " << node.pos << " type: " << node.type << "fptr:" <<hex_str(node.fptr) << std::endl;
         else if (value.len == 8)
+        {
+            if (est_tag) {
+                uint64_t found;
+                std::memcpy(&found, value.data, sizeof(uint64_t));
+                est_cache::store(est_tag, found);
+            }
             return PrheartNode(this, static_cast<PrheartNodeType>(node.type), node.fptr, node.pos);
+        }
         else if (value.len == 0)
         {
             // log_info << "can not find the prefix!" << std::endl;

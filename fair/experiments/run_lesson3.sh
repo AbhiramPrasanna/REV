@@ -38,6 +38,12 @@
 #        DART, DEX, DEX+Push (16), CHIME, CHIME+Push (16; updates as CHIME
 #        does them)                                                          (10)
 #  118 cells, ~8.5 h. SMOKE=1: 3M + 3M ops, 1 and 128 MB, 16 threads, ~2 h (loading 60M keys dominates).
+#  c  (not in the default PARTS; run it with PARTS=c) DART with the cache its paper
+#     describes above 1 MB: hot Express Skip Table entries in the budget the EST
+#     directory leaves free (DART_EST_CACHE=1; DART/include/prheart/est_cache.hpp),
+#     uniform and Zipf lookups at 1 8 32 128 400 MB, after a 10M-operation warmup
+#     like DEX and CHIME (DART_WARMUP_M=10); plus stock DART with the same warmup
+#     at 1 and 128 MB, to show the warmup alone changes nothing           (14 cells, ~45 min)
 #
 # Every cell records throughput, p99, round trips and network bytes per op;
 # collect_lesson3.py adds each RPC reply, DART's uncounted shortcut-table read,
@@ -135,6 +141,12 @@ if part_on a; then
       "$c" "$MTS" "$A_WL" 6 "CHIME_HOTSPOT=0" "LEAF_CACHE_MB=$lmb" "CHIME_LEAF_SET=1" \
       "CHIME_LEAF_BY_KEY=1" "CHIME_LEAF_OWNER=1" "CHIME_LEAF_ADMIT_PUSH=0.1"
   done
+fi
+
+# ---- c: DART with its hot EST-entry cache (only with PARTS=c) -------------------
+if part_on c; then
+  dart_blk "${L3_TAG}_c_dartest" "$CACHES" "$C_WL" "DART_EST_CACHE=1" "DART_WARMUP_M=$L3_WARMUP_M"
+  dart_blk "${L3_TAG}_c_dartwarm" "1 128" "$C_WL" "DART_EST_CACHE=0" "DART_WARMUP_M=$L3_WARMUP_M"
 fi
 
 # ---- b: YCSB A (50% updates) -----------------------------------------------------

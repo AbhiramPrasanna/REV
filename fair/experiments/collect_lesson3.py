@@ -158,13 +158,20 @@ def dart_rows():
                                       r"avg bandwidth consumption: ([0-9.eE+-]+)", t):
                 n = float(n)
                 ev += n; rt += n * float(a); bw += n * float(b)
-            out.append(row(system="DART", part=part, dist=r["dist"],
+            # With the EST entry cache on (DART_EST_CACHE_MB > 0) the binary counts its
+            # own skip-table searches ([ESTCACHE] ... counted_in_rtt=1): add nothing.
+            est = re.search(r"\[ESTCACHE\] mb=(\d+) .*?hit_pct=([0-9.]+).*?counted_in_rtt=1", t)
+            add_rtt, add_b = (0, 0) if est else (DART_RACE_RTT, DART_RACE_B)
+            est_mb = int(est.group(1)) if est else 0
+            out.append(row(system="DART+EST cache" if est_mb else "DART", part=part, dist=r["dist"],
                            cache_mb=int(r["cache_mb"]), memthreads=0,
                            tput_mops=fnum(r["tput_mops"]), p99_us=fnum(r["p99_us"]),
-                           round_trips_per_op=rt / ev + DART_RACE_RTT if ev else None,
-                           net_bytes_per_op=bw / ev + DART_RACE_B if ev else None,
+                           round_trips_per_op=rt / ev + add_rtt if ev else None,
+                           net_bytes_per_op=bw / ev + add_b if ev else None,
                            value_bytes=VALUE_B, mn_busy_cores=0.0, mn_busy_cores_peak=0.0,
-                           tree_height="", block=block, log=r["log"]))
+                           tree_height="", block=block, log=r["log"],
+                           est_cache_mb=est_mb, est_hit_pct=float(est.group(2)) if est else None,
+                           warmup_m=r.get("warmup_m", "")))
     return out
 
 
