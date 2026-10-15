@@ -16,6 +16,8 @@
 #   server 6:  RUN_ID=fair1 ./fair/run_dart.sh compute
 #   server 8:  RUN_ID=fair1 ./fair/run_dart.sh memory
 #
+# DART_INIT_DEPTH=<d> (default 15 = as released) runs the DART/bin_d<d> build,
+# whose shortcut table is 2^d segments (see fair/params.sh).
 # Needs: DART/src/main/compute.cc ips[0] = the memory server address ($MEM_IP),
 # hugepages and `ulimit -l unlimited` on both servers (DART/RUNNING.md).
 # Output: fair/results/$RUN_ID/dart/dart.csv + logs
@@ -32,7 +34,7 @@ strip_ansi() { sed -r 's/\x1B\[[0-9;?]*[A-Za-z]//g'; }
 cells=0; for wl in $WORKLOADS; do for cache in $CACHES; do cells=$((cells+1)); done; done
 
 if [ "$role" = compute ]; then
-  for b in monitor compute; do [ -x "$DART_DIR/bin/$b" ] || { echo "missing $DART_DIR/bin/$b; run ./fair/build.sh dart" >&2; exit 1; }; done
+  for b in monitor compute; do [ -x "$DART_BIN/$b" ] || { echo "missing $DART_BIN/$b; run DART_INIT_DEPTH=$DART_INIT_DEPTH ./fair/build.sh dart" >&2; exit 1; }; done
   grep -q "\"$MEM_IP\"" "$DART_DIR/src/main/compute.cc" || \
     echo "WARNING: DART compute.cc ips[0] is not $MEM_IP; the shortcut-table connection will fail." >&2
   # DART_EST_CACHE=1: also cache hot Express Skip Table entries in the part of the
@@ -41,9 +43,10 @@ if [ "$role" = compute ]; then
   # default) runs DART as released. DART_WARMUP_M: millions of fresh operations run
   # before the measured phase, as DEX and CHIME warm up (0 = as released).
   : "${DART_EST_CACHE:=0}" "${DART_DIR_MB:=1}" "${DART_WARMUP_M:=0}"
+  echo "DART: shortcut table depth $DART_INIT_DEPTH ($DART_BIN)"
   echo "DART: EST entry cache $( [ "$DART_EST_CACHE" = 1 ] && echo "on (cache - ${DART_DIR_MB} MB)" || echo off), warmup ${DART_WARMUP_M}M ops"
   csv="$OUT/dart.csv"
-  [ -f "$csv" ] || echo "system,workload,dist,cache_mb,memthreads,offload,leaf,tput_mops,p99_us,mean_us,rtt_per_op,log,est_cache_mb,warmup_m,est_hit_pct" > "$csv"
+  [ -f "$csv" ] || echo "system,workload,dist,cache_mb,memthreads,offload,leaf,tput_mops,p99_us,mean_us,rtt_per_op,log,est_cache_mb,warmup_m,est_hit_pct,init_depth,table_mib,shortcuts_dropped_pct" > "$csv"
   echo "DART fair sweep (compute): $cells cells -> $OUT"
   i=0
   for wl in $WORKLOADS; do
@@ -60,7 +63,7 @@ if [ "$role" = compute ]; then
       if [ "$DART_EST_CACHE" = 1 ] && [ "$cache" -gt "$DART_DIR_MB" ]; then est_mb=$(( cache - DART_DIR_MB )); fi
       echo ">>> [$(date +%H:%M:%S)] ($i/$cells) $tag  (EST entry cache ${est_mb} MB)"
       sudo killall -9 monitor compute 2>/dev/null; sleep 1
-      sudo "$DART_DIR/bin/monitor" \
+      sudo "$DART_BIN/monitor" \
         --monitor_addr="0.0.0.0:$MON_PORT" --memory_num=1 --compute_num=1 \
         --load_thread_num="$THREADS" --run_thread_num="$THREADS" --coro_num=1 \
         --mem_mb="$DART_MEM_MB" --th_b="$th_b" --test_func=1 --bucket=256 \
@@ -72,7 +75,7 @@ if [ "$role" = compute ]; then
         > "$mlog" 2>&1 &
       mon=$!
       sleep 2
-      sudo env DART_EST_CACHE_MB="$est_mb" DART_WARMUP_M="$DART_WARMUP_M" "$DART_DIR/bin/compute" \
+      sudo env DART_EST_CACHE_MB="$est_mb" DART_WARMUP_M="$DART_WARMUP_M" "$DART_BIN/compute" \
         --monitor_addr="$CMP_IP:$MON_PORT" --nic_index="$DART_CMP_NIC" --ib_port="$DART_IB_PORT" \
         --numa_node_total_num=2 --numa_node_group=0 > "$clog" 2>&1
       wait "$mon" 2>/dev/null
@@ -81,15 +84,17 @@ if [ "$role" = compute ]; then
       p99=$(strip_ansi < "$clog" | awk '/\[ALL OPS\]/{f=1; next} f && match($0,/p99=[ ]*[0-9.]+/){s=substr($0,RSTART,RLENGTH);gsub(/p99=[ ]*/,"",s);print s; exit}')
       rtt=$(strip_ansi < "$clog" | sed -nE 's/.*rtt \/ op[^0-9]*([0-9.]+).*/\1/p' | tail -1)
       hit=$(strip_ansi < "$clog" | sed -nE 's/.*\[ESTCACHE\] mb=.* hit_pct=([0-9.]+).*/\1/p' | tail -1)
-      echo "dart,$wl,$(wl_dist "$wl"),$cache,NA,off,NA,${thp:-NA},${p99:-NA},${mean:-NA},${rtt:-NA},$mlog,$est_mb,$DART_WARMUP_M,${hit:-NA}" >> "$csv"
-      echo "    -> ${thp:-NA} Mops  p99 ${p99:-NA} us  EST entry hits ${hit:-NA}%"
+      tmib=$(strip_ansi < "$clog" | sed -nE 's/.*\[SHORTCUT\] .*table_mib=([0-9.]+).*/\1/p' | tail -1)
+      drop=$(strip_ansi < "$clog" | sed -nE 's/.*\[SHORTCUT\] .*dropped_pct=([0-9.]+).*/\1/p' | tail -1)
+      echo "dart,$wl,$(wl_dist "$wl"),$cache,NA,off,NA,${thp:-NA},${p99:-NA},${mean:-NA},${rtt:-NA},$mlog,$est_mb,$DART_WARMUP_M,${hit:-NA},$DART_INIT_DEPTH,${tmib:-NA},${drop:-NA}" >> "$csv"
+      echo "    -> ${thp:-NA} Mops  p99 ${p99:-NA} us  EST entry hits ${hit:-NA}%  shortcut table ${tmib:-NA} MiB (depth $DART_INIT_DEPTH), dropped ${drop:-NA}%"
       sudo killall -9 monitor compute 2>/dev/null
       sleep 3
     done
   done
   echo "DART fair sweep (compute) done."
 else
-  [ -x "$DART_DIR/bin/memory" ] || { echo "missing $DART_DIR/bin/memory; run ./fair/build.sh dart" >&2; exit 1; }
+  [ -x "$DART_BIN/memory" ] || { echo "missing $DART_BIN/memory; run DART_INIT_DEPTH=$DART_INIT_DEPTH ./fair/build.sh dart" >&2; exit 1; }
   echo "DART fair sweep (memory): $cells cells, dialing $CMP_IP:$MON_PORT"
   killall -9 memory 2>/dev/null; sleep 1
   for (( i = 1; i <= cells; ++i )); do
@@ -97,7 +102,7 @@ else
     while :; do
       attempt=$((attempt + 1))
       mlog="$OUT/memory_cell${i}_try${attempt}.log"
-      "$DART_DIR/bin/memory" --monitor_addr="$CMP_IP:$MON_PORT" \
+      "$DART_BIN/memory" --monitor_addr="$CMP_IP:$MON_PORT" \
         --nic_index="$DART_MEM_NIC" --ib_port="$DART_IB_PORT" > "$mlog" 2>&1
       if grep -q "ready\." "$mlog"; then echo "    -> cell $i done"; rm -f "$OUT"/memory_cell${i}_try[0-9]*.log.fail; break; fi
       mv "$mlog" "$mlog.fail"

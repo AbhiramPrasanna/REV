@@ -1024,6 +1024,15 @@ int main(int argc, char** argv) {
             }
             log_info << "num shortcuts:" << shortcuts_total << std::endl;
             log_info << "skip list: load done!" << std::endl;
+            {   // table size (DART_INIT_DEPTH) and how many shortcuts it could not hold
+                uint64_t full = RACE::insert_full.load();
+                uint64_t segs = 1ull << RACE::INIT_DEPTH;
+                std::printf("[SHORTCUT] init_depth=%lu table_mib=%.1f dir_kib=%.1f shortcuts=%lu dropped=%lu dropped_pct=%.2f\n",
+                            (unsigned long)RACE::INIT_DEPTH, segs * sizeof(RACE::Segment) / 1048576.0,
+                            segs * sizeof(RACE::DirEntry) / 1024.0, (unsigned long)shortcuts_total,
+                            (unsigned long)full, shortcuts_total ? 100.0 * full / shortcuts_total : 0.0);
+                std::fflush(stdout);
+            }
         }
         #endif
 

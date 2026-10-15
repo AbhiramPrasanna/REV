@@ -137,6 +137,11 @@ CHIME_BUILD="${CHIME_BUILD}${VALUE_SUFFIX}"
 DEX_STAMP="inner_page=$DEX_INNER_PAGE leaf_page=$DEX_LEAF_PAGE placement=$DEX_PLACEMENT"
 [ "$VALUE_B" != 8 ] && DEX_STAMP="$DEX_STAMP value=$VALUE_B"
 DART_DIR="$REV_DIR/DART"
+# DART_INIT_DEPTH (default 15 = as released): the shortcut table holds 2^depth
+# segments (15 = 432 MiB). Other depths run the binaries ./fair/build.sh dart puts
+# in DART/bin_d<depth>; the as-released DART/bin is never touched.
+: "${DART_INIT_DEPTH:=15}"
+DART_BIN="$DART_DIR/bin"; [ "$DART_INIT_DEPTH" != 15 ] && DART_BIN="$DART_DIR/bin_d$DART_INIT_DEPTH"
 
 # ---------------------------------------------------------------------------
 # small helpers shared by the run scripts
@@ -188,7 +193,7 @@ cleanup_node() {
   echo ">> [$(hostname -s 2>/dev/null || cat /etc/hostname)] cleanup: stopping leftover newbench / micro_test / DART processes and memcached"
   sudo -n pkill -9 -x newbench 2>/dev/null   # -n: never stop for a password
   pkill -9 -u "$(id -u)" -x micro_test 2>/dev/null
-  sudo -n pkill -9 -f "$DART_DIR/bin/(monitor|compute|memory)" 2>/dev/null
+  sudo -n pkill -9 -f "$DART_DIR/bin[^/]*/(monitor|compute|memory)" 2>/dev/null
   pkill -u "$(id -u)" -x memcached 2>/dev/null   # only ours: server 8 is shared
   rm -f /tmp/memcached-fair.pid
   sleep 3

@@ -33,6 +33,16 @@ add_subdirectory(${magic_enum_dir})
 include_directories(${magic_enum_dir}/include)
 
 
+# -DDART_INIT_DEPTH=<11..15>: shortcut-table size (include/race/race.h). Unset or
+# 15 = as released, binaries in bin/; any other depth goes to bin_d<depth>/.
+set(DART_BIN_DIR ${CMAKE_SOURCE_DIR}/bin)
+if(DEFINED DART_INIT_DEPTH)
+    add_compile_definitions(DART_INIT_DEPTH=${DART_INIT_DEPTH})
+    if(NOT DART_INIT_DEPTH EQUAL 15)
+        set(DART_BIN_DIR ${CMAKE_SOURCE_DIR}/bin_d${DART_INIT_DEPTH})
+    endif()
+endif()
+
 file(GLOB src_file ${CMAKE_SOURCE_DIR}/src/*/*.cc ${CMAKE_SOURCE_DIR}/src/*.cc)
 
 foreach(main_exec monitor compute memory)
@@ -56,8 +66,8 @@ foreach(main_exec monitor compute memory)
     if (UNIX)
         SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -g")
         add_custom_command(TARGET ${main_exec} POST_BUILD
-            COMMAND mkdir -p ${CMAKE_SOURCE_DIR}/bin
-            COMMAND mv ${main_exec} ${CMAKE_SOURCE_DIR}/bin/
+            COMMAND mkdir -p ${DART_BIN_DIR}
+            COMMAND mv ${main_exec} ${DART_BIN_DIR}/
         )
     endif()
 

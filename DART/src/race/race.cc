@@ -4,6 +4,8 @@
 namespace RACE
 {
 
+std::atomic<uint64_t> insert_full{0};
+
 inline __attribute__((always_inline)) uint64_t fp(uint64_t pattern)
 {
     return ((uint64_t)((pattern)>>32)&((1<<8)-1));
@@ -342,7 +344,10 @@ Retry:
 
     if (slot_ptr == 0ul)
     {
-        race_log_err("[%lu:%lu]%s split for key:%lu with local_depth:%u global_depth:%lu at segloc:%lx",cli_id,coro_id,(buc_data->local_depth==dir->global_depth)?"gloabl":"local",*(uint64_t*)key->data,buc_data->local_depth,dir->global_depth,segloc);
+        // a smaller table (DART_INIT_DEPTH < 15) drops millions: log the first 10 only
+        uint64_t n_full = insert_full.fetch_add(1, std::memory_order_relaxed);
+        if (INIT_DEPTH == 15 || n_full < 10)
+            race_log_err("[%lu:%lu]%s split for key:%lu with local_depth:%u global_depth:%lu at segloc:%lx",cli_id,coro_id,(buc_data->local_depth==dir->global_depth)?"gloabl":"local",*(uint64_t*)key->data,buc_data->local_depth,dir->global_depth,segloc);
         co_return;
         // co_await Split(segloc, segptr, buc->local_depth, buc->local_depth == dir->global_depth);
         // goto Retry;
