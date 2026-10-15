@@ -280,7 +280,7 @@ std::atomic<uint64_t> g_meas_end_ns{0};
 // 0 = op-bounded: run exactly opM*1e6 ops per node (DEX's time_based=0).
 // 1 = time-bounded: cycle the array for TEST_EPOCH*TIME_INTERVAL seconds.
 int g_time_based = 0;
-// CHIME_MN_CLIENTS=0: the memory node (node 0) runs no client operations. Its
+// CHIME_MN_CLIENTS=0: the memory nodes (nodes 0..MEMORY_NODE_NUM-1) run no client operations. Its
 // threads still take part in every barrier (bulk / warmup / done), so the run
 // structure is unchanged, but only the compute node drives load -- the same
 // client placement as DEX and DART, where the memory node serves requests only.
@@ -555,7 +555,7 @@ int main(int argc, char *argv[]) {
   else
     printf("[CONFIG node %d] bulk-load order: %s (CHIME_SORTED_LOAD)\n",
            dsm->getMyNodeID(), g_sorted_load ? "sorted, contiguous per loader (DEX-like)" : "shuffled");
-  g_run_clients = g_mn_clients || dsm->getMyNodeID() != 0;
+  g_run_clients = g_mn_clients || dsm->getMyNodeID() >= MEMORY_NODE_NUM;   // memory nodes: 0..n-1
   printf("[CONFIG node %d] clients on this node: %s (CHIME_MN_CLIENTS)\n",
          dsm->getMyNodeID(), g_run_clients ? "yes" : "no");
 #ifdef CACHE_LEAF_NODE
@@ -563,7 +563,7 @@ int main(int argc, char *argv[]) {
   // correct only while ONE node writes the tree (the bulk build runs on the last
   // node, the compute node). Refuse a second client node.
   {
-    const int client_nodes = g_mn_clients ? kNodeCount : kNodeCount - 1;
+    const int client_nodes = g_mn_clients ? kNodeCount : kNodeCount - MEMORY_NODE_NUM;
     if (leafcache::owner() && client_nodes != 1) {
       fprintf(stderr, "CHIME_LEAF_OWNER=1 needs exactly one client node (got %d; set CHIME_MN_CLIENTS=0 "
                       "with one compute node)\n", client_nodes);

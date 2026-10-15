@@ -57,6 +57,9 @@ PerThread<uint64_t> pushw_served_cnt;
 // CHIME_PUSH_WRITES pushes the whole write.
 PerThread<uint64_t> locate_write_cnt;
 PerThread<uint64_t> locate_fail_cnt;
+// Pushed lookups whose walk reached another memory node (chime_rpc.h
+// kCrossedNode, MEMORY_NODE_NUM > 1) and that the compute node finished itself.
+PerThread<uint64_t> offload_cross_cnt;
 static inline bool push_locate_on() {
   static const bool on = [] { const char *e = getenv("CHIME_PUSH_LOCATE"); return e && atoi(e) == 1; }();
   return on;
@@ -88,7 +91,10 @@ static inline int push_ops_mask() {
   return m;
 }
 static inline bool push_lookups() { return (push_ops_mask() & 1) != 0; }
-static inline bool push_scans() { return (push_ops_mask() & 2) != 0; }
+// Scan pushdown walks child pointers without the other-memory-node check the
+// lookup walk has (chime_rpc.h descend_to_leaf, range_scan), so with more than one
+// memory node scans are pulled.
+static inline bool push_scans() { return MEMORY_NODE_NUM == 1 && (push_ops_mask() & 2) != 0; }
 #endif
 
 // Index-cache size (MB) as a RUNTIME knob, so a cache sweep needs no rebuild
@@ -2071,18 +2077,24 @@ bool Tree::search(const Key &k, Value &v, CoroPull* sink) {
       GlobalAddress push_leaf;
       uint64_t push_lo = 0, push_hi = 0;
       int ret = dsm->rpc_lookup(p, (int)level, k, off_v, &push_leaf, &push_lo, &push_hi);
-      v = (ret == 1) ? off_v : define::kValueNull;
-      search_res = (ret == 1);
-      offload_lookup_cnt[dsm->getMyThreadID()] ++;
+      if (ret == chime_offload::kCrossedNode) {
+        // the walk reached another memory node (MEMORY_NODE_NUM > 1): finish it
+        // here, pulling from the same cache boundary
+        offload_cross_cnt[dsm->getMyThreadID()] ++;
+      } else {
+        v = (ret == 1) ? off_v : define::kValueNull;
+        search_res = (ret == 1);
+        offload_lookup_cnt[dsm->getMyThreadID()] ++;
 #ifdef CACHE_LEAF_NODE
-      // CHIME_LEAF_ADMIT_PUSH: the memory node said which leaf answered; maybe cache it
-      if (leaf_cache && ret == 1 && push_leaf != GlobalAddress::Null() &&
-          leafcache::admit_push_rate() > 0.0 && leafcache::admit(leafcache::admit_push_rate()))
-        leaf_admit_after_push(push_leaf, push_lo, push_hi, sink);
+        // CHIME_LEAF_ADMIT_PUSH: the memory node said which leaf answered; maybe cache it
+        if (leaf_cache && ret == 1 && push_leaf != GlobalAddress::Null() &&
+            leafcache::admit_push_rate() > 0.0 && leafcache::admit(leafcache::admit_push_rate()))
+          leaf_admit_after_push(push_leaf, push_lo, push_hi, sink);
 #else
-      UNUSED(push_lo); UNUSED(push_hi);
+        UNUSED(push_lo); UNUSED(push_hi);
 #endif
-      goto search_finish;
+        goto search_finish;
+      }
     }
   }
 #endif
@@ -3772,6 +3784,12 @@ void Tree::leaf_cache_statistics() {
     for (int i = 0; i < MAX_APP_THREAD; ++ i) { pushed += offload_write_cnt[i]; served += pushw_served_cnt[i]; }
     printf("[PUSHW] node %d: writes pushed=%lu, writes run for other nodes=%lu\n",
            dsm->getMyNodeID(), pushed, served);
+  }
+  if (MEMORY_NODE_NUM > 1) {
+    uint64_t crossed = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++ i) crossed += offload_cross_cnt[i];
+    printf("[PUSHX] node %d: pushed lookups that reached another memory node and were finished here=%lu\n",
+           dsm->getMyNodeID(), crossed);
   }
   if (push_locate_on()) {
     uint64_t located = 0, failed = 0;

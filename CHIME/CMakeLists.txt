@@ -106,6 +106,11 @@ endif()
 # Inner-node size (internalSpanSize / fanout) override for the node-size sweep.
 # Empty string keeps the source default (16); run/run_span_sweep.sh sets it per
 # rebuilt binary. See include/Common.h.
+set(CHIME_MEMORY_NODES "" CACHE STRING "Number of memory nodes (MEMORY_NODE_NUM, nodes 0..n-1); empty = 1")
+if(NOT CHIME_MEMORY_NODES STREQUAL "")
+    add_definitions(-DMEMORY_NODE_NUM=${CHIME_MEMORY_NODES})
+endif()
+
 set(CHIME_INTERNAL_SPAN "" CACHE STRING "Override internalSpanSize (inner-node fanout); empty = source default")
 if(NOT CHIME_INTERNAL_SPAN STREQUAL "")
     add_definitions(-DCHIME_INTERNAL_SPAN=${CHIME_INTERNAL_SPAN})
