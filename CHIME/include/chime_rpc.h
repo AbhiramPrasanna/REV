@@ -233,6 +233,67 @@ inline int lookup_from(char *dsm_base, GlobalAddress node_addr, int level,
 // GlobalAddress::Null() if the walk fails (pathological writer / off-node).
 // Used by the scan pushdown so a scan request can start from the deepest cached
 // node, exactly as point lookups do, instead of the CN walking down one sided.
+// CHIME_PUSH_LOCATE: the same walk, for a write the compute node then does
+// itself. Besides the leaf it returns what the compute node's own descent
+// (Tree::internal_node_search) would have: the leaf's expected sibling, taken
+// from the PARENT (its next child pointer, or the parent's sibling_leftmost_ptr
+// for its last child) so a leaf split since the parent was written still trips
+// the leaf's turn-right check; and the parent itself (the leaves' parents are
+// level 1 in CHIME) for path_stack[1], so a leaf split finds its parent without
+// a search. Null leaf if the walk fails; Null parent when `node_addr` was the leaf.
+inline GlobalAddress locate_leaf(char *dsm_base, GlobalAddress node_addr, int level,
+                                 const Key &k, GlobalAddress &sibling_out,
+                                 GlobalAddress &parent_out) {
+  static thread_local InternalScratch is;
+  sibling_out = GlobalAddress::Null();
+  parent_out = GlobalAddress::Null();
+  for (int hops = 0; hops < 64; ++hops) {
+    if (level <= 1) return node_addr;
+
+    InternalNode *node = nullptr;
+    for (int spin = 0; !read_internal_local(dsm_base, node_addr, is, node); ++spin)
+      if (spin > (1 << 22)) return GlobalAddress::Null();
+
+    const auto &fk = node->metadata.fence_keys;
+    if (k >= fk.highest) {                   // turn right, as internal_node_search
+      GlobalAddress sib = node->metadata.sibling_ptr;
+      if (!sibling_on_this_node(sib, node_addr.nodeID)) return GlobalAddress::Null();
+      node_addr = sib;
+      continue;
+    }
+    if (k < fk.lowest) return GlobalAddress::Null();
+
+    level = node->metadata.level;
+    if (level == 1) parent_out = node_addr;
+    auto &records = node->records;
+#ifdef UNORDERED_INTERNAL_NODE
+    std::sort(records, records + define::internalSpanSize,
+              [](const InternalEntry &a, const InternalEntry &b) {
+                if (a.key == define::kkeyNull) return false;
+                if (b.key == define::kkeyNull) return true;
+                return a.key < b.key;
+              });
+#endif
+    GlobalAddress child, sib;
+    if (k < records[0].key) {
+      child = node->metadata.leftmost_ptr;
+      sib = records[0].ptr;
+    } else {
+      int i = 1;
+      for (; i < (int)define::internalSpanSize; ++i)
+        if (k < records[i].key || records[i].key == define::kkeyNull) break;
+      child = records[i - 1].ptr;
+      sib = (i == (int)define::internalSpanSize || records[i].key == define::kkeyNull)
+                ? (GlobalAddress)node->metadata.sibling_leftmost_ptr : records[i].ptr;
+    }
+    if (child == GlobalAddress::Null() || child.nodeID != node_addr.nodeID)
+      return GlobalAddress::Null();          // off this memory node: the CN walks itself
+    node_addr = child;
+    sibling_out = sib;
+  }
+  return GlobalAddress::Null();
+}
+
 inline GlobalAddress descend_to_leaf(char *dsm_base, GlobalAddress node_addr,
                                      int level, const Key &k) {
   static thread_local InternalScratch is;
