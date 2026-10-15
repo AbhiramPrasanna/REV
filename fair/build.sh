@@ -13,7 +13,8 @@
 #          CHIME/build_span64_64/micro_test for stock nodes (model); CHIME/build
 #          is untouched
 # DART  -> DART/bin/{monitor,compute,memory} built by DART's own build.sh,
-#          exactly as shipped (no flags, no source changes).
+#          exactly as shipped (no flags). DART_INIT_DEPTH=<d> (not 15) builds a
+#          smaller or larger shortcut table into DART/build_d<d> -> DART/bin_d<d>.
 # ===========================================================================
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/params.sh"
@@ -65,8 +66,14 @@ build_dart() {
     echo "         DART dials that address for its shortcut table; set ips[0]=\"$MEM_IP\"" >&2
     echo "         (address configuration only) and re-run this build, or DART cannot start." >&2
   fi
-  cd "$DART_DIR" && ./build.sh
-  ls -l "$DART_DIR/bin/"{monitor,compute,memory}
+  if [ "$DART_INIT_DEPTH" = 15 ]; then
+    cd "$DART_DIR" && ./build.sh
+  else
+    echo "   shortcut table: DART_INIT_DEPTH=$DART_INIT_DEPTH (2^$DART_INIT_DEPTH segments) -> $DART_BIN"
+    cd "$DART_DIR" && cmake -B "build_d$DART_INIT_DEPTH" -DDART_INIT_DEPTH="$DART_INIT_DEPTH" \
+      && cmake --build "build_d$DART_INIT_DEPTH" -j"$(nproc)"
+  fi
+  ls -l "$DART_BIN/"{monitor,compute,memory}
 }
 
 for t in "${targets[@]}"; do
