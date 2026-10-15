@@ -202,6 +202,23 @@ void Directory::process_message(const RawMessage *m) {
     break;
   }
 
+  case RpcType::RPC_LOCATE: {
+    // CHIME_PUSH_LOCATE: walk to the leaf a write needs and return it with its
+    // expected sibling and parent (chime_rpc.h locate_leaf); the compute node
+    // writes it. Reads only, like RPC_LOOKUP, so a directory thread may run it.
+    Key k;
+    memcpy(k.data(), &m->k, define::keyLen);
+    GlobalAddress sib, parent;
+    GlobalAddress leaf = chime_offload::locate_leaf((char *)dCon->dsmPool, m->addr, m->level,
+                                                    k, sib, parent);
+    send = (RawMessage *)dCon->message->getSendPool();
+    send->level = (leaf == GlobalAddress::Null()) ? 0 : 1;
+    send->addr = leaf;
+    send->v = sib.to_uint64();
+    send->aux = parent.to_uint64();
+    break;
+  }
+
   case RpcType::RPC_SCAN: {
     // m->addr = entry leaf, m->k = `from`, m->v = `to`, m->level = requested count.
     Key from, to;

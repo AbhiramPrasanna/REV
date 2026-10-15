@@ -49,6 +49,18 @@ PerThread<uint64_t> offload_scan_leaf;
 // node's workers ran for other nodes.
 PerThread<uint64_t> offload_write_cnt;
 PerThread<uint64_t> pushw_served_cnt;
+// CHIME_PUSH_LOCATE=1 (default 0 = stock): a write that misses inner nodes in the
+// cache pushes only its walk (RPC_LOCATE, chime_rpc.h locate_leaf); the memory
+// node returns the leaf and the compute node writes it with CHIME's own protocol,
+// as when the cache resolves the leaf. Same rule as a pushed lookup (offloading
+// on, level >= CHIME_OFFLOAD_MIN_LEVEL, never to this machine). Ignored when
+// CHIME_PUSH_WRITES pushes the whole write.
+PerThread<uint64_t> locate_write_cnt;
+PerThread<uint64_t> locate_fail_cnt;
+static inline bool push_locate_on() {
+  static const bool on = [] { const char *e = getenv("CHIME_PUSH_LOCATE"); return e && atoi(e) == 1; }();
+  return on;
+}
 
 // Deterministic per-thread decision so a rate of r% offloads ~r of every 100
 // point lookups on each thread (no RNG in the hot path).
@@ -214,6 +226,8 @@ Tree::Tree(DSM *dsm, uint16_t tree_id, bool init_root) : dsm(dsm), tree_id(tree_
   if (!hotspot_enabled()) hotspot_on = false;
   printf("[CONFIG] hotspot buffer + speculative read: %s (CHIME_HOTSPOT; stock CHIME: on above %d MB)\n",
          hotspot_on ? "on" : "off", define::kHotspotBufSize + 20);
+  printf("[CONFIG] write walk pushed, write pulled: %s (CHIME_PUSH_LOCATE)\n",
+         push_locate_on() ? "on" : "off");
   if (hotspot_on) tree_cache = new TreeCache(g_index_cache_mb - define::kHotspotBufSize, dsm);  // enable hotspot idx cache
   else tree_cache = new TreeCache(g_index_cache_mb, dsm);
 #else
@@ -540,6 +554,19 @@ void Tree::insert(const Key &k, Value v, CoroPull* sink) {
     if (pushw::owner_mode()) {
       fprintf(stderr, "[PUSHW] mode 2: memory node %d declined a write\n", (int)p.nodeID);
       abort();
+    }
+  }
+  // CHIME_PUSH_LOCATE: push the walk, then write the leaf here
+  if (push_locate_on() && !pushw::enabled() && level >= 2 && p.nodeID != dsm->getMyNodeID() &&
+      (int)level >= g_offload_min_level && should_offload(dsm->getMyThreadID())) {
+    GlobalAddress leaf, sib, parent;
+    if (dsm->rpc_locate(p, level, k, leaf, sib, parent)) {
+      locate_write_cnt[dsm->getMyThreadID()] ++;
+      if (parent != GlobalAddress::Null()) path_stack[sink ? sink->get() : 0][1] = parent;
+      p = leaf, sibling_p = sib, level = 1;
+      from_cache = false, cache_entry = nullptr;   // a walked leaf, as from the root
+    } else {
+      locate_fail_cnt[dsm->getMyThreadID()] ++;     // walk it here as usual
     }
   }
 #endif
@@ -1739,6 +1766,18 @@ void Tree::update(const Key &k, Value v, CoroPull* sink) {
       abort();
     }
   }
+  // CHIME_PUSH_LOCATE: push the walk, then update the leaf here
+  if (push_locate_on() && !pushw::enabled() && level >= 2 && p.nodeID != dsm->getMyNodeID() &&
+      (int)level >= g_offload_min_level && should_offload(dsm->getMyThreadID())) {
+    GlobalAddress leaf, sib, parent;
+    if (dsm->rpc_locate(p, level, k, leaf, sib, parent)) {
+      locate_write_cnt[dsm->getMyThreadID()] ++;
+      p = leaf, sibling_p = sib, level = 1;
+      from_cache = false, cache_entry = nullptr;   // a walked leaf, as from the root
+    } else {
+      locate_fail_cnt[dsm->getMyThreadID()] ++;     // walk it here as usual
+    }
+  }
 #endif
 
 next:
@@ -1746,9 +1785,10 @@ next:
   // read leaf node
   if (level == 1) {
     if (!leaf_node_update(p, sibling_p, k, v, from_cache, sink)) {  // return false if cache validation fail
-      // cache invalidation
-      assert(from_cache);
-      tree_cache->invalidate(cache_entry);
+      // cache invalidation (a leaf CHIME_PUSH_LOCATE found has no cache entry:
+      // retry from the root below, as for any walked leaf)
+      assert(from_cache || push_locate_on());
+      if (cache_entry) tree_cache->invalidate(cache_entry);
 #ifdef CACHE_MORE_INTERNAL_NODE
       cache_entry = tree_cache->search_from_cache(k, p, sibling_p, level);
       from_cache = cache_entry ? true : false;
@@ -3732,6 +3772,12 @@ void Tree::leaf_cache_statistics() {
     for (int i = 0; i < MAX_APP_THREAD; ++ i) { pushed += offload_write_cnt[i]; served += pushw_served_cnt[i]; }
     printf("[PUSHW] node %d: writes pushed=%lu, writes run for other nodes=%lu\n",
            dsm->getMyNodeID(), pushed, served);
+  }
+  if (push_locate_on()) {
+    uint64_t located = 0, failed = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++ i) { located += locate_write_cnt[i]; failed += locate_fail_cnt[i]; }
+    printf("[PUSHLOC] node %d: writes whose walk was pushed=%lu, walks done here instead=%lu\n",
+           dsm->getMyNodeID(), located, failed);
   }
 #endif
 #ifdef CACHE_LEAF_NODE

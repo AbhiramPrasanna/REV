@@ -16,6 +16,7 @@ enum RpcType : uint8_t {
   RPC_LOOKUP, // point lookup pushdown: probe leaf on the memory node
   RPC_SCAN,   // range-scan pushdown: memory node scans across sibling leaves
   RPC_WRITE,  // insert/update pushdown (CHIME_PUSH_WRITES=1, see push_write.h)
+  RPC_LOCATE, // a write's walk pushed, the write pulled (CHIME_PUSH_LOCATE=1)
 };
 
 struct RawMessage {

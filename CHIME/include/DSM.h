@@ -291,6 +291,25 @@ public:
   // `node_addr` (`level` as the cache saw it; `sibling` its expected sibling, or
   // Null). Returns 1 once the write is done, 0 if the memory node declined (the
   // caller then does the write itself).
+  // CHIME_PUSH_LOCATE: the memory node walks from `node_addr` (at `level`) to the
+  // leaf covering `k` and returns it, its expected sibling and its parent; the
+  // compute node then writes the leaf itself. Returns false if the walk failed.
+  bool rpc_locate(const GlobalAddress &node_addr, int level, const Key &k,
+                  GlobalAddress &leaf, GlobalAddress &sibling, GlobalAddress &parent) {
+    RawMessage m;
+    m.type = RpcType::RPC_LOCATE;
+    m.addr = node_addr;
+    m.level = level;
+    memcpy(&m.k, k.data(), define::keyLen);
+    rpc_call_dir(m, node_addr.nodeID, thread_id % chime::num_dir());
+    auto *mm = rpc_wait();
+    if (mm->level != 1) return false;
+    leaf = mm->addr;
+    sibling = GlobalAddress(mm->v);
+    parent = GlobalAddress(mm->aux);
+    return true;
+  }
+
   int rpc_write(uint8_t op, const GlobalAddress &node_addr, const GlobalAddress &sibling,
                 int level, const Key &k, uint64_t v) {
     RawMessage m;
