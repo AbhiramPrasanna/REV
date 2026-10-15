@@ -5,6 +5,7 @@
 #include "hash.h"
 #include "kv_trait.h"
 #include "perf.h"
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <fcntl.h>
@@ -22,9 +23,18 @@ namespace RACE
 constexpr uint64_t SLOT_PER_BUCKET = 8;
 constexpr uint64_t BUCKET_BITS = 6;
 constexpr uint64_t BUCKET_PER_SEGMENT = 1 << (BUCKET_BITS);
-constexpr uint64_t INIT_DEPTH = 15;
+// DART_INIT_DEPTH (build switch, default 15 = as released): the shortcut table has
+// 2^depth segments of 13.5 KiB (depth 15 = 432 MiB). Splits are disabled, so a
+// smaller table drops the shortcuts whose bucket is full (counted in insert_full).
+#ifndef DART_INIT_DEPTH
+#define DART_INIT_DEPTH 15
+#endif
+constexpr uint64_t INIT_DEPTH = DART_INIT_DEPTH;
 constexpr uint64_t MAX_DEPTH = 20;
 constexpr uint64_t DIR_SIZE = (1 << MAX_DEPTH);
+static_assert(INIT_DEPTH >= 1 && INIT_DEPTH <= MAX_DEPTH, "DART_INIT_DEPTH must be 1..20");
+// Shortcut inserts that found their bucket full and were dropped (all clients).
+extern std::atomic<uint64_t> insert_full;
 
 struct Node_Meta
 {
