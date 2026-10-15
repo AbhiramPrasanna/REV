@@ -46,17 +46,22 @@ if [ "$role" = compute ]; then
   echo "DART: shortcut table depth $DART_INIT_DEPTH ($DART_BIN)"
   echo "DART: EST entry cache $( [ "$DART_EST_CACHE" = 1 ] && echo "on (cache - ${DART_DIR_MB} MB)" || echo off), warmup ${DART_WARMUP_M}M ops"
   csv="$OUT/dart.csv"
-  [ -f "$csv" ] || echo "system,workload,dist,cache_mb,memthreads,offload,leaf,tput_mops,p99_us,mean_us,rtt_per_op,log,est_cache_mb,warmup_m,est_hit_pct,init_depth,table_mib,shortcuts_dropped_pct" > "$csv"
+  [ -f "$csv" ] || echo "system,workload,dist,cache_mb,memthreads,offload,leaf,tput_mops,p99_us,mean_us,rtt_per_op,log,est_cache_mb,warmup_m,est_hit_pct,init_depth,table_mib,shortcuts_dropped_pct,update_pct,insert_pct" > "$csv"
   echo "DART fair sweep (compute): $cells cells -> $OUT"
   i=0
   for wl in $WORKLOADS; do
-    # UPDATE_PCT (default 0): point workloads become (100-U)% lookups + U% updates
-    upd=0
-    if [ "$(wl_op "$wl")" = point ]; then upd=${UPDATE_PCT:-0}; read=$((100 - upd)); scan=0; else read=0; scan=100; fi
+    # UPDATE_PCT / INSERT_PCT (default 0): point workloads become (100-U-I)% lookups
+    # + U% updates + I% inserts (DART's microbench inserts fresh keys)
+    upd=0; ins=0
+    if [ "$(wl_op "$wl")" = point ]; then
+      upd=${UPDATE_PCT:-0}; ins=${INSERT_PCT:-0}; read=$((100 - upd - ins)); scan=0
+      [ "$read" -ge 0 ] || { echo "UPDATE_PCT + INSERT_PCT exceeds 100" >&2; exit 1; }
+    else read=0; scan=100; fi
+    mix=""; [ "$upd" != 0 ] && mix="${mix}_u$upd"; [ "$ins" != 0 ] && mix="${mix}_i$ins"
     if [ "$(wl_dist "$wl")" = uniform ]; then uni=1; else uni=0; fi
     theta=$(awk -v t="$ZIPF_THETA" 'BEGIN{printf "%d", t*100 + 0.5}')
     for cache in $CACHES; do
-      i=$((i+1)); tag="dart_${wl}_cache${cache}"
+      i=$((i+1)); tag="dart_${wl}${mix}_cache${cache}"
       mlog="$OUT/${tag}.monitor.log"; clog="$OUT/${tag}.compute.log"
       th_b=$(( cache * 1048576 / THREADS ))
       est_mb=0
@@ -69,7 +74,7 @@ if [ "$role" = compute ]; then
         --mem_mb="$DART_MEM_MB" --th_b="$th_b" --test_func=1 --bucket=256 \
         --run_max_request=$(( (OPS_M + DART_WARMUP_M) * 1000000 )) --payload_byte="$VALUE_B" \
         --mb_read_pct=$read --mb_scan_pct=$scan \
-        --mb_insert_pct=0 --mb_update_pct="$upd" --mb_remove_pct=0 \
+        --mb_insert_pct="$ins" --mb_update_pct="$upd" --mb_remove_pct=0 \
         --mb_uniform=$uni --mb_theta_x100="$theta" \
         --mb_key_count=$((KEYS_M * 1000000)) --mb_scan_len="$SCAN_LEN" \
         > "$mlog" 2>&1 &
@@ -86,7 +91,7 @@ if [ "$role" = compute ]; then
       hit=$(strip_ansi < "$clog" | sed -nE 's/.*\[ESTCACHE\] mb=.* hit_pct=([0-9.]+).*/\1/p' | tail -1)
       tmib=$(strip_ansi < "$clog" | sed -nE 's/.*\[SHORTCUT\] .*table_mib=([0-9.]+).*/\1/p' | tail -1)
       drop=$(strip_ansi < "$clog" | sed -nE 's/.*\[SHORTCUT\] .*dropped_pct=([0-9.]+).*/\1/p' | tail -1)
-      echo "dart,$wl,$(wl_dist "$wl"),$cache,NA,off,NA,${thp:-NA},${p99:-NA},${mean:-NA},${rtt:-NA},$mlog,$est_mb,$DART_WARMUP_M,${hit:-NA},$DART_INIT_DEPTH,${tmib:-NA},${drop:-NA}" >> "$csv"
+      echo "dart,$wl,$(wl_dist "$wl"),$cache,NA,off,NA,${thp:-NA},${p99:-NA},${mean:-NA},${rtt:-NA},$mlog,$est_mb,$DART_WARMUP_M,${hit:-NA},$DART_INIT_DEPTH,${tmib:-NA},${drop:-NA},$upd,$ins" >> "$csv"
       echo "    -> ${thp:-NA} Mops  p99 ${p99:-NA} us  EST entry hits ${hit:-NA}%  shortcut table ${tmib:-NA} MiB (depth $DART_INIT_DEPTH), dropped ${drop:-NA}%"
       sudo killall -9 monitor compute 2>/dev/null
       sleep 3
