@@ -55,6 +55,11 @@ enum class RPC_type { LOOKUP, UPDATE, INSERT, DELETE };
 
 class CacheManager {
 public:
+  // Set when the last pushed LOOKUP came back 0: its walk reached a child on
+  // another memory node (btree_rpc.h lookup). DEX-R then retries that lookup
+  // with DEX's own rule (leanstore_tree.h).
+  static inline thread_local bool rpc_crossed_ = false;
+
   /* Core Data Structure */
   uint64_t capacity;      // Number of pages used in the cache of CPU node
   std::atomic<int> state; // 0 means warm-up phase, also use the page from
@@ -890,6 +895,7 @@ public:
                            NodeBase *parent, unsigned child_idx, bool &refresh,
                            Key k, Value &result, bool &success,
                            RPC_type rpc_type) {
+    rpc_crossed_ = false;
 
 #ifdef LATENCY_COLLECT
     int missing_num = parent->level;
@@ -929,6 +935,8 @@ public:
       int ret_flag = 1;
       if (ret <= 0) {
         // stale leaf / cross-node subtree / SMO needed -> retry from root.
+        if (rpc_type == RPC_type::LOOKUP && ret == 0)
+          rpc_crossed_ = true;
         // (LOOKUP/UPDATE/DELETE can all return <=0 here, not just INSERT.)
         ret_flag = -1;
       } else if (ret == 1) {
@@ -1002,6 +1010,8 @@ public:
       int ret_flag = 1;
       if (ret <= 0) {
         // stale leaf / cross-node subtree / SMO needed -> retry from root.
+        if (rpc_type == RPC_type::LOOKUP && ret == 0)
+          rpc_crossed_ = true;
         // (LOOKUP/UPDATE/DELETE can all return <=0 here, not just INSERT.)
         ret_flag = -1;
       } else if (ret == 1) {

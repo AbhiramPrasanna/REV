@@ -9,6 +9,7 @@
 #include "../cache/leanstore_cache.h"
 #include "../tree_api.h"
 #include <atomic>
+#include <cstdio>
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
@@ -72,7 +73,9 @@ public:
   // leaf-level push, so warmup still fills the cache by pulling.
   // Only with MN_ONLY_PLACEMENT: with the whole tree on one memory node, that
   // node can always finish the walk; with levels spread over machines it could
-  // not, so the switch is ignored there.
+  // not, so the switch is ignored there. With several memory nodes a pushed
+  // lookup that reaches another memory node is retried with DEX's own rule
+  // (lookup(), dexr_off); pushed scans already stop at a memory-node boundary.
   static bool dexr_enabled() {
     const char *s = getenv("DEX_PUSH_READS_DEEPEST");
     bool on = s && atoi(s) != 0;
@@ -92,6 +95,17 @@ public:
     return on;
   }
   bool push_reads_deepest_ = dexr_enabled();
+  // DEX-R lookups whose walk reached another memory node and were retried with
+  // DEX's own rule; printed when the process exits.
+  struct CrossedReport {
+    std::atomic<uint64_t> n{0};
+    ~CrossedReport() {
+      if (dexr_enabled())
+        printf("[DEX-R] pushed lookups that reached another memory node, retried with "
+             "DEX's own rule: %lu\n", (unsigned long)n.load());
+    }
+  };
+  static inline CrossedReport dexr_crossed_;
 
   BTree(DSM *dsm, uint64_t tree_id, uint64_t cache_mb, double sample_rate,
         double admission_rate)
@@ -1867,6 +1881,7 @@ public:
 
   bool lookup(Key k, Value &result) {
     int restartCount = 0;
+    bool dexr_off = false;   // set once this lookup crossed memory nodes
   restart:
     if (restartCount++)
       yield(restartCount);
@@ -1952,10 +1967,13 @@ public:
             inner->IOUnlock();
             return lookup_success;
           }
-        } else if (push_reads_deepest_ && cache.state == 1) {
+        } else if (push_reads_deepest_ && cache.state == 1 && !dexr_off) {
           // DEX-R: a miss above megaLevel (or in a shared subtree): push the
           // lookup from here; the memory node walks every remaining level.
           // With rpc_rate 0 (no memory threads) cold_to_hot_with_rpc pulls.
+          // With several memory nodes the walk can reach a child on another
+          // node: the memory node stops (lookup returns 0) and this lookup is
+          // retried with DEX's own rule (dexr_off), which pulls the upper levels.
           bool lookup_success = false;
           remote_flag = cache.cold_to_hot_with_rpc(
               inner->children[idx], reinterpret_cast<void **>(&cur_node), inner,
@@ -1963,6 +1981,10 @@ public:
           if (remote_flag == 1) {
             inner->IOUnlock();
             return lookup_success;
+          }
+          if (remote_flag == -1 && CacheManager::rpc_crossed_) {
+            dexr_off = true;
+            dexr_crossed_.n.fetch_add(1, std::memory_order_relaxed);
           }
         } else {
           // Upper than subtree; then directly load from remote

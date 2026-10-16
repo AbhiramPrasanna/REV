@@ -13,8 +13,11 @@
 # time. Node 0 (a compute process) holds the root pointer and bulk-loads; with
 # MN_ONLY placement every tree node lives on the memory processes, each subtree
 # below megaLevel on one of them, so DEX's own push rule stays on one memory node.
-# DEX_PUSH_READS_DEEPEST=1 (push from the deepest cached node) is refused: its
-# pushed lookups can cross memory nodes.
+# DEX_PUSH_READS_DEEPEST=1 (DEX-R, our miss-gated push: reads pushed from the deepest
+# cached node, as in Lesson 3): a pushed lookup whose walk reaches a child on the
+# other memory node is retried with DEX's own rule (counted in lookups_crossed);
+# pushed scans stop at a memory-node boundary and go on from there. Writes keep
+# DEX's own rule. Cells are tagged _dexr and the CSV's system is dex-r.
 #
 #   server 8:  RUN_ID=m1 TREE_SETUP=model DEX_INNER_PAGE=240 VALUE_B=64 KEYS_M=60 \
 #                bash fair/multi/run_dex_multi.sh memory  2>&1 | tee ~/dexm_memory.out
@@ -22,7 +25,7 @@
 #
 # Variables (the SAME on both servers): NCN NMN THREADS (total clients, a multiple
 # of NCN) CACHES MEMTHREADS WORKLOADS UPDATE_PCT INSERT_PCT OPS_M WARMUP_M KEYS_M
-# VALUE_B TREE_SETUP DEX_INNER_PAGE DEX_SAFE_PT; CN_DSM_GB / MN_DSM_GB (memory pool
+# VALUE_B TREE_SETUP DEX_INNER_PAGE DEX_SAFE_PT DEX_PUSH_READS_DEEPEST; CN_DSM_GB / MN_DSM_GB (memory pool
 # per compute / memory process, default 2 / 30 GB).
 # SCAN_PCT: share of 100-key scans in point-* workloads (default 0); range-* = scans only.
 # DEX's benchmark gives each compute process its own key range (newbench sharding).
@@ -35,10 +38,8 @@
 role="${1:?usage: run_dex_multi.sh <compute|memory>}"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/multi_common.sh"
 
-if [ "${DEX_PUSH_READS_DEEPEST:-0}" = 1 ] && [ "$NMN" -gt 1 ]; then
-  echo "DEX_PUSH_READS_DEEPEST=1 needs one memory node (its pushed lookups can cross memory nodes)" >&2
-  exit 1
-fi
+DEXR="${DEX_PUSH_READS_DEEPEST:-0}"
+if [ "$DEXR" = 1 ]; then sysname=dex-r; dtag=_dexr; else sysname=dex; dtag=""; fi
 OUT="$RESULTS_DIR/dex_multi"; mkdir -p "$OUT"
 BIN="$DEX_BUILD/newbench"
 [ -x "$BIN" ] || { echo "build first: RUN_ID=b TREE_SETUP=$TREE_SETUP DEX_INNER_PAGE=$DEX_INNER_PAGE VALUE_B=$VALUE_B ./fair/build.sh dex" >&2; exit 1; }
@@ -46,13 +47,17 @@ grep -q "DEX_DSM_GB" "$REV_DIR/dex/test/newbench.cpp" || { echo "this checkout's
 max_mt=1; for m in $MEMTHREADS; do [ "$m" -gt "$max_mt" ] && max_mt=$m; done
 check_layout "$max_mt" || exit 1
 hugepage_note "$role" 3
-echo "DEX multi: $NCN compute + $NMN memory processes, $T clients each ($THREADS in all), tree $TREE_SETUP (inner page $DEX_INNER_PAGE B), memory pool ${CN_DSM_GB} / ${MN_DSM_GB} GB"
+echo "DEX multi ($sysname, DEX_PUSH_READS_DEEPEST=$DEXR): $NCN compute + $NMN memory processes, $T clients each ($THREADS in all), tree $TREE_SETUP (inner page $DEX_INNER_PAGE B), memory pool ${CN_DSM_GB} / ${MN_DSM_GB} GB"
 
 cd "$DEX_BUILD"
 printf '%s\n%s\n' "$CMP_IP" "$MEMC_PORT" > ../memcached.conf
 csv="$OUT/dex_multi.csv"
-[ "$role" = compute ] && [ ! -f "$csv" ] && \
-  echo "system,workload,cache_mb,memthreads,ncn,nmn,threads,update_pct,insert_pct,scan_pct,tput_mops,cn0_final_mops,p99_us,rdma_read_per_op,rpc_per_op,tree_height,ops_ok_pct_min,rows_per_scan,cn_tputs,log_prefix" > "$csv"
+hdr="system,workload,cache_mb,memthreads,ncn,nmn,threads,update_pct,insert_pct,scan_pct,push_reads_deepest,tput_mops,cn0_final_mops,p99_us,rdma_read_per_op,rpc_per_op,lookups_crossed,tree_height,ops_ok_pct_min,rows_per_scan,cn_tputs,log_prefix"
+if [ "$role" = compute ]; then
+  # a CSV written by the older script (other columns) is kept aside, not appended to
+  [ -f "$csv" ] && [ "$(head -1 "$csv")" != "$hdr" ] && mv "$csv" "$csv.old-$(date +%s)"
+  [ -f "$csv" ] || echo "$hdr" > "$csv"
+fi
 
 restart_memcached() {   # compute side
   [ -f /tmp/memcached-fair.pid ] && kill "$(cat /tmp/memcached-fair.pid)" 2>/dev/null
@@ -80,13 +85,13 @@ for mt in $MEMTHREADS; do
       i=$((i+1))
       mix=""; [ "$upd" != 0 ] && mix="${mix}_u$upd"; [ "$ins" != 0 ] && mix="${mix}_i$ins"
       [ "$(wl_op "$wl")" = point ] && [ "$rg" != 0 ] && mix="${mix}_s$rg"
-      tag="dexm_${wl}${mix}_mt${mt}_cache${cache}"
+      tag="dexm_${wl}${mix}${dtag}_mt${mt}_cache${cache}"
       echo ">>> [$(date +%H:%M:%S)] ($i/$cells) $tag  ($role)"
       #  args: nodes r ins upd del range threads(total) memthreads cache uniform theta
       #        bulkM warmupM opM check time_based early_stop index rpc admit tune kmax(per process)
       args=("$NODES" "$r" "$ins" "$upd" 0 "$rg" "$THREADS" "$dir" "$cache" "$uni" "$ZIPF_THETA"
             "$KEYS_M" "$WARMUP_M" "$OPS_M" 0 0 1 0 "$rpc" 0.1 0 "$T")
-      envs=(DEX_PUSH_READS_DEEPEST=0 DEX_SAFE_PT="${DEX_SAFE_PT:-1}" DEX_LEVEL_STATS="${DEX_LEVEL_STATS:-0}")
+      envs=(DEX_PUSH_READS_DEEPEST="$DEXR" DEX_SAFE_PT="${DEX_SAFE_PT:-1}" DEX_LEVEL_STATS="${DEX_LEVEL_STATS:-0}")
       sudo -n pkill -9 -x newbench 2>/dev/null; sleep 1
       pids=()
       if [ "$role" = compute ]; then
@@ -118,14 +123,16 @@ for mt in $MEMTHREADS; do
         p99=$(max_p99 "${logs[@]}")
         rr=$(awk '/Avg. rdma read \/ op =/{s+=$NF; n++} END{if(n) printf "%.4f", s/n; else print "NA"}' "${logs[@]}")
         rp=$(awk '/Avg. rdma rpc \/ op =/{s+=$NF; n++} END{if(n) printf "%.4f", s/n; else print "NA"}' "${logs[@]}")
+        # DEX-R: pushed lookups that reached the other memory node (summed)
+        crossed=NA; [ "$DEXR" = 1 ] && crossed=$(sum_over 'reached another memory node' "${logs[@]}")
         h=$(awk '/Tree height =/{v=$NF} END{print (v!=""?v:"NA")}' "${logs[0]}")
         # correctness across compute processes: worst "ops ok" share, mean rows per scan
         ok=$(sed -nE 's/.*\[CORRECTNESS node [0-9]+\] ops ok [0-9]+ \/ [0-9]+ = ([0-9.]+)%.*/\1/p' "${logs[@]}" |
              awk 'NR==1||$1<m{m=$1} END{if (NR) print m; else print "NA"}')
         rows=$(sed -nE 's/.*\(([0-9.]+) per scan\).*/\1/p' "${logs[@]}" |
                awk '{s+=$1; n++} END{if (n) printf "%.2f", s/n; else print "NA"}')
-        echo "dex,$wl,$cache,$mt,$NCN,$NMN,$THREADS,$upd,$ins,$rg,$tput,$fin,$p99,$rr,$rp,$h,$ok,$rows,${per% },$OUT/$tag" >> "$csv"
-        echo "    -> cluster $tput Mops (compute processes: ${per% })  p99 $p99 us  reads/op $rr  rpc/op $rp  height $h  ops ok (worst) $ok%  rows/scan $rows"
+        echo "$sysname,$wl,$cache,$mt,$NCN,$NMN,$THREADS,$upd,$ins,$rg,$DEXR,$tput,$fin,$p99,$rr,$rp,$crossed,$h,$ok,$rows,${per% },$OUT/$tag" >> "$csv"
+        echo "    -> $sysname cluster $tput Mops (compute processes: ${per% })  p99 $p99 us  reads/op $rr  rpc/op $rp  crossed $crossed  height $h  ops ok (worst) $ok%  rows/scan $rows"
       else
         echo "    -> memory processes done"
       fi
