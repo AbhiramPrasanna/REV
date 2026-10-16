@@ -148,7 +148,17 @@ run_plan() {
 }
 
 # SKIP_TO=<run_id>: drop the blocks before it (resume after a failure).
+# ONLY_BLOCKS="<run_id> ...": run just these blocks (in plan order), e.g. one arm
+# first and the rest later.
 apply_skip() {
+  if [ -n "${ONLY_BLOCKS:-}" ]; then
+    local sel=() l
+    for l in "${PLAN[@]}"; do
+      [[ " $ONLY_BLOCKS " == *" ${l%%|*} "* ]] && sel+=("$l")
+    done
+    [ "${#sel[@]}" -eq 0 ] && { echo "ONLY_BLOCKS=$ONLY_BLOCKS matches no block" >&2; exit 1; }
+    PLAN=("${sel[@]}")
+  fi
   [ -z "${SKIP_TO:-}" ] && return 0
   local keep=() on=0 line
   for line in "${PLAN[@]}"; do
