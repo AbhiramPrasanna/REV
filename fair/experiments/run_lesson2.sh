@@ -66,6 +66,7 @@
 #   PARTS="a"           run only some parts
 #   DRY_RUN=1           print the plan and the time estimate, run nothing
 #   SKIP_TO=<block>     resume from a block after a failure
+#   ONLY_BLOCKS="<block> ..."  run only these blocks (e.g. l2m_d_both first)
 #   L2_TAG=l2smoke      block-name prefix; a smoke test with another tag never
 #                       mixes with the real results (the collector reads $L2_TAG_*)
 #   SMOKE=1             2M warmup + 3M measured ops, two caches, threads 0 and 16:
