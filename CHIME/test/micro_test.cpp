@@ -353,8 +353,15 @@ static int main_cpu_linear() {
   return cpu;
 }
 
+// REV_CPU_BASE (default 0): first CPU of this process's client threads, so several
+// compute processes on one machine (fair/multi/run_chime_multi.sh) use disjoint cores.
+static int cpu_base() {
+  static const int b = [] { const char *e = getenv("REV_CPU_BASE"); return e ? atoi(e) : 0; }();
+  return b;
+}
+
 void thread_run(int id) {
-  bindCore(linear_pin() ? id : id * 2 + 1);
+  bindCore(cpu_base() + (linear_pin() ? id : id * 2 + 1));
   dsm->registerThread();
   auto tid = dsm->getMyThreadID();
   printf("I am %lu\n", (uint64_t)(kThreadCount * dsm->getMyNodeID() + id));
@@ -536,6 +543,12 @@ int main(int argc, char *argv[]) {
   assert(kNodeCount >= MEMORY_NODE_NUM);
   config.machineNR = kNodeCount;
   config.threadNR = kThreadCount;
+  // CHIME_DSM_GB (default define::dsmSize, 64): this process's share of the memory
+  // pool; a compute process holds no tree nodes (nodes 0..MEMORY_NODE_NUM-1 do).
+  if (const char *g = getenv("CHIME_DSM_GB")) config.dsmSize = strtoull(g, nullptr, 10);
+  if (getenv("REV_CPU_BASE") || getenv("CHIME_DSM_GB"))
+    printf("[MULTI] cpu_base=%d dsm_gb=%lu (REV_CPU_BASE / CHIME_DSM_GB)\n", cpu_base(),
+           (unsigned long)config.dsmSize);
   dsm = DSM::getInstance(config);
   bindCore(linear_pin() ? main_cpu_linear() : kThreadCount * 2 + 1);
   dsm->registerThread();

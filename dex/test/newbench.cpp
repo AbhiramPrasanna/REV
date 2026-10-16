@@ -145,9 +145,16 @@ void reset_all_params() {
   ready_to_report.store(false);
 }
 
+// REV_CPU_BASE (default 0): first CPU of this process's client threads, so several
+// compute processes on one machine (fair/multi/run_dex_multi.sh) use disjoint cores.
+static int cpu_base() {
+  static const int b = [] { const char *e = getenv("REV_CPU_BASE"); return e ? atoi(e) : 0; }();
+  return b;
+}
+
 void thread_run(int id) {
   // Interleave the thread binding
-  bindCore(id);
+  bindCore(cpu_base() + id);
   // numa_set_localalloc();
   //  std::cout << "Before register the thread" << std::endl;
   dsm->registerThread();
@@ -895,11 +902,18 @@ void generate_workload() {
 }
 
 int main(int argc, char *argv[]) {
-  bindCore(0);
+  bindCore(cpu_base());
   numa_set_preferred(0);
   parse_args(argc, argv);
 
   DSMConfig config;
+  // DEX_DSM_GB (default define::dsmSize, 64): this process's share of the memory
+  // pool. With MN_ONLY placement a compute process holds only the root pointer,
+  // so fair/multi/run_dex_multi.sh gives compute processes a few GB.
+  if (const char *g = getenv("DEX_DSM_GB")) config.dsmSize = strtoull(g, nullptr, 10);
+  if (getenv("REV_CPU_BASE") || getenv("DEX_DSM_GB"))
+    printf("[MULTI] cpu_base=%d dsm_gb=%lu (REV_CPU_BASE / DEX_DSM_GB)\n", cpu_base(),
+           (unsigned long)config.dsmSize);
   config.machineNR = kNodeCount;
   config.memThreadCount = memThreadCount;
   config.computeNR = CNodeCount;
