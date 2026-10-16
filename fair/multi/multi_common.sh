@@ -48,15 +48,21 @@ wait_key() {   # host port key want_value what -> wait until key == want
 # The cell key carries RUN_ID, the cell number and the coordinating script's start
 # time; the waiting side ignores the value it found when it started, so a key left
 # by an earlier, aborted run is never taken for this run's cell.
+# MULTI_BLOCK (set by run_multi_suite.sh, one name per block): the key also carries the
+# block, so the next block's cell 1 can never be taken for a stale key, even when the
+# coordinating side starts it before the waiting side looks.
 MULTI_EPOCH=$(date +%s)
-set_cell() { memc_set "$1" "$2" mcell "${RUN_ID}:$3:${MULTI_EPOCH}"; }   # host port cell
+MULTI_TAG="${RUN_ID}${MULTI_BLOCK:+:$MULTI_BLOCK}"
+set_cell() { memc_set "$1" "$2" mcell "${MULTI_TAG}:$3:${MULTI_EPOCH}"; }   # host port cell
 MULTI_STALE=""
 note_stale_cell() { MULTI_STALE="$(memc_get "$1" "$2" mcell)"; }         # host port
 wait_cell() {   # host port cell -> wait until this run's coordinator started cell
   local host=$1 port=$2 cell=$3 waited=0 v
   while :; do
     v="$(memc_get "$host" "$port" mcell)"
-    if [[ "$v" == "${RUN_ID}:${cell}:"* ]] && [ "$v" != "$MULTI_STALE" ]; then return 0; fi
+    if [[ "$v" == "${MULTI_TAG}:${cell}:"* ]] && { [ -n "${MULTI_BLOCK:-}" ] || [ "$v" != "$MULTI_STALE" ]; }; then
+      return 0
+    fi
     sleep 1; waited=$((waited + 1))
     if [ "$waited" -ge "$MULTI_WAIT" ]; then
       echo "gave up waiting for the other side to start cell $cell (mcell='$v') after ${waited}s" >&2; return 1
