@@ -81,7 +81,7 @@ for mt in $MEMTHREADS; do
       args=("$NODES" "$r" "$ins" "$upd" 0 "$rg" "$THREADS" "$dir" "$cache" "$uni" "$ZIPF_THETA"
             "$KEYS_M" "$WARMUP_M" "$OPS_M" 0 0 1 0 "$rpc" 0.1 0 "$T")
       envs=(DEX_PUSH_READS_DEEPEST=0 DEX_SAFE_PT="${DEX_SAFE_PT:-1}" DEX_LEVEL_STATS="${DEX_LEVEL_STATS:-0}")
-      sudo -n pkill -9 -f "$BIN" 2>/dev/null; sleep 1
+      sudo -n pkill -9 -x newbench 2>/dev/null; sleep 1
       pids=()
       if [ "$role" = compute ]; then
         restart_memcached || { echo "memcached restart failed" >&2; exit 1; }

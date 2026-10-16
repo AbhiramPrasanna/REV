@@ -88,7 +88,7 @@ for mt in $MEMTHREADS; do
       #  args: nodes threads(per process) read insert update range uniform theta bulkM warmupM opM rate
       args=("$NODES" "$T" "$r" "$ins" "$upd" 0 $dist "$KEYS_M" "$WARMUP_M" "$OPS_M" "$rate")
       envs=(CHIME_DIR_THREADS="$dir" CHIME_CACHE_MB="$cache")
-      pkill -9 -u "$(id -u)" -f "$BIN" 2>/dev/null; sleep 1
+      pkill -9 -u "$(id -u)" -x micro_test 2>/dev/null; sleep 1
       pids=()
       if [ "$role" = memory ]; then
         MEMC_CONF="$CHIME_DIR/memcached.conf" bash "$CHIME_DIR/script/restartMemc.sh" >/dev/null || {
