@@ -69,12 +69,13 @@ export CHIME_SCAN_FROM_CACHE="${CHIME_SCAN_FROM_CACHE:-1}"
 export CHIME_SCAN_OFFLOAD_ALWAYS="${CHIME_SCAN_OFFLOAD_ALWAYS:-1}"
 export CHIME_HOTSPOT="${CHIME_HOTSPOT:-0}"          # off, as in every run of the paper
 export CHIME_PARTITION_KEYS="${CHIME_PARTITION_KEYS:-0}"   # 1: each compute process its own key range (as DEX)
+export CHIME_PUSH_LOCATE="${CHIME_PUSH_LOCATE:-1}"         # writes with push: walk pushed, leaf written by the compute process (Lesson 3); 0 = pull the whole write
 export CHIME_SORTED_LOAD CHIME_BULK_BUILD CHIME_BUILD_LEAF_KEYS CHIME_BUILD_INNER_FANOUT
 CHIME_DIR="$REV_DIR/CHIME"
 printf '%s\n%s\n' "$MEM_IP" "$MEMC_PORT" > "$CHIME_DIR/memcached.conf"
 csv="$OUT/chime_multi.csv"
 [ "$role" = compute ] && [ ! -f "$csv" ] && \
-  echo "system,workload,cache_mb,memthreads,ncn,nmn,threads,update_pct,insert_pct,scan_pct,partition_keys,tput_mops,p99_us,round_trips_per_op,lookups_crossed,writes_located,lookup_found_pct_min,scan_rows,cn_tputs,log_prefix" > "$csv"
+  echo "system,workload,cache_mb,memthreads,ncn,nmn,threads,update_pct,insert_pct,scan_pct,partition_keys,push_locate,tput_mops,p99_us,round_trips_per_op,lookups_crossed,writes_located,lookup_found_pct_min,scan_rows,cn_tputs,log_prefix" > "$csv"
 [ "$NMN" -gt 1 ] && echo "note: with $NMN memory processes CHIME pulls every scan (its pushed scan stays on one memory node)"
 
 [ "$role" = compute ] && note_stale_cell "$MEM_IP" "$MEMC_PORT"
@@ -97,6 +98,7 @@ for mt in $MEMTHREADS; do
       mix=""; [ "$upd" != 0 ] && mix="${mix}_u$upd"; [ "$ins" != 0 ] && mix="${mix}_i$ins"
       [ "$(wl_op "$wl")" = point ] && [ "$rg" != 0 ] && mix="${mix}_s$rg"
       [ "$CHIME_PARTITION_KEYS" = 1 ] && mix="${mix}_part"
+      [ "$CHIME_PUSH_LOCATE" = 1 ] && [ $((upd + ins)) -gt 0 ] && [ "$mt" -gt 0 ] && mix="${mix}_loc"
       tag="chimem_${wl}${mix}_mt${mt}_cache${cache}"
       echo ">>> [$(date +%H:%M:%S)] ($i/$cells) $tag  ($role)"
       #  args: nodes threads(per process) read insert update range uniform theta bulkM warmupM opM rate
@@ -140,7 +142,7 @@ for mt in $MEMTHREADS; do
                 awk 'NR==1||$1<m{m=$1} END{if (NR) print m; else print "NA"}')
         rows=$(sed -nE 's/.*\[CORRECTNESS node [0-9]+\] scan rows returned = ([0-9]+).*/\1/p' "${logs[@]}" |
                awk '{s+=$1} END{print s+0}')
-        echo "chime,$wl,$cache,$mt,$NCN,$NMN,$THREADS,$upd,$ins,$rg,$CHIME_PARTITION_KEYS,$tput,$p99,$rt,$crossed,$located,$found,$rows,${per% },$OUT/$tag" >> "$csv"
+        echo "chime,$wl,$cache,$mt,$NCN,$NMN,$THREADS,$upd,$ins,$rg,$CHIME_PARTITION_KEYS,$CHIME_PUSH_LOCATE,$tput,$p99,$rt,$crossed,$located,$found,$rows,${per% },$OUT/$tag" >> "$csv"
         echo "    -> cluster $tput Mops (compute processes: ${per% })  p99 $p99 us  round trips/op $rt  lookups finished here $crossed  write walks pushed $located  lookups found (worst) $found%  scan rows $rows"
       else
         echo "    -> memory processes done"
