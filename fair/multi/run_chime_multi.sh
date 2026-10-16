@@ -26,6 +26,10 @@
 # of NCN) CACHES MEMTHREADS WORKLOADS UPDATE_PCT INSERT_PCT OPS_M WARMUP_M KEYS_M
 # VALUE_B TREE_SETUP CHIME_* switches (CHIME_PUSH_LOCATE, CHIME_HOTSPOT, ...);
 # CN_DSM_GB / MN_DSM_GB (memory pool per compute / memory process, 2 / 30 GB).
+# SCAN_PCT: share of 100-key scans in point-* workloads (default 0); range-* = scans only.
+# CHIME_PARTITION_KEYS=1: each compute process draws keys from its own range, as DEX's
+# benchmark does (default 0: all compute processes share every key, as stock CHIME).
+# CHIME_HOTSPOT defaults to 0 (off), as in every run of the paper.
 # Output: fair/results/$RUN_ID/chime_multi/ -- one log per process per cell and
 # chime_multi.csv (compute side): cluster throughput = the sum of the compute
 # processes' [RESULT] lines, p99 = the worst compute process.
@@ -63,13 +67,16 @@ echo "CHIME multi: $NMN memory + $NCN compute processes, $T clients each ($THREA
 export CHIME_MN_CLIENTS=0 CHIME_CACHE_LEAF=0
 export CHIME_SCAN_FROM_CACHE="${CHIME_SCAN_FROM_CACHE:-1}"
 export CHIME_SCAN_OFFLOAD_ALWAYS="${CHIME_SCAN_OFFLOAD_ALWAYS:-1}"
-export CHIME_HOTSPOT="${CHIME_HOTSPOT:-1}"
+export CHIME_HOTSPOT="${CHIME_HOTSPOT:-0}"          # off, as in every run of the paper
+export CHIME_PARTITION_KEYS="${CHIME_PARTITION_KEYS:-0}"   # 1: each compute process its own key range (as DEX)
+export CHIME_PUSH_LOCATE="${CHIME_PUSH_LOCATE:-1}"         # writes with push: walk pushed, leaf written by the compute process (Lesson 3); 0 = pull the whole write
 export CHIME_SORTED_LOAD CHIME_BULK_BUILD CHIME_BUILD_LEAF_KEYS CHIME_BUILD_INNER_FANOUT
 CHIME_DIR="$REV_DIR/CHIME"
 printf '%s\n%s\n' "$MEM_IP" "$MEMC_PORT" > "$CHIME_DIR/memcached.conf"
 csv="$OUT/chime_multi.csv"
 [ "$role" = compute ] && [ ! -f "$csv" ] && \
-  echo "system,workload,cache_mb,memthreads,ncn,nmn,threads,update_pct,insert_pct,tput_mops,p99_us,round_trips_per_op,lookups_crossed,writes_located,cn_tputs,log_prefix" > "$csv"
+  echo "system,workload,cache_mb,memthreads,ncn,nmn,threads,update_pct,insert_pct,scan_pct,partition_keys,push_locate,tput_mops,p99_us,round_trips_per_op,lookups_crossed,writes_located,lookup_found_pct_min,scan_rows,cn_tputs,log_prefix" > "$csv"
+[ "$NMN" -gt 1 ] && echo "note: with $NMN memory processes CHIME pulls every scan (its pushed scan stays on one memory node)"
 
 [ "$role" = compute ] && note_stale_cell "$MEM_IP" "$MEMC_PORT"
 cells=0; for mt in $MEMTHREADS; do for wl in $WORKLOADS; do for c in $CACHES; do cells=$((cells+1)); done; done; done
@@ -77,16 +84,25 @@ i=0
 for mt in $MEMTHREADS; do
   if [ "$mt" -eq 0 ]; then rate=0; dir=1; else rate=100; dir=$mt; fi
   for wl in $WORKLOADS; do
-    upd=${UPDATE_PCT:-0}; ins=${INSERT_PCT:-0}; r=$((100 - upd - ins))
-    [ "$(wl_op "$wl")" = point ] || { echo "run_chime_multi.sh runs point workloads only (got $wl)" >&2; exit 1; }
+    # point-*: (100-U-I-S)% lookups + U% updates + I% inserts + S% 100-key scans
+    # (UPDATE_PCT, INSERT_PCT, SCAN_PCT); range-*: scans only
+    if [ "$(wl_op "$wl")" = point ]; then
+      upd=${UPDATE_PCT:-0}; ins=${INSERT_PCT:-0}; rg=${SCAN_PCT:-0}; r=$((100 - upd - ins - rg))
+    else
+      upd=0; ins=0; rg=100; r=0
+    fi
+    [ "$r" -ge 0 ] || { echo "UPDATE_PCT + INSERT_PCT + SCAN_PCT must be at most 100" >&2; exit 1; }
     if [ "$(wl_dist "$wl")" = uniform ]; then dist="1 0"; else dist="0 $ZIPF_THETA"; fi
     for cache in $CACHES; do
       i=$((i+1))
       mix=""; [ "$upd" != 0 ] && mix="${mix}_u$upd"; [ "$ins" != 0 ] && mix="${mix}_i$ins"
+      [ "$(wl_op "$wl")" = point ] && [ "$rg" != 0 ] && mix="${mix}_s$rg"
+      [ "$CHIME_PARTITION_KEYS" = 1 ] && mix="${mix}_part"
+      [ "$CHIME_PUSH_LOCATE" = 1 ] && [ $((upd + ins)) -gt 0 ] && [ "$mt" -gt 0 ] && mix="${mix}_loc"
       tag="chimem_${wl}${mix}_mt${mt}_cache${cache}"
       echo ">>> [$(date +%H:%M:%S)] ($i/$cells) $tag  ($role)"
       #  args: nodes threads(per process) read insert update range uniform theta bulkM warmupM opM rate
-      args=("$NODES" "$T" "$r" "$ins" "$upd" 0 $dist "$KEYS_M" "$WARMUP_M" "$OPS_M" "$rate")
+      args=("$NODES" "$T" "$r" "$ins" "$upd" "$rg" $dist "$KEYS_M" "$WARMUP_M" "$OPS_M" "$rate")
       envs=(CHIME_DIR_THREADS="$dir" CHIME_CACHE_MB="$cache")
       pkill -9 -u "$(id -u)" -x micro_test 2>/dev/null; sleep 1
       pids=()
@@ -121,8 +137,13 @@ for mt in $MEMTHREADS; do
              awk '{s += $1; n++} END {if (n) printf "%.4f", s / n; else print "NA"}')
         crossed=$(for f in "${logs[@]}"; do sed -nE 's/.*\[PUSHX\].*finished here=([0-9]+).*/\1/p' "$f" | tail -1; done | awk '{s += $1} END {print s + 0}')
         located=$(for f in "${logs[@]}"; do sed -nE 's/.*\[PUSHLOC\].*pushed=([0-9]+).*/\1/p' "$f" | tail -1; done | awk '{s += $1} END {print s + 0}')
-        echo "chime,$wl,$cache,$mt,$NCN,$NMN,$THREADS,$upd,$ins,$tput,$p99,$rt,$crossed,$located,${per% },$OUT/$tag" >> "$csv"
-        echo "    -> cluster $tput Mops (compute processes: ${per% })  p99 $p99 us  round trips/op $rt  lookups finished here $crossed  write walks pushed $located"
+        # correctness across compute processes: worst "lookup found" share, scan rows per scan
+        found=$(sed -nE 's/.*\[CORRECTNESS node [0-9]+\] lookup found [0-9]+ \/ [0-9]+ = ([0-9.]+)%.*/\1/p' "${logs[@]}" |
+                awk 'NR==1||$1<m{m=$1} END{if (NR) print m; else print "NA"}')
+        rows=$(sed -nE 's/.*\[CORRECTNESS node [0-9]+\] scan rows returned = ([0-9]+).*/\1/p' "${logs[@]}" |
+               awk '{s+=$1} END{print s+0}')
+        echo "chime,$wl,$cache,$mt,$NCN,$NMN,$THREADS,$upd,$ins,$rg,$CHIME_PARTITION_KEYS,$CHIME_PUSH_LOCATE,$tput,$p99,$rt,$crossed,$located,$found,$rows,${per% },$OUT/$tag" >> "$csv"
+        echo "    -> cluster $tput Mops (compute processes: ${per% })  p99 $p99 us  round trips/op $rt  lookups finished here $crossed  write walks pushed $located  lookups found (worst) $found%  scan rows $rows"
       else
         echo "    -> memory processes done"
       fi

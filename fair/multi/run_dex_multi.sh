@@ -24,6 +24,8 @@
 # of NCN) CACHES MEMTHREADS WORKLOADS UPDATE_PCT INSERT_PCT OPS_M WARMUP_M KEYS_M
 # VALUE_B TREE_SETUP DEX_INNER_PAGE DEX_SAFE_PT; CN_DSM_GB / MN_DSM_GB (memory pool
 # per compute / memory process, default 2 / 30 GB).
+# SCAN_PCT: share of 100-key scans in point-* workloads (default 0); range-* = scans only.
+# DEX's benchmark gives each compute process its own key range (newbench sharding).
 # Needs the DEX build with REV_CPU_BASE / DEX_DSM_GB (newbench.cpp) on both servers:
 #   RUN_ID=b TREE_SETUP=model DEX_INNER_PAGE=240 VALUE_B=64 ./fair/build.sh dex
 # Output: fair/results/$RUN_ID/dex_multi/ -- one log per process per cell and
@@ -50,7 +52,7 @@ cd "$DEX_BUILD"
 printf '%s\n%s\n' "$CMP_IP" "$MEMC_PORT" > ../memcached.conf
 csv="$OUT/dex_multi.csv"
 [ "$role" = compute ] && [ ! -f "$csv" ] && \
-  echo "system,workload,cache_mb,memthreads,ncn,nmn,threads,update_pct,insert_pct,tput_mops,cn0_final_mops,p99_us,rdma_read_per_op,rpc_per_op,tree_height,cn_tputs,log_prefix" > "$csv"
+  echo "system,workload,cache_mb,memthreads,ncn,nmn,threads,update_pct,insert_pct,scan_pct,tput_mops,cn0_final_mops,p99_us,rdma_read_per_op,rpc_per_op,tree_height,ops_ok_pct_min,rows_per_scan,cn_tputs,log_prefix" > "$csv"
 
 restart_memcached() {   # compute side
   [ -f /tmp/memcached-fair.pid ] && kill "$(cat /tmp/memcached-fair.pid)" 2>/dev/null
@@ -68,12 +70,16 @@ i=0
 for mt in $MEMTHREADS; do
   if [ "$mt" -eq 0 ]; then rpc=0; dir=1; else rpc=1; dir=$mt; fi
   for wl in $WORKLOADS; do
-    upd=${UPDATE_PCT:-0}; ins=${INSERT_PCT:-0}; r=$((100 - upd - ins)); rg=0
+    # point-*: (100-U-I-S)% lookups + U% updates + I% inserts + S% 100-key scans
+    # (UPDATE_PCT, INSERT_PCT, SCAN_PCT); range-*: scans only
+    upd=${UPDATE_PCT:-0}; ins=${INSERT_PCT:-0}; rg=${SCAN_PCT:-0}; r=$((100 - upd - ins - rg))
     [ "$(wl_op "$wl")" = point ] || { r=0; upd=0; ins=0; rg=100; }
+    [ "$r" -ge 0 ] || { echo "UPDATE_PCT + INSERT_PCT + SCAN_PCT must be at most 100" >&2; exit 1; }
     if [ "$(wl_dist "$wl")" = uniform ]; then uni=1; else uni=0; fi
     for cache in $CACHES; do
       i=$((i+1))
       mix=""; [ "$upd" != 0 ] && mix="${mix}_u$upd"; [ "$ins" != 0 ] && mix="${mix}_i$ins"
+      [ "$(wl_op "$wl")" = point ] && [ "$rg" != 0 ] && mix="${mix}_s$rg"
       tag="dexm_${wl}${mix}_mt${mt}_cache${cache}"
       echo ">>> [$(date +%H:%M:%S)] ($i/$cells) $tag  ($role)"
       #  args: nodes r ins upd del range threads(total) memthreads cache uniform theta
@@ -113,8 +119,13 @@ for mt in $MEMTHREADS; do
         rr=$(awk '/Avg. rdma read \/ op =/{s+=$NF; n++} END{if(n) printf "%.4f", s/n; else print "NA"}' "${logs[@]}")
         rp=$(awk '/Avg. rdma rpc \/ op =/{s+=$NF; n++} END{if(n) printf "%.4f", s/n; else print "NA"}' "${logs[@]}")
         h=$(awk '/Tree height =/{v=$NF} END{print (v!=""?v:"NA")}' "${logs[0]}")
-        echo "dex,$wl,$cache,$mt,$NCN,$NMN,$THREADS,$upd,$ins,$tput,$fin,$p99,$rr,$rp,$h,${per% },$OUT/$tag" >> "$csv"
-        echo "    -> cluster $tput Mops (compute processes: ${per% })  p99 $p99 us  reads/op $rr  rpc/op $rp  height $h"
+        # correctness across compute processes: worst "ops ok" share, mean rows per scan
+        ok=$(sed -nE 's/.*\[CORRECTNESS node [0-9]+\] ops ok [0-9]+ \/ [0-9]+ = ([0-9.]+)%.*/\1/p' "${logs[@]}" |
+             awk 'NR==1||$1<m{m=$1} END{if (NR) print m; else print "NA"}')
+        rows=$(sed -nE 's/.*\(([0-9.]+) per scan\).*/\1/p' "${logs[@]}" |
+               awk '{s+=$1; n++} END{if (n) printf "%.2f", s/n; else print "NA"}')
+        echo "dex,$wl,$cache,$mt,$NCN,$NMN,$THREADS,$upd,$ins,$rg,$tput,$fin,$p99,$rr,$rp,$h,$ok,$rows,${per% },$OUT/$tag" >> "$csv"
+        echo "    -> cluster $tput Mops (compute processes: ${per% })  p99 $p99 us  reads/op $rr  rpc/op $rp  height $h  ops ok (worst) $ok%  rows/scan $rows"
       else
         echo "    -> memory processes done"
       fi
