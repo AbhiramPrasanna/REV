@@ -144,8 +144,11 @@ int remove(GlobalAddress &root, uint64_t dsm_base, Key k) {
 // resume, and `leaves_scanned` to how many leaves were touched here.
 // Returns -1 if the entry leaf no longer covers `k` (stale -> caller retries),
 // and 0 (with leaves_scanned == 0) if the data lives on another memory node.
+// `cross` (optional): when the walk down reaches a child on another memory node,
+// that child, so the compute node can carry the scan on there (DEX_PUSH_CHAIN).
 int range_scan(GlobalAddress start, uint64_t dsm_base, Key k, int max_num,
-               std::pair<Key, Value> *out, Key &max_key, int &leaves_scanned) {
+               std::pair<Key, Value> *out, Key &max_key, int &leaves_scanned,
+               GlobalAddress *cross = nullptr) {
   auto node_id = start.nodeID;
   leaves_scanned = 0;
   NodeBase *mem_node = reinterpret_cast<NodeBase *>(dsm_base + start.offset);
@@ -156,6 +159,8 @@ int range_scan(GlobalAddress start, uint64_t dsm_base, Key k, int max_num,
     auto child = inner->children[inner->lowerBound(k)];
     if (child.nodeID != node_id) {
       // Subtree continues on a different memory node; nothing to serve here.
+      if (cross)
+        *cross = child;
       return 0;
     }
     mem_node = reinterpret_cast<NodeBase *>(dsm_base + child.offset);
@@ -192,6 +197,34 @@ int range_scan(GlobalAddress start, uint64_t dsm_base, Key k, int max_num,
   }
 
   return cur;
+}
+
+// DEX-C (DEX_PUSH_WRITES_LOCATE): walk from `start` down to the leaf covering `k`
+// and return that leaf's address; the compute node then writes the leaf itself.
+// Reads only. 1 = g_result is the leaf; 0 = the walk reached an inner node on
+// another memory node (g_result = that node, where the walk can go on). A leaf
+// on another memory node is returned as is: it is never read here.
+int locate(GlobalAddress start, uint64_t dsm_base, Key k,
+           GlobalAddress &g_result) {
+  auto node_id = start.nodeID;
+  GlobalAddress node = start;
+  NodeBase *mem_node = reinterpret_cast<NodeBase *>(dsm_base + start.offset);
+  while (mem_node->type == PageType::BTreeInner) {
+    auto inner = static_cast<BTreeInner<Key> *>(mem_node);
+    auto child = inner->children[inner->lowerBound(k)];
+    if (inner->level == 1) { // children are leaves
+      g_result = child;
+      return 1;
+    }
+    if (child.nodeID != node_id) {
+      g_result = child;
+      return 0;
+    }
+    node = child;
+    mem_node = reinterpret_cast<NodeBase *>(dsm_base + child.offset);
+  }
+  g_result = node; // `start` was the leaf
+  return 1;
 }
 
 } // namespace cachepush

@@ -187,10 +187,11 @@ void Directory::process_message(const RawMessage *m) {
     Key k;
     memcpy(k.data(), &m->k, define::keyLen);
     Value v_result = define::kValueNull;
-    GlobalAddress leaf_at;
+    GlobalAddress leaf_at, next_at;
     uint64_t leaf_lo = 0, leaf_hi = 0;
+    int next_level = 0;
     int ret = chime_offload::lookup_from((char *)dCon->dsmPool, m->addr, m->level, k, v_result,
-                                         &leaf_at, &leaf_lo, &leaf_hi);
+                                         &leaf_at, &leaf_lo, &leaf_hi, &next_at, &next_level);
     send = (RawMessage *)dCon->message->getSendPool();
     send->level = ret;                 // 1 = found, 2 = not found
     if (ret == 1) send->v = v_result;  // inline value back to the CN
@@ -199,6 +200,13 @@ void Directory::process_message(const RawMessage *m) {
     send->addr = leaf_at;
     send->k = leaf_lo;
     send->aux = leaf_hi;
+    if (ret == chime_offload::kCrossedNode) {
+      // where the walk goes on: the node on another memory node and its level
+      // (CHIME_PUSH_CHAIN); 0 = unknown, the compute node finishes the lookup
+      send->addr = next_at;
+      send->k = (uint64_t)next_level;
+      send->aux = 0;
+    }
     break;
   }
 
@@ -208,14 +216,21 @@ void Directory::process_message(const RawMessage *m) {
     // writes it. Reads only, like RPC_LOOKUP, so a directory thread may run it.
     Key k;
     memcpy(k.data(), &m->k, define::keyLen);
-    GlobalAddress sib, parent;
+    GlobalAddress sib, parent, next_at;
+    int next_level = 0;
     GlobalAddress leaf = chime_offload::locate_leaf((char *)dCon->dsmPool, m->addr, m->level,
-                                                    k, sib, parent);
+                                                    k, sib, parent, &next_at, &next_level);
     send = (RawMessage *)dCon->message->getSendPool();
     send->level = (leaf == GlobalAddress::Null()) ? 0 : 1;
     send->addr = leaf;
     send->v = sib.to_uint64();
     send->aux = parent.to_uint64();
+    send->k = 0;
+    if (leaf == GlobalAddress::Null() && next_level > 0) {
+      send->level = 3;                 // the walk goes on at another memory node
+      send->addr = next_at;
+      send->k = (uint64_t)next_level;
+    }
     break;
   }
 
@@ -237,20 +252,34 @@ void Directory::process_message(const RawMessage *m) {
     // down to the leaf covering `from` here first (as RPC_LOOKUP does). Otherwise
     // m->addr is already the entry leaf (the original request form).
     GlobalAddress entry = m->addr;
+    GlobalAddress next_at, boundary;
+    int next_level = 0;
+    bool at_boundary = false;
     if (start_level >= 2)
       entry = chime_offload::descend_to_leaf((char *)dCon->dsmPool, m->addr,
-                                             start_level, from);
+                                             start_level, from, &next_at, &next_level);
 
     Key max_key{};
     int leaves = 0;
     int cnt = 0;
-    if (entry != GlobalAddress::Null())
+    if (entry != GlobalAddress::Null()) {
+      next_level = 0;
+      boundary = GlobalAddress::Null();
       cnt = chime_offload::range_scan((char *)dCon->dsmPool, entry, from, to,
-                                      want, out, max_key, leaves);
+                                      want, out, max_key, leaves, &boundary);
+      at_boundary = (boundary != GlobalAddress::Null());
+    }
 
     send = (RawMessage *)dCon->message->getSendPool();
     send->level = cnt;                    // pairs packed
-    send->v = (uint64_t)leaves;           // leaves scanned remotely (for offload tracking)
+    // v: bits 0-31 leaves scanned remotely (for offload tracking); bits 32-47 the
+    // level of `aux` when the walk down reached another memory node (nothing
+    // scanned); bit 48 set when the scan stopped at a memory-node boundary and
+    // goes on at leaf `aux` (CHIME_PUSH_CHAIN, and scan push with > 1 memory node)
+    send->v = (uint64_t)(uint32_t)leaves | ((uint64_t)(next_level & 0xFFFF) << 32) |
+              ((uint64_t)at_boundary << 48);
+    send->aux = at_boundary ? boundary.to_uint64()
+                            : (next_level > 0 ? next_at.to_uint64() : 0);
     memcpy(&send->k, max_key.data(), define::keyLen); // resume boundary
     // Slot address the compute node RDMA-reads the packed pairs back from.
     send->addr = GlobalAddress{nodeID, scanScratch.offset +

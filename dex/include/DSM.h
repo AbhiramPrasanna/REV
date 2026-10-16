@@ -387,7 +387,12 @@ public:
   void smart_alloc_nodes(int node_num, GlobalAddress *addrs, bool align = true);
 #endif
 
-  int rpc_lookup(GlobalAddress start_node, uint64_t k, uint64_t &result);
+  // `next` (optional): on 0 (the walk reached another memory node), that node.
+  int rpc_lookup(GlobalAddress start_node, uint64_t k, uint64_t &result,
+                 GlobalAddress *next = nullptr);
+  // DEX-C: 1 = `leaf` is the leaf covering k; 0 = `leaf` is the node on another
+  // memory node where the walk goes on.
+  int rpc_locate(GlobalAddress start_node, uint64_t k, GlobalAddress &leaf);
   int rpc_update(GlobalAddress start_node, uint64_t k, uint64_t result,
                  GlobalAddress &leaf);
   int rpc_insert(GlobalAddress start_node, uint64_t k, uint64_t v,
@@ -551,7 +556,7 @@ inline void DSM::smart_alloc_nodes(int node_num, GlobalAddress *addrs,
 #endif
 
 inline int DSM::rpc_lookup(GlobalAddress start_node, uint64_t k,
-                           uint64_t &result) {
+                           uint64_t &result, GlobalAddress *next) {
   RawMessage m;
   m.type = RpcType::LOOKUP;
   m.k = k;
@@ -566,10 +571,28 @@ inline int DSM::rpc_lookup(GlobalAddress start_node, uint64_t k,
   auto mm = rpc_wait();
   if (mm->level >= 1) {
     result = mm->addr.val;
+  } else if (mm->level == 0 && next) {
+    *next = mm->addr;
   }
 #ifdef COUNT_RDMA
   num_push_lookup[getMyThreadID()][0]++;
 #endif
+  return mm->level;
+}
+
+inline int DSM::rpc_locate(GlobalAddress start_node, uint64_t k,
+                           GlobalAddress &leaf) {
+  RawMessage m;
+  m.type = RpcType::LOCATE;
+  m.k = k;
+  m.addr = start_node;
+
+  thread_local uint16_t dir_id = pthread_self() % memThreadCount;
+  this->rpc_call_dir(m, start_node.nodeID, dir_id);
+  dir_id = (dir_id + 1) % memThreadCount;
+
+  auto mm = rpc_wait();
+  leaf = mm->addr;
   return mm->level;
 }
 
