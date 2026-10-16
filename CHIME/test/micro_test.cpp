@@ -155,9 +155,30 @@ static void init_key_generator() {
     mehcached_zipf_init(&zstate, kKeySpace, zipfian,
                         (rdtsc() & 0x0000ffffffffffffull) ^ dsm->getMyNodeID());
 }
+// CHIME_PARTITION_KEYS=1 (default 0 = every compute node draws from the whole key
+// space, as stock): compute node c of n (node ids MEMORY_NODE_NUM..) draws keys only
+// from [c*K/n, (c+1)*K/n), and its updates name loaded keys in that range -- the
+// split DEX's benchmark (newbench) uses, so CHIME can run with no key shared between
+// compute nodes. The skew of the distribution is kept inside each range.
+static bool g_part_keys = false;
+static uint64_t g_part_lo = 0, g_part_span = 0;
+static std::vector<uint64_t> g_part_loaded;
 static uint64_t next_dist_key() {
-  if (uniform_workload) return to_key(uni_gen());
-  return to_key(mehcached_zipf_next(&zstate));
+  uint64_t k = uniform_workload ? to_key(uni_gen()) : to_key(mehcached_zipf_next(&zstate));
+  return g_part_keys ? g_part_lo + k % g_part_span : k;
+}
+static void setup_partition_keys() {
+  const char *s = getenv("CHIME_PARTITION_KEYS");
+  int ncn = kNodeCount - MEMORY_NODE_NUM, c = (int)dsm->getMyNodeID() - MEMORY_NODE_NUM;
+  if (!(s && atoi(s)) || ncn < 1 || c < 0) return;
+  uint64_t lo = kKeySpace / ncn * c, hi = (c == ncn - 1) ? kKeySpace : kKeySpace / ncn * (c + 1);
+  for (uint64_t i = 0; i < bulk_load_num; ++i)
+    if (bulk_array[i] >= lo && bulk_array[i] < hi) g_part_loaded.push_back(bulk_array[i]);
+  if (g_part_loaded.empty()) return;
+  g_part_keys = true; g_part_lo = lo; g_part_span = hi - lo;
+  printf("[CONFIG node %d] keys partitioned: compute node %d of %d draws keys in [%lu, %lu), "
+         "%zu of them loaded (CHIME_PARTITION_KEYS)\n",
+         dsm->getMyNodeID(), c, ncn, lo, hi, g_part_loaded.size());
 }
 
 
@@ -193,6 +214,7 @@ void generate_workload() {
   if (g_sorted_load || g_bulk_build) std::sort(bulk_array, bulk_array + bulk_load_num);
 
   init_key_generator();
+  setup_partition_keys();
 
   auto insertmark = kReadRatio + kInsertRatio;
   auto updatemark = insertmark + kUpdateRatio;
@@ -212,7 +234,8 @@ void generate_workload() {
       // ~1,000 more keys than were loaded (room for inserts). Map the drawn key onto
       // a loaded one; the same drawn key always maps to the same loaded key, so the
       // skew of the distribution is kept.
-      if (op == M_UPDATE) key = bulk_array[key % bulk_load_num];
+      if (op == M_UPDATE)
+        key = g_part_keys ? g_part_loaded[key % g_part_loaded.size()] : bulk_array[key % bulk_load_num];
       arr[i] = (op << 56) | (key & kOpMask);
     }
   };
