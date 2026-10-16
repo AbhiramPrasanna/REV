@@ -95,14 +95,38 @@ public:
     return on;
   }
   bool push_reads_deepest_ = dexr_enabled();
+  // DEX-C, DEX_PUSH_WRITES_LOCATE=1: CHIME's write rule (CHIME_PUSH_LOCATE) in
+  // DEX. Every write that misses in the cache above the leaf's parent pushes only
+  // its walk, from the deepest cached node, and this compute node writes the leaf
+  // (CacheManager::cold_to_hot_with_locate); it replaces DEX's own write push
+  // (megaLevel). A write whose pushed walk fails is retried with DEX's own rule.
+  // Same conditions as DEX-R: MN_ONLY_PLACEMENT, once the cache is full.
+  static bool dexc_enabled() {
+    const char *s = getenv("DEX_PUSH_WRITES_LOCATE");
+    bool on = s && atoi(s) != 0;
+#ifndef MN_ONLY_PLACEMENT
+    if (on) {
+      printf("[DEX-C] DEX_PUSH_WRITES_LOCATE ignored: needs MN_ONLY_PLACEMENT\n");
+      on = false;
+    }
+#endif
+    static bool printed = false;
+    if (!printed) {
+      printed = true;
+      printf("[DEX-C] writes: walk pushed, leaf written by the compute node: %s "
+             "(DEX_PUSH_WRITES_LOCATE)\n", on ? "ON" : "off");
+    }
+    return on;
+  }
+  bool push_writes_locate_ = dexc_enabled();
   // DEX-R lookups whose walk reached another memory node and were retried with
   // DEX's own rule; printed when the process exits.
   struct CrossedReport {
     std::atomic<uint64_t> n{0};
     ~CrossedReport() {
       if (dexr_enabled())
-        printf("[DEX-R] pushed lookups that reached another memory node, retried with "
-             "DEX's own rule: %lu\n", (unsigned long)n.load());
+        printf("[DEX-R] pushed lookups not carried on to another memory node, retried "
+             "with DEX's own rule: %lu\n", (unsigned long)n.load());
     }
   };
   static inline CrossedReport dexr_crossed_;
@@ -1613,6 +1637,7 @@ public:
     int restartCount = 0;
     bool verbose = false;
     bool IO_enable = false;
+    bool loc_off = false; // DEX-C: set once this write's pushed walk failed
   restart:
     if (restartCount++)
       yield(restartCount);
@@ -1751,6 +1776,18 @@ public:
             inner->IOUnlock();
             return insert_success;
           }
+        } else if (push_writes_locate_ && cache.state == 1 && !loc_off) {
+          // DEX-C: push the walk, write the leaf here; a failure falls back
+          bool insert_success = false;
+          remote_flag = cache.cold_to_hot_with_locate(
+              inner->children[idx], reinterpret_cast<void **>(&cur_node), inner,
+              idx, refresh, k, v, insert_success, RPC_type::INSERT);
+          if (remote_flag == 1) {
+            inner->IOUnlock();
+            return insert_success;
+          }
+          if (remote_flag == -1)
+            loc_off = true;
         } else if (inner->level <= megaLevel && !(inner->shared)) {
           // RPC is probably needed
           bool insert_success = false;
@@ -1972,8 +2009,8 @@ public:
           // lookup from here; the memory node walks every remaining level.
           // With rpc_rate 0 (no memory threads) cold_to_hot_with_rpc pulls.
           // With several memory nodes the walk can reach a child on another
-          // node: the memory node stops (lookup returns 0) and this lookup is
-          // retried with DEX's own rule (dexr_off), which pulls the upper levels.
+          // node: the push is carried on there (DEX_PUSH_CHAIN); if it is not,
+          // this lookup is retried with DEX's own rule (dexr_off).
           bool lookup_success = false;
           remote_flag = cache.cold_to_hot_with_rpc(
               inner->children[idx], reinterpret_cast<void **>(&cur_node), inner,
@@ -2227,6 +2264,7 @@ public:
 
   bool update(Key k, Value v) {
     int restartCount = 0;
+    bool loc_off = false; // DEX-C: set once this write's pushed walk failed
   restart:
     if (restartCount++)
       yield(restartCount);
@@ -2284,6 +2322,18 @@ public:
             inner->IOUnlock();
             return update_success;
           }
+        } else if (push_writes_locate_ && cache.state == 1 && !loc_off) {
+          // DEX-C: push the walk, write the leaf here; a failure falls back
+          bool update_success = false;
+          remote_flag = cache.cold_to_hot_with_locate(
+              inner->children[idx], reinterpret_cast<void **>(&cur_node), inner,
+              idx, refresh, k, v, update_success, RPC_type::UPDATE);
+          if (remote_flag == 1) {
+            inner->IOUnlock();
+            return update_success;
+          }
+          if (remote_flag == -1)
+            loc_off = true;
         } else if (inner->level <= megaLevel && !(inner->shared)) {
           // RPC is probably needed
           bool update_success = false;
@@ -2430,6 +2480,7 @@ public:
 
   bool remove(Key k) {
     int restartCount = 0;
+    bool loc_off = false; // DEX-C: set once this write's pushed walk failed
   restart:
     if (restartCount++)
       yield(restartCount);
@@ -2488,6 +2539,19 @@ public:
             inner->IOUnlock();
             return remove_success;
           }
+        } else if (push_writes_locate_ && cache.state == 1 && !loc_off) {
+          // DEX-C: push the walk, write the leaf here; a failure falls back
+          bool remove_success = false;
+          Value v;
+          remote_flag = cache.cold_to_hot_with_locate(
+              inner->children[idx], reinterpret_cast<void **>(&cur_node), inner,
+              idx, refresh, k, v, remove_success, RPC_type::DELETE);
+          if (remote_flag == 1) {
+            inner->IOUnlock();
+            return remove_success;
+          }
+          if (remote_flag == -1)
+            loc_off = true;
         } else if (inner->level <= megaLevel && !(inner->shared)) {
           // RPC is probably needed
           bool remove_success = false;

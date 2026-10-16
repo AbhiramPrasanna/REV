@@ -122,8 +122,10 @@ inline bool read_internal_local(char *dsm_base, GlobalAddress addr,
 // the compute node then finishes the lookup itself from its cache boundary.
 static constexpr int kCrossedNode = 3;
 
+// `cross_out` (optional): with kCrossedNode, the sibling leaf on the other memory node.
 inline int lookup(char *dsm_base, GlobalAddress leaf_addr, const Key &k,
-                  Value &v_out, GlobalAddress *found_at = nullptr, bool *turned = nullptr) {
+                  Value &v_out, GlobalAddress *found_at = nullptr, bool *turned = nullptr,
+                  GlobalAddress *cross_out = nullptr) {
   static thread_local LeafScratch s;
   GlobalAddress addr = leaf_addr;
   for (int hops = 0; hops < 8; ++hops) {
@@ -148,8 +150,10 @@ inline int lookup(char *dsm_base, GlobalAddress leaf_addr, const Key &k,
       addr = sib;
       continue; // turn right
     }
-    if (max_key < k && sib != GlobalAddress::Null() && sib != GlobalAddress::Widest())
+    if (max_key < k && sib != GlobalAddress::Null() && sib != GlobalAddress::Widest()) {
+      if (cross_out) *cross_out = sib;
       return kCrossedNode;  // the key may be in a sibling on another memory node
+    }
     return 2;
   }
   return 2;
@@ -167,18 +171,26 @@ inline int lookup(char *dsm_base, GlobalAddress leaf_addr, const Key &k,
 // range [lo, hi) as its parent states it, when this walk read that parent and the
 // key was in the leaf the parent named (Null leaf otherwise). The compute node
 // uses them to cache hot leaves (CHIME_LEAF_ADMIT_PUSH).
+// With kCrossedNode, `next_out` / `next_level_out` (optional) are the node on the
+// other memory node and its level, as a request to it needs them, so the compute
+// node can carry the lookup on there (CHIME_PUSH_CHAIN).
 inline int lookup_from(char *dsm_base, GlobalAddress node_addr, int level,
                        const Key &k, Value &v_out, GlobalAddress *leaf_out = nullptr,
-                       uint64_t *lo_out = nullptr, uint64_t *hi_out = nullptr) {
+                       uint64_t *lo_out = nullptr, uint64_t *hi_out = nullptr,
+                       GlobalAddress *next_out = nullptr, int *next_level_out = nullptr) {
   static thread_local InternalScratch is;
   bool have_range = false;
   uint64_t r_lo = 0, r_hi = 0;
   if (leaf_out) *leaf_out = GlobalAddress::Null();
   for (int hops = 0; hops < 64; ++hops) {   // bounded descent (height + turn-rights)
     if (level <= 1) {                        // leaf probe
-      GlobalAddress at;
+      GlobalAddress at, cross;
       bool turned = false;
-      int r = lookup(dsm_base, node_addr, k, v_out, &at, &turned);
+      int r = lookup(dsm_base, node_addr, k, v_out, &at, &turned, &cross);
+      if (r == kCrossedNode) {               // the next leaf is on another memory node
+        if (next_out) *next_out = cross;
+        if (next_level_out) *next_level_out = 1;
+      }
       if (r == 1 && have_range && !turned && leaf_out) {
         *leaf_out = at;
         if (lo_out) *lo_out = r_lo;
@@ -194,8 +206,12 @@ inline int lookup_from(char *dsm_base, GlobalAddress node_addr, int level,
     const auto &fk = node->metadata.fence_keys;
     if (k >= fk.highest) {                   // key migrated right (concurrent split)
       GlobalAddress sib = node->metadata.sibling_ptr;
-      if (!sibling_on_this_node(sib, node_addr.nodeID))
-        return (sib != GlobalAddress::Null() && sib != GlobalAddress::Widest()) ? kCrossedNode : 2;
+      if (!sibling_on_this_node(sib, node_addr.nodeID)) {
+        if (sib == GlobalAddress::Null() || sib == GlobalAddress::Widest()) return 2;
+        if (next_out) *next_out = sib;       // the sibling, at this node's level
+        if (next_level_out) *next_level_out = level;
+        return kCrossedNode;
+      }
       node_addr = sib;
       continue;                              // re-read the sibling at the same level
     }
@@ -229,7 +245,11 @@ inline int lookup_from(char *dsm_base, GlobalAddress node_addr, int level,
       }
       node_addr = child;
     }
-    if (node_addr.nodeID != here) return kCrossedNode;   // child on another memory node
+    if (node_addr.nodeID != here) {          // child on another memory node
+      if (next_out) *next_out = node_addr;
+      if (next_level_out) *next_level_out = level;
+      return kCrossedNode;
+    }
     have_range = (level == 1);
     if (have_range) { r_lo = key2int(c_lo); r_hi = key2int(c_hi); }
   }
@@ -251,9 +271,15 @@ inline int lookup_from(char *dsm_base, GlobalAddress node_addr, int level,
 // the leaf's turn-right check; and the parent itself (the leaves' parents are
 // level 1 in CHIME) for path_stack[1], so a leaf split finds its parent without
 // a search. Null leaf if the walk fails; Null parent when `node_addr` was the leaf.
+// A leaf on another memory node is returned as is (it is never read here); a walk
+// that reaches an INNER node on another memory node returns Null with that node in
+// `next_out` and its level in `next_level_out` (optional), so the compute node can
+// carry the walk on there (CHIME_PUSH_CHAIN).
 inline GlobalAddress locate_leaf(char *dsm_base, GlobalAddress node_addr, int level,
                                  const Key &k, GlobalAddress &sibling_out,
-                                 GlobalAddress &parent_out) {
+                                 GlobalAddress &parent_out,
+                                 GlobalAddress *next_out = nullptr,
+                                 int *next_level_out = nullptr) {
   static thread_local InternalScratch is;
   sibling_out = GlobalAddress::Null();
   parent_out = GlobalAddress::Null();
@@ -267,7 +293,13 @@ inline GlobalAddress locate_leaf(char *dsm_base, GlobalAddress node_addr, int le
     const auto &fk = node->metadata.fence_keys;
     if (k >= fk.highest) {                   // turn right, as internal_node_search
       GlobalAddress sib = node->metadata.sibling_ptr;
-      if (!sibling_on_this_node(sib, node_addr.nodeID)) return GlobalAddress::Null();
+      if (!sibling_on_this_node(sib, node_addr.nodeID)) {
+        if (sib != GlobalAddress::Null() && sib != GlobalAddress::Widest()) {
+          if (next_out) *next_out = sib;     // the sibling, at this node's level
+          if (next_level_out) *next_level_out = level;
+        }
+        return GlobalAddress::Null();
+      }
       node_addr = sib;
       continue;
     }
@@ -296,16 +328,27 @@ inline GlobalAddress locate_leaf(char *dsm_base, GlobalAddress node_addr, int le
       sib = (i == (int)define::internalSpanSize || records[i].key == define::kkeyNull)
                 ? (GlobalAddress)node->metadata.sibling_leftmost_ptr : records[i].ptr;
     }
-    if (child == GlobalAddress::Null() || child.nodeID != node_addr.nodeID)
-      return GlobalAddress::Null();          // off this memory node: the CN walks itself
+    if (child == GlobalAddress::Null()) return GlobalAddress::Null();
+    if (level != 1 && child.nodeID != node_addr.nodeID) {
+      // an inner node on another memory node: the walk goes on there
+      if (next_out) *next_out = child;
+      if (next_level_out) *next_level_out = level;
+      return GlobalAddress::Null();
+    }
     node_addr = child;
     sibling_out = sib;
   }
   return GlobalAddress::Null();
 }
 
+// A walk that reaches a node on another memory node -- an inner node or the entry
+// leaf, both of which it would read -- returns Null with that node and its level
+// in `next_out` / `next_level_out` (optional), so the compute node can carry the
+// scan on there (CHIME_PUSH_CHAIN).
 inline GlobalAddress descend_to_leaf(char *dsm_base, GlobalAddress node_addr,
-                                     int level, const Key &k) {
+                                     int level, const Key &k,
+                                     GlobalAddress *next_out = nullptr,
+                                     int *next_level_out = nullptr) {
   static thread_local InternalScratch is;
   for (int hops = 0; hops < 64; ++hops) {
     if (level <= 1) return node_addr;
@@ -317,7 +360,13 @@ inline GlobalAddress descend_to_leaf(char *dsm_base, GlobalAddress node_addr,
     const auto &fk = node->metadata.fence_keys;
     if (k >= fk.highest) {
       GlobalAddress sib = node->metadata.sibling_ptr;
-      if (!sibling_on_this_node(sib, node_addr.nodeID)) return GlobalAddress::Null();
+      if (!sibling_on_this_node(sib, node_addr.nodeID)) {
+        if (sib != GlobalAddress::Null() && sib != GlobalAddress::Widest()) {
+          if (next_out) *next_out = sib;
+          if (next_level_out) *next_level_out = level;
+        }
+        return GlobalAddress::Null();
+      }
       node_addr = sib;
       continue;
     }
@@ -332,6 +381,7 @@ inline GlobalAddress descend_to_leaf(char *dsm_base, GlobalAddress node_addr,
                 return a.key < b.key;
               });
 #endif
+    const uint16_t here = node_addr.nodeID;
     if (k < records[0].key) {
       node_addr = node->metadata.leftmost_ptr;
     } else {
@@ -343,6 +393,11 @@ inline GlobalAddress descend_to_leaf(char *dsm_base, GlobalAddress node_addr,
         }
       }
       node_addr = child;
+    }
+    if (node_addr.nodeID != here) {          // on another memory node
+      if (next_out) *next_out = node_addr;
+      if (next_level_out) *next_level_out = level;
+      return GlobalAddress::Null();
     }
   }
   return GlobalAddress::Null();
@@ -369,9 +424,11 @@ inline void unpack_scan_level(int packed, int &count, int &start_level) {
 // Returns the number of pairs packed. Sets `max_key` to the largest key seen in
 // the last leaf visited (the CN's resume boundary) and `leaves` to how many
 // leaves were touched here.
+// `boundary_out` (optional): set to the next leaf when the scan stopped only
+// because that leaf is on another memory node, so the compute node goes on there.
 inline int range_scan(char *dsm_base, GlobalAddress leaf_addr, const Key &from,
                       const Key &to, int max_num, std::pair<Key, Value> *out,
-                      Key &max_key, int &leaves) {
+                      Key &max_key, int &leaves, GlobalAddress *boundary_out = nullptr) {
   static thread_local LeafScratch s;
   if (max_num > kScanSlotCap) max_num = kScanSlotCap;
   leaves = 0;
@@ -398,7 +455,11 @@ inline int range_scan(char *dsm_base, GlobalAddress leaf_addr, const Key &from,
 
     GlobalAddress sib = leaf->metadata.sibling_ptr;
     if (!(leaf_max < to)) break;                    // range fully covered
-    if (!sibling_on_this_node(sib, addr.nodeID)) break;
+    if (!sibling_on_this_node(sib, addr.nodeID)) {
+      if (boundary_out && sib != GlobalAddress::Null() && sib != GlobalAddress::Widest())
+        *boundary_out = sib;                        // the range goes on there
+      break;
+    }
     addr = sib;
   }
 

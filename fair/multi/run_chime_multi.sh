@@ -11,10 +11,12 @@
 # fair/run_chime.sh: it restarts memcached (on MEM_IP), writes "mcell" and starts
 # its processes; the compute side waits for that cell and for the memory processes,
 # then starts its own. The tree is bulk-built by the last node (a compute process)
-# and spread over the memory nodes. Pushed lookups that reach the other memory node
-# are finished by the compute node ([PUSHX]); scans are pulled with NMN > 1;
-# CHIME_PUSH_LOCATE (a write's walk pushed) works; CHIME_PUSH_WRITES=2 does not
-# (it needs one memory node).
+# and spread over the memory nodes. A pushed walk -- lookup, scan, or a write's walk
+# (CHIME_PUSH_LOCATE) -- that reaches the other memory node is carried on there
+# (CHIME_PUSH_CHAIN, default 1; counted in chained_*); one not carried on is
+# finished by the compute node ([PUSHX], lookups_crossed). Pushed scans go on past
+# a memory-node boundary. CHIME_PUSH_WRITES=2 does not work (one memory node only).
+# CHIME_PUSH_CHAIN=0: cells tagged _nochain.
 #
 #   both servers, once:  RUN_ID=b TREE_SETUP=deep VALUE_B=64 bash fair/multi/run_chime_multi.sh build
 #   server 8:  RUN_ID=m1 TREE_SETUP=deep VALUE_B=64 KEYS_M=60 CHIME_BUILD_LEAF_KEYS=4 \
@@ -69,14 +71,19 @@ export CHIME_SCAN_FROM_CACHE="${CHIME_SCAN_FROM_CACHE:-1}"
 export CHIME_SCAN_OFFLOAD_ALWAYS="${CHIME_SCAN_OFFLOAD_ALWAYS:-1}"
 export CHIME_HOTSPOT="${CHIME_HOTSPOT:-0}"          # off, as in every run of the paper
 export CHIME_PARTITION_KEYS="${CHIME_PARTITION_KEYS:-0}"   # 1: each compute process its own key range (as DEX)
+export CHIME_PUSH_CHAIN="${CHIME_PUSH_CHAIN:-1}"           # carry a pushed walk on to the other memory node
 export CHIME_PUSH_LOCATE="${CHIME_PUSH_LOCATE:-1}"         # writes with push: walk pushed, leaf written by the compute process (Lesson 3); 0 = pull the whole write
 export CHIME_SORTED_LOAD CHIME_BULK_BUILD CHIME_BUILD_LEAF_KEYS CHIME_BUILD_INNER_FANOUT
 CHIME_DIR="$REV_DIR/CHIME"
 printf '%s\n%s\n' "$MEM_IP" "$MEMC_PORT" > "$CHIME_DIR/memcached.conf"
 csv="$OUT/chime_multi.csv"
-[ "$role" = compute ] && [ ! -f "$csv" ] && \
-  echo "system,workload,cache_mb,memthreads,ncn,nmn,threads,update_pct,insert_pct,scan_pct,partition_keys,push_locate,tput_mops,p99_us,round_trips_per_op,lookups_crossed,writes_located,lookup_found_pct_min,scan_rows,cn_tputs,log_prefix" > "$csv"
-[ "$NMN" -gt 1 ] && echo "note: with $NMN memory processes CHIME pulls every scan (its pushed scan stays on one memory node)"
+hdr="system,workload,cache_mb,memthreads,ncn,nmn,threads,update_pct,insert_pct,scan_pct,partition_keys,push_locate,push_chain,tput_mops,p99_us,round_trips_per_op,lookups_crossed,chained_lookups,chained_walks,chained_scans,writes_located,lookup_found_pct_min,scan_rows,cn_tputs,log_prefix"
+if [ "$role" = compute ]; then
+  # a CSV written by the older script (other columns) is kept aside, not appended to
+  [ -f "$csv" ] && [ "$(head -1 "$csv")" != "$hdr" ] && mv "$csv" "$csv.old-$(date +%s)"
+  [ -f "$csv" ] || echo "$hdr" > "$csv"
+fi
+[ "$NMN" -gt 1 ] && echo "note: $NMN memory processes; pushed walks carried on to the other memory node: CHIME_PUSH_CHAIN=$CHIME_PUSH_CHAIN"
 
 [ "$role" = compute ] && note_stale_cell "$MEM_IP" "$MEMC_PORT"
 cells=0; for mt in $MEMTHREADS; do for wl in $WORKLOADS; do for c in $CACHES; do cells=$((cells+1)); done; done; done
@@ -99,6 +106,7 @@ for mt in $MEMTHREADS; do
       [ "$(wl_op "$wl")" = point ] && [ "$rg" != 0 ] && mix="${mix}_s$rg"
       [ "$CHIME_PARTITION_KEYS" = 1 ] && mix="${mix}_part"
       [ "$CHIME_PUSH_LOCATE" = 1 ] && [ $((upd + ins)) -gt 0 ] && [ "$mt" -gt 0 ] && mix="${mix}_loc"
+      [ "$CHIME_PUSH_CHAIN" = 0 ] && [ "$mt" -gt 0 ] && mix="${mix}_nochain"
       tag="chimem_${wl}${mix}_mt${mt}_cache${cache}"
       echo ">>> [$(date +%H:%M:%S)] ($i/$cells) $tag  ($role)"
       #  args: nodes threads(per process) read insert update range uniform theta bulkM warmupM opM rate
@@ -137,13 +145,17 @@ for mt in $MEMTHREADS; do
              awk '{s += $1; n++} END {if (n) printf "%.4f", s / n; else print "NA"}')
         crossed=$(for f in "${logs[@]}"; do sed -nE 's/.*\[PUSHX\].*finished here=([0-9]+).*/\1/p' "$f" | tail -1; done | awk '{s += $1} END {print s + 0}')
         located=$(for f in "${logs[@]}"; do sed -nE 's/.*\[PUSHLOC\].*pushed=([0-9]+).*/\1/p' "$f" | tail -1; done | awk '{s += $1} END {print s + 0}')
+        # pushes carried on to the other memory node ([PUSHCHAIN] lookups= write walks= scans=)
+        chain_of() { for f in "${logs[@]}"; do sed -nE "s/.*\[PUSHCHAIN\].* $1=([0-9]+).*/\1/p" "$f" | tail -1; done |
+                     awk '{s += $1} END {print s + 0}'; }
+        cl=$(chain_of lookups); cw=$(chain_of walks); cs=$(chain_of scans)
         # correctness across compute processes: worst "lookup found" share, scan rows per scan
         found=$(sed -nE 's/.*\[CORRECTNESS node [0-9]+\] lookup found [0-9]+ \/ [0-9]+ = ([0-9.]+)%.*/\1/p' "${logs[@]}" |
                 awk 'NR==1||$1<m{m=$1} END{if (NR) print m; else print "NA"}')
         rows=$(sed -nE 's/.*\[CORRECTNESS node [0-9]+\] scan rows returned = ([0-9]+).*/\1/p' "${logs[@]}" |
                awk '{s+=$1} END{print s+0}')
-        echo "chime,$wl,$cache,$mt,$NCN,$NMN,$THREADS,$upd,$ins,$rg,$CHIME_PARTITION_KEYS,$CHIME_PUSH_LOCATE,$tput,$p99,$rt,$crossed,$located,$found,$rows,${per% },$OUT/$tag" >> "$csv"
-        echo "    -> cluster $tput Mops (compute processes: ${per% })  p99 $p99 us  round trips/op $rt  lookups finished here $crossed  write walks pushed $located  lookups found (worst) $found%  scan rows $rows"
+        echo "chime,$wl,$cache,$mt,$NCN,$NMN,$THREADS,$upd,$ins,$rg,$CHIME_PARTITION_KEYS,$CHIME_PUSH_LOCATE,$CHIME_PUSH_CHAIN,$tput,$p99,$rt,$crossed,$cl,$cw,$cs,$located,$found,$rows,${per% },$OUT/$tag" >> "$csv"
+        echo "    -> cluster $tput Mops (compute processes: ${per% })  p99 $p99 us  round trips/op $rt  lookups finished here $crossed  carried on: lookups $cl walks $cw scans $cs  write walks pushed $located  lookups found (worst) $found%  scan rows $rows"
       else
         echo "    -> memory processes done"
       fi
