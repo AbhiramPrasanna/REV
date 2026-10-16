@@ -87,7 +87,7 @@ for mt in $MEMTHREADS; do
         restart_memcached || { echo "memcached restart failed" >&2; exit 1; }
         set_cell "$CMP_IP" "$MEMC_PORT" "$i"
         for ((c = 0; c < NCN; c++)); do
-          sudo env "${envs[@]}" REV_CPU_BASE="$(cn_cpu_base $c)" REV_DIR_CPUS="$(cn_dir_cpus $c)" \
+          sudo env "${envs[@]}" DEX_HOST_LOCKS=1 REV_CPU_BASE="$(cn_cpu_base $c)" REV_DIR_CPUS="$(cn_dir_cpus $c)" \
             DEX_DSM_GB="$CN_DSM_GB" stdbuf -oL "$BIN" "${args[@]}" > "$OUT/${tag}.cn$c.log" 2>&1 &
           pids+=($!)
           wait_count "$CMP_IP" "$MEMC_PORT" serverNum $((c + 1)) "compute process $c to register" || exit 1
