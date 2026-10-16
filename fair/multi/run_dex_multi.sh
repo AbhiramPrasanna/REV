@@ -81,13 +81,13 @@ for mt in $MEMTHREADS; do
       args=("$NODES" "$r" "$ins" "$upd" 0 "$rg" "$THREADS" "$dir" "$cache" "$uni" "$ZIPF_THETA"
             "$KEYS_M" "$WARMUP_M" "$OPS_M" 0 0 1 0 "$rpc" 0.1 0 "$T")
       envs=(DEX_PUSH_READS_DEEPEST=0 DEX_SAFE_PT="${DEX_SAFE_PT:-1}" DEX_LEVEL_STATS="${DEX_LEVEL_STATS:-0}")
-      sudo -n pkill -9 -f "$BIN" 2>/dev/null; sleep 1
+      sudo -n pkill -9 -x newbench 2>/dev/null; sleep 1
       pids=()
       if [ "$role" = compute ]; then
         restart_memcached || { echo "memcached restart failed" >&2; exit 1; }
         set_cell "$CMP_IP" "$MEMC_PORT" "$i"
         for ((c = 0; c < NCN; c++)); do
-          sudo env "${envs[@]}" REV_CPU_BASE="$(cn_cpu_base $c)" REV_DIR_CPUS="$(cn_dir_cpus $c)" \
+          sudo env "${envs[@]}" DEX_HOST_LOCKS=1 REV_CPU_BASE="$(cn_cpu_base $c)" REV_DIR_CPUS="$(cn_dir_cpus $c)" \
             DEX_DSM_GB="$CN_DSM_GB" stdbuf -oL "$BIN" "${args[@]}" > "$OUT/${tag}.cn$c.log" 2>&1 &
           pids+=($!)
           wait_count "$CMP_IP" "$MEMC_PORT" serverNum $((c + 1)) "compute process $c to register" || exit 1
