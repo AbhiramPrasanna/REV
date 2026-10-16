@@ -130,6 +130,8 @@ void Directory::process_message(const RawMessage *m) {
       send->addr.val = v_result;
     } else if (ret == 2) {
       send->addr = g_result;
+    } else if (ret == 0) {
+      send->addr = g_result; // the child on another memory node (DEX_PUSH_CHAIN)
     }
 
     break;
@@ -184,17 +186,33 @@ void Directory::process_message(const RawMessage *m) {
 
     Key max_key = 0;
     int leaves = 0;
+    GlobalAddress cross = GlobalAddress::Null();
     int cnt = cachepush::range_scan(addr, dsm_base, m->k, want, out, max_key,
-                                    leaves);
+                                    leaves, &cross);
 
     send = (RawMessage *)dCon->message->getSendPool();
     send->level = cnt;     // count packed (or -1 stale)
     send->k = max_key;     // resume boundary
+    if (cnt == 0 && leaves == 0 && !(cross == GlobalAddress::Null())) {
+      send->level = -2;    // the walk down reached another memory node:
+      send->k = cross.val; // carry the scan on from this node (DEX_PUSH_CHAIN)
+    }
     send->v = leaves;      // leaves visited (for offload tracking)
     // Slot address the compute node reads the packed KV pairs back from.
     send->addr = GlobalAddress{addr.nodeID, scanScratch.offset +
                                                 static_cast<uint64_t>(slot) *
                                                     kScanSlotBytes};
+    break;
+  }
+
+  case RpcType::LOCATE: {
+    // DEX-C: walk to the leaf a write needs; the compute node writes it.
+    GlobalAddress g_result = GlobalAddress::Null();
+    auto ret = cachepush::locate(m->addr, remoteInfo[m->addr.nodeID].dsmBase,
+                                 m->k, g_result);
+    send = (RawMessage *)dCon->message->getSendPool();
+    send->level = ret;
+    send->addr = g_result;
     break;
   }
 

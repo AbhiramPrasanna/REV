@@ -60,6 +60,40 @@ PerThread<uint64_t> locate_fail_cnt;
 // Pushed lookups whose walk reached another memory node (chime_rpc.h
 // kCrossedNode, MEMORY_NODE_NUM > 1) and that the compute node finished itself.
 PerThread<uint64_t> offload_cross_cnt;
+// CHIME_PUSH_CHAIN (default 1): a pushed walk -- a lookup, a write's walk
+// (CHIME_PUSH_LOCATE) or a scan's walk down -- that reaches a node on another
+// memory node is carried on there: this compute node sends the rest of the walk
+// to that memory node (one more round trip) instead of finishing it itself.
+// 0 = finish it here, as before. Counted per kind below.
+PerThread<uint64_t> chain_lookup_cnt;
+PerThread<uint64_t> chain_locate_cnt;
+PerThread<uint64_t> chain_scan_cnt;
+static constexpr int kMaxChain = 8;   // at most this many extra pushes per op
+static inline bool push_chain_on() {
+  static const bool on = [] {
+    const char *e = getenv("CHIME_PUSH_CHAIN");
+    bool v = !(e && atoi(e) == 0);
+    if (MEMORY_NODE_NUM > 1)
+      printf("[CONFIG] carry pushes on to another memory node: %s (CHIME_PUSH_CHAIN)\n",
+             v ? "on" : "off");
+    return v;
+  }();
+  return on;
+}
+// CHIME_PUSH_LOCATE's walk, carried on across memory nodes (CHIME_PUSH_CHAIN).
+static bool locate_chained(DSM *dsm, const GlobalAddress &p, int level, const Key &k,
+                           GlobalAddress &leaf, GlobalAddress &sib, GlobalAddress &parent) {
+  GlobalAddress nx;
+  int nl = 0;
+  bool ok = dsm->rpc_locate(p, level, k, leaf, sib, parent, &nx, &nl);
+  for (int hop = 0; !ok && nl > 0 && push_chain_on() && hop < kMaxChain; ++hop) {
+    chain_locate_cnt[dsm->getMyThreadID()] ++;
+    const GlobalAddress from = nx;
+    const int fl = nl;
+    ok = dsm->rpc_locate(from, fl, k, leaf, sib, parent, &nx, &nl);
+  }
+  return ok;
+}
 static inline bool push_locate_on() {
   static const bool on = [] { const char *e = getenv("CHIME_PUSH_LOCATE"); return e && atoi(e) == 1; }();
   return on;
@@ -91,10 +125,9 @@ static inline int push_ops_mask() {
   return m;
 }
 static inline bool push_lookups() { return (push_ops_mask() & 1) != 0; }
-// Scan pushdown walks child pointers without the other-memory-node check the
-// lookup walk has (chime_rpc.h descend_to_leaf, range_scan), so with more than one
-// memory node scans are pulled.
-static inline bool push_scans() { return MEMORY_NODE_NUM == 1 && (push_ops_mask() & 2) != 0; }
+// With more than one memory node a pushed scan stops where its walk down, or its
+// leaf chain, reaches another memory node and goes on there (range_query_offload).
+static inline bool push_scans() { return (push_ops_mask() & 2) != 0; }
 #endif
 
 // Index-cache size (MB) as a RUNTIME knob, so a cache sweep needs no rebuild
@@ -566,7 +599,7 @@ void Tree::insert(const Key &k, Value v, CoroPull* sink) {
   if (push_locate_on() && !pushw::enabled() && level >= 2 && p.nodeID != dsm->getMyNodeID() &&
       (int)level >= g_offload_min_level && should_offload(dsm->getMyThreadID())) {
     GlobalAddress leaf, sib, parent;
-    if (dsm->rpc_locate(p, level, k, leaf, sib, parent)) {
+    if (locate_chained(dsm, p, level, k, leaf, sib, parent)) {
       locate_write_cnt[dsm->getMyThreadID()] ++;
       if (parent != GlobalAddress::Null()) path_stack[sink ? sink->get() : 0][1] = parent;
       p = leaf, sibling_p = sib, level = 1;
@@ -1776,7 +1809,7 @@ void Tree::update(const Key &k, Value v, CoroPull* sink) {
   if (push_locate_on() && !pushw::enabled() && level >= 2 && p.nodeID != dsm->getMyNodeID() &&
       (int)level >= g_offload_min_level && should_offload(dsm->getMyThreadID())) {
     GlobalAddress leaf, sib, parent;
-    if (dsm->rpc_locate(p, level, k, leaf, sib, parent)) {
+    if (locate_chained(dsm, p, level, k, leaf, sib, parent)) {
       locate_write_cnt[dsm->getMyThreadID()] ++;
       p = leaf, sibling_p = sib, level = 1;
       from_cache = false, cache_entry = nullptr;   // a walked leaf, as from the root
@@ -2077,6 +2110,15 @@ bool Tree::search(const Key &k, Value &v, CoroPull* sink) {
       GlobalAddress push_leaf;
       uint64_t push_lo = 0, push_hi = 0;
       int ret = dsm->rpc_lookup(p, (int)level, k, off_v, &push_leaf, &push_lo, &push_hi);
+      // the walk reached another memory node: carry it on there (CHIME_PUSH_CHAIN);
+      // the reply named that node (push_leaf) and its level (push_lo; 0 = unknown)
+      for (int hop = 0; ret == chime_offload::kCrossedNode && push_chain_on() &&
+                        hop < kMaxChain && push_lo > 0 && push_leaf != GlobalAddress::Null(); ++hop) {
+        chain_lookup_cnt[dsm->getMyThreadID()] ++;
+        const GlobalAddress nx = push_leaf;
+        const int nl = (int)push_lo;
+        ret = dsm->rpc_lookup(nx, nl, k, off_v, &push_leaf, &push_lo, &push_hi);
+      }
       if (ret == chime_offload::kCrossedNode) {
         // the walk reached another memory node (MEMORY_NODE_NUM > 1): finish it
         // here, pulling from the same cache boundary
@@ -2229,10 +2271,14 @@ int Tree::range_query_offload(const Key &from, const Key &to, std::map<Key, Valu
   int total = 0;
 
   auto tid = dsm->getMyThreadID();
+  GlobalAddress resume_leaf = GlobalAddress::Null();
   while (cur < to) {
     GlobalAddress start_addr;
     int start_level = 1;              // 1 = start_addr is the entry leaf
-    if (scan_from_cache) {
+    if (resume_leaf != GlobalAddress::Null()) {  // went past a memory-node boundary:
+      start_addr = resume_leaf;                  // go on from that leaf
+      resume_leaf = GlobalAddress::Null();
+    } else if (scan_from_cache) {
       bool from_cache = false;
 #ifdef TREE_ENABLE_CACHE
       GlobalAddress sibling;
@@ -2250,17 +2296,30 @@ int Tree::range_query_offload(const Key &from, const Key &to, std::map<Key, Valu
     } else {
       start_addr = get_leaf_addr(cur, nullptr);
     }
-    GlobalAddress result_addr;
+    GlobalAddress result_addr, next_at, boundary;
+    int next_level = 0;
     Key max_key{};
     int leaves = 0;
     int cnt = dsm->rpc_scan(start_addr, cur, to, chime_offload::kScanSlotCap,
-                            result_addr, max_key, leaves, start_level);
+                            result_addr, max_key, leaves, start_level,
+                            &next_at, &next_level, &boundary);
+    // the walk down reached another memory node: carry it on (CHIME_PUSH_CHAIN)
+    for (int hop = 0; cnt == 0 && leaves == 0 && next_level > 0 && push_chain_on() &&
+                      hop < kMaxChain; ++hop) {
+      chain_scan_cnt[tid] ++;
+      start_addr = next_at;
+      start_level = next_level;
+      cnt = dsm->rpc_scan(start_addr, cur, to, chime_offload::kScanSlotCap,
+                          result_addr, max_key, leaves, start_level,
+                          &next_at, &next_level, &boundary);
+    }
     if (cnt == 0 && leaves == 0 && start_level >= 2) {
       // The memory node could not walk down from the cached node (a stale cache
       // entry, or the path left this node): retry from the leaf the old way.
       start_addr = get_leaf_addr(cur, nullptr);
       cnt = dsm->rpc_scan(start_addr, cur, to, chime_offload::kScanSlotCap,
-                          result_addr, max_key, leaves, 1);
+                          result_addr, max_key, leaves, 1,
+                          &next_at, &next_level, &boundary);
     }
     offload_scan_cnt[tid] ++;
     offload_scan_leaf[tid] += leaves;
@@ -2274,6 +2333,13 @@ int Tree::range_query_offload(const Key &from, const Key &to, std::map<Key, Valu
     // Done if the last leaf visited already reaches `to`, produced nothing, or
     // we filled a batch shy of the cap (range exhausted on this node).
     if (max_key == define::kkeyNull || !(max_key < to)) break;
+    if (boundary != GlobalAddress::Null()) {
+      // the scan stopped where the leaf chain goes on to another memory node: go
+      // on from that leaf there (one more request), not from the cache
+      resume_leaf = boundary;
+      cur = max_key + (uint8_t)1;
+      continue;
+    }
     if (cnt < chime_offload::kScanSlotCap) break;
     cur = max_key + (uint8_t)1;  // resume just past the last key returned
   }
@@ -3786,10 +3852,15 @@ void Tree::leaf_cache_statistics() {
            dsm->getMyNodeID(), pushed, served);
   }
   if (MEMORY_NODE_NUM > 1) {
-    uint64_t crossed = 0;
-    for (int i = 0; i < MAX_APP_THREAD; ++ i) crossed += offload_cross_cnt[i];
+    uint64_t crossed = 0, cl = 0, cw = 0, cs = 0;
+    for (int i = 0; i < MAX_APP_THREAD; ++ i) {
+      crossed += offload_cross_cnt[i];
+      cl += chain_lookup_cnt[i]; cw += chain_locate_cnt[i]; cs += chain_scan_cnt[i];
+    }
     printf("[PUSHX] node %d: pushed lookups that reached another memory node and were finished here=%lu\n",
            dsm->getMyNodeID(), crossed);
+    printf("[PUSHCHAIN] node %d: pushes carried on to another memory node: lookups=%lu write walks=%lu scans=%lu\n",
+           dsm->getMyNodeID(), cl, cw, cs);
   }
   if (push_locate_on()) {
     uint64_t located = 0, failed = 0;

@@ -16,7 +16,8 @@ enum RpcType : uint8_t {
   UPDATE,
   DELETE,
   SCAN, // range-scan pushdown: memory node scans across sibling leaves
-  SMO
+  SMO,
+  LOCATE // DEX-C: a write's walk pushed, the leaf written by the compute node
 };
 
 struct RawMessage {

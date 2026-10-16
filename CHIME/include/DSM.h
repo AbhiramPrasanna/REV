@@ -267,9 +267,13 @@ public:
   // `start_level` (default 1): level of `leaf_addr` as the CN's cache reported
   // it. 1 = it is the entry leaf. >= 2 = it is an internal node; the MN walks
   // down to the leaf itself (the scan counterpart of rpc_lookup's descent).
+  // Optional, for more than one memory node: `next_level_out` > 0 with `next_out`
+  // = where the walk down goes on (nothing was scanned); `boundary_out` = the leaf
+  // on another memory node where the scan goes on (Null if none).
   int rpc_scan(const GlobalAddress &leaf_addr, const Key &from, const Key &to,
                int num, GlobalAddress &result_addr, Key &max_key, int &leaves,
-               int start_level = 1) {
+               int start_level = 1, GlobalAddress *next_out = nullptr,
+               int *next_level_out = nullptr, GlobalAddress *boundary_out = nullptr) {
     RawMessage m;
     m.type = RpcType::RPC_SCAN;
     m.addr = leaf_addr;
@@ -282,7 +286,12 @@ public:
     auto *mm = rpc_wait();
     result_addr = mm->addr;
     memcpy(max_key.data(), &mm->k, define::keyLen);
-    leaves = (int)mm->v;
+    leaves = (int)(uint32_t)(mm->v & 0xFFFFFFFFull);
+    const int nl = (int)((mm->v >> 32) & 0xFFFF);
+    const bool at_boundary = ((mm->v >> 48) & 1) != 0;
+    if (next_level_out) *next_level_out = at_boundary ? 0 : nl;
+    if (next_out) *next_out = (!at_boundary && nl > 0) ? GlobalAddress(mm->aux) : GlobalAddress::Null();
+    if (boundary_out) *boundary_out = at_boundary ? GlobalAddress(mm->aux) : GlobalAddress::Null();
     return mm->level;
   }
 
@@ -294,8 +303,11 @@ public:
   // CHIME_PUSH_LOCATE: the memory node walks from `node_addr` (at `level`) to the
   // leaf covering `k` and returns it, its expected sibling and its parent; the
   // compute node then writes the leaf itself. Returns false if the walk failed.
+  // false with `next_level_out` > 0: the walk goes on at `next_out` on another
+  // memory node (CHIME_PUSH_CHAIN).
   bool rpc_locate(const GlobalAddress &node_addr, int level, const Key &k,
-                  GlobalAddress &leaf, GlobalAddress &sibling, GlobalAddress &parent) {
+                  GlobalAddress &leaf, GlobalAddress &sibling, GlobalAddress &parent,
+                  GlobalAddress *next_out = nullptr, int *next_level_out = nullptr) {
     RawMessage m;
     m.type = RpcType::RPC_LOCATE;
     m.addr = node_addr;
@@ -303,6 +315,12 @@ public:
     memcpy(&m.k, k.data(), define::keyLen);
     rpc_call_dir(m, node_addr.nodeID, thread_id % chime::num_dir());
     auto *mm = rpc_wait();
+    if (next_level_out) *next_level_out = 0;
+    if (mm->level == 3) {
+      if (next_out) *next_out = mm->addr;
+      if (next_level_out) *next_level_out = (int)mm->k;
+      return false;
+    }
     if (mm->level != 1) return false;
     leaf = mm->addr;
     sibling = GlobalAddress(mm->v);

@@ -4,6 +4,7 @@
 /* Here I try to implement the idea of LeanStore and seek opportunies of further
  * optimization*/
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <list>
 #include <random>
@@ -53,8 +54,62 @@ enum class RPC_type { LOOKUP, UPDATE, INSERT, DELETE };
 #define LATENCY_COLLECT 1
 #endif
 
+// Pushes carried on to another memory node, and DEX-C's write walks; printed
+// when the process exits.
+struct PushReport {
+  std::atomic<uint64_t> chain_lookup{0}, chain_scan{0}, chain_locate{0};
+  std::atomic<uint64_t> locate_ok{0}, locate_pulled{0};
+  ~PushReport() {
+    if (chain_lookup || chain_scan || chain_locate)
+      printf("[DEX-CHAIN] pushes carried on to another memory node: lookups=%lu "
+             "scans=%lu write walks=%lu\n",
+             (unsigned long)chain_lookup.load(), (unsigned long)chain_scan.load(),
+             (unsigned long)chain_locate.load());
+    if (locate_ok || locate_pulled)
+      printf("[DEX-C] writes whose walk was pushed=%lu, writes done by DEX's own "
+             "rule instead=%lu\n",
+             (unsigned long)locate_ok.load(), (unsigned long)locate_pulled.load());
+  }
+};
 class CacheManager {
 public:
+  // Set when the last pushed LOOKUP came back 0: its walk reached a child on
+  // another memory node (btree_rpc.h lookup). DEX-R then retries that lookup
+  // with DEX's own rule (leanstore_tree.h).
+  static inline thread_local bool rpc_crossed_ = false;
+
+  // DEX_PUSH_CHAIN (default 1): a pushed walk that reaches a node on another
+  // memory node is carried on there -- this compute node sends the rest of the
+  // walk to that memory node (one more round trip) instead of giving up the push.
+  // 0 = give it up (lookups then retry with DEX's own rule, scans are pulled).
+  static bool push_chain_on() {
+    static const bool on = [] {
+      const char *s = getenv("DEX_PUSH_CHAIN");
+      bool v = !(s && atoi(s) == 0);
+      printf("[DEX-CHAIN] carry pushes on to another memory node: %s (DEX_PUSH_CHAIN)\n",
+             v ? "on" : "off");
+      return v;
+    }();
+    return on;
+  }
+  static constexpr int kMaxChain = 8; // at most this many extra pushes per op
+  static inline PushReport push_report_;
+
+  // A pushed lookup, carried on across memory nodes (DEX_PUSH_CHAIN).
+  int rpc_lookup_chained(GlobalAddress g, Key k, Value &result) {
+    GlobalAddress next = GlobalAddress::Null();
+    int ret = global_dsm_->rpc_lookup(g, k, result, &next);
+    for (int hop = 0; ret == 0 && push_chain_on() && hop < kMaxChain &&
+                      !(next == GlobalAddress::Null());
+         ++hop) {
+      push_report_.chain_lookup.fetch_add(1, std::memory_order_relaxed);
+      g = next;
+      next = GlobalAddress::Null();
+      ret = global_dsm_->rpc_lookup(g, k, result, &next);
+    }
+    return ret;
+  }
+
   /* Core Data Structure */
   uint64_t capacity;      // Number of pages used in the cache of CPU node
   std::atomic<int> state; // 0 means warm-up phase, also use the page from
@@ -752,6 +807,10 @@ public:
       int leaves = 0;
       int cnt = global_dsm_->rpc_scan(global_node, k, scan_num, slot, mk,
                                       leaves);
+      if (cnt == -2) { // cannot happen from a leaf; treat as "not served here"
+        cnt = 0;
+        leaves = 0;
+      }
 
       if (cnt < 0) {
         // Entry leaf no longer covers k -> drop IO flag and retry from root.
@@ -815,6 +874,15 @@ public:
       int leaves = 0;
       int cnt = global_dsm_->rpc_scan(global_node, k, scan_num, slot, mk,
                                       leaves);
+      // -2: the walk down reached another memory node (mk = that node)
+      for (int hop = 0; cnt == -2 && push_chain_on() && hop < kMaxChain; ++hop) {
+        push_report_.chain_scan.fetch_add(1, std::memory_order_relaxed);
+        GlobalAddress nx;
+        nx.val = mk;
+        cnt = global_dsm_->rpc_scan(nx, k, scan_num, slot, mk, leaves);
+      }
+      if (cnt == -2)
+        return 0; // not carried on: the caller pulls, IO flag still held
       if (cnt < 0) {
         bool ok = page_table_->remove_with_lock(
             global_node, reinterpret_cast<void *>(IO_FLAG));
@@ -890,6 +958,7 @@ public:
                            NodeBase *parent, unsigned child_idx, bool &refresh,
                            Key k, Value &result, bool &success,
                            RPC_type rpc_type) {
+    rpc_crossed_ = false;
 
 #ifdef LATENCY_COLLECT
     int missing_num = parent->level;
@@ -907,7 +976,7 @@ public:
       int ret = 0;
       switch (rpc_type) {
       case RPC_type::LOOKUP:
-        ret = global_dsm_->rpc_lookup(global_node, k, result);
+        ret = rpc_lookup_chained(global_node, k, result);
         break;
 
       case RPC_type::UPDATE:
@@ -929,6 +998,8 @@ public:
       int ret_flag = 1;
       if (ret <= 0) {
         // stale leaf / cross-node subtree / SMO needed -> retry from root.
+        if (rpc_type == RPC_type::LOOKUP && ret == 0)
+          rpc_crossed_ = true;
         // (LOOKUP/UPDATE/DELETE can all return <=0 here, not just INSERT.)
         ret_flag = -1;
       } else if (ret == 1) {
@@ -980,7 +1051,7 @@ public:
       GlobalAddress leaf_addr = GlobalAddress::Null();
       switch (rpc_type) {
       case RPC_type::LOOKUP:
-        ret = global_dsm_->rpc_lookup(global_node, k, result);
+        ret = rpc_lookup_chained(global_node, k, result);
         break;
 
       case RPC_type::UPDATE:
@@ -1002,6 +1073,8 @@ public:
       int ret_flag = 1;
       if (ret <= 0) {
         // stale leaf / cross-node subtree / SMO needed -> retry from root.
+        if (rpc_type == RPC_type::LOOKUP && ret == 0)
+          rpc_crossed_ = true;
         // (LOOKUP/UPDATE/DELETE can all return <=0 here, not just INSERT.)
         ret_flag = -1;
       } else if (ret == 1) {
@@ -1026,6 +1099,82 @@ public:
 
     return cold_to_hot(global_node, ret_page, parent, child_idx, refresh);
 #endif
+  }
+
+  // DEX-C (DEX_PUSH_WRITES_LOCATE=1): CHIME's write rule (CHIME_PUSH_LOCATE) in
+  // DEX. A write that misses in the cache pushes only its walk: the memory node
+  // walks from global_node to the leaf (carried on to another memory node when
+  // the walk crosses) and returns the leaf; this compute node then writes the
+  // leaf one-sided, as DEX's own leaf path does (cold_to_hot_with_admission):
+  // read, change, write back. A stale leaf, a full leaf on insert (a split), or a
+  // walk that could not be carried on returns -1: the caller retries this write
+  // with DEX's own rule. Same contract and rpc_rate_ coin as cold_to_hot_with_rpc;
+  // the caller holds the IO flag on global_node.
+  int cold_to_hot_with_locate(GlobalAddress global_node, void **ret_page,
+                              NodeBase *parent, unsigned child_idx,
+                              bool &refresh, Key k, Value &v, bool &success,
+                              RPC_type rpc_type) {
+    if (!manual_push_sample())
+      return cold_to_hot(global_node, ret_page, parent, child_idx, refresh);
+
+    GlobalAddress leaf = GlobalAddress::Null();
+    int ret = global_dsm_->rpc_locate(global_node, k, leaf);
+    for (int hop = 0; ret == 0 && push_chain_on() && hop < kMaxChain &&
+                      !(leaf == GlobalAddress::Null());
+         ++hop) {
+      push_report_.chain_locate.fetch_add(1, std::memory_order_relaxed);
+      ret = global_dsm_->rpc_locate(leaf, k, leaf);
+    }
+
+    int flag = -1;
+    if (ret == 1) {
+      flag = 1;
+      auto buffer_page = raw_remote_read(leaf);
+      auto cur_leaf = reinterpret_cast<BTreeLeaf<Key, Value> *>(buffer_page);
+      switch (rpc_type) {
+      case RPC_type::UPDATE:
+        if (!cur_leaf->rangeValid(k)) {
+          flag = -1;
+        } else {
+          success = cur_leaf->update(k, v);
+          if (success)
+            remote_write(leaf, buffer_page, true, true);
+        }
+        break;
+      case RPC_type::INSERT:
+        if (!cur_leaf->rangeValid(k) ||
+            (cur_leaf->count == cur_leaf->maxEntries)) {
+          flag = -1;
+        } else {
+          success = cur_leaf->insert(k, v);
+          remote_write(leaf, buffer_page, true, true);
+        }
+        break;
+      case RPC_type::DELETE:
+        if (!cur_leaf->rangeValid(k)) {
+          flag = -1;
+        } else {
+          success = cur_leaf->remove(k);
+          if (success)
+            remote_write(leaf, buffer_page, true, true);
+        }
+        break;
+      default:
+        flag = -1;
+        break;
+      }
+      if (flag == 1)
+        page_table_->check_and_remove(leaf);
+    }
+    if (flag == 1)
+      push_report_.locate_ok.fetch_add(1, std::memory_order_relaxed);
+    else
+      push_report_.locate_pulled.fetch_add(1, std::memory_order_relaxed);
+
+    bool ok = page_table_->remove_with_lock(global_node,
+                                            reinterpret_cast<void *>(IO_FLAG));
+    assert(ok == true);
+    return flag;
   }
 
   // -1 means failure and retry
