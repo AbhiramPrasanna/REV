@@ -280,7 +280,7 @@ std::atomic<uint64_t> g_meas_end_ns{0};
 // 0 = op-bounded: run exactly opM*1e6 ops per node (DEX's time_based=0).
 // 1 = time-bounded: cycle the array for TEST_EPOCH*TIME_INTERVAL seconds.
 int g_time_based = 0;
-// CHIME_MN_CLIENTS=0: the memory node (node 0) runs no client operations. Its
+// CHIME_MN_CLIENTS=0: the memory nodes (nodes 0..MEMORY_NODE_NUM-1) run no client operations. Its
 // threads still take part in every barrier (bulk / warmup / done), so the run
 // structure is unchanged, but only the compute node drives load -- the same
 // client placement as DEX and DART, where the memory node serves requests only.
@@ -353,8 +353,15 @@ static int main_cpu_linear() {
   return cpu;
 }
 
+// REV_CPU_BASE (default 0): first CPU of this process's client threads, so several
+// compute processes on one machine (fair/multi/run_chime_multi.sh) use disjoint cores.
+static int cpu_base() {
+  static const int b = [] { const char *e = getenv("REV_CPU_BASE"); return e ? atoi(e) : 0; }();
+  return b;
+}
+
 void thread_run(int id) {
-  bindCore(linear_pin() ? id : id * 2 + 1);
+  bindCore(cpu_base() + (linear_pin() ? id : id * 2 + 1));
   dsm->registerThread();
   auto tid = dsm->getMyThreadID();
   printf("I am %lu\n", (uint64_t)(kThreadCount * dsm->getMyNodeID() + id));
@@ -536,6 +543,12 @@ int main(int argc, char *argv[]) {
   assert(kNodeCount >= MEMORY_NODE_NUM);
   config.machineNR = kNodeCount;
   config.threadNR = kThreadCount;
+  // CHIME_DSM_GB (default define::dsmSize, 64): this process's share of the memory
+  // pool; a compute process holds no tree nodes (nodes 0..MEMORY_NODE_NUM-1 do).
+  if (const char *g = getenv("CHIME_DSM_GB")) config.dsmSize = strtoull(g, nullptr, 10);
+  if (getenv("REV_CPU_BASE") || getenv("CHIME_DSM_GB"))
+    printf("[MULTI] cpu_base=%d dsm_gb=%lu (REV_CPU_BASE / CHIME_DSM_GB)\n", cpu_base(),
+           (unsigned long)config.dsmSize);
   dsm = DSM::getInstance(config);
   bindCore(linear_pin() ? main_cpu_linear() : kThreadCount * 2 + 1);
   dsm->registerThread();
@@ -555,7 +568,7 @@ int main(int argc, char *argv[]) {
   else
     printf("[CONFIG node %d] bulk-load order: %s (CHIME_SORTED_LOAD)\n",
            dsm->getMyNodeID(), g_sorted_load ? "sorted, contiguous per loader (DEX-like)" : "shuffled");
-  g_run_clients = g_mn_clients || dsm->getMyNodeID() != 0;
+  g_run_clients = g_mn_clients || dsm->getMyNodeID() >= MEMORY_NODE_NUM;   // memory nodes: 0..n-1
   printf("[CONFIG node %d] clients on this node: %s (CHIME_MN_CLIENTS)\n",
          dsm->getMyNodeID(), g_run_clients ? "yes" : "no");
 #ifdef CACHE_LEAF_NODE
@@ -563,7 +576,7 @@ int main(int argc, char *argv[]) {
   // correct only while ONE node writes the tree (the bulk build runs on the last
   // node, the compute node). Refuse a second client node.
   {
-    const int client_nodes = g_mn_clients ? kNodeCount : kNodeCount - 1;
+    const int client_nodes = g_mn_clients ? kNodeCount : kNodeCount - MEMORY_NODE_NUM;
     if (leafcache::owner() && client_nodes != 1) {
       fprintf(stderr, "CHIME_LEAF_OWNER=1 needs exactly one client node (got %d; set CHIME_MN_CLIENTS=0 "
                       "with one compute node)\n", client_nodes);

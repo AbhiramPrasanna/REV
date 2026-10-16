@@ -27,7 +27,11 @@
 
 // Environment Config
 #define MAX_MACHINE 20
+// Nodes 0 .. MEMORY_NODE_NUM-1 are memory nodes (DSM::DSM). Build switch
+// -DCHIME_MEMORY_NODES=<n> (CMake); default 1 = as before.
+#ifndef MEMORY_NODE_NUM
 #define MEMORY_NODE_NUM 1
+#endif
 #define CPU_PHYSICAL_CORE_NUM 72  // [CONFIG]  72
 #define MAX_CORO_NUM 8
 

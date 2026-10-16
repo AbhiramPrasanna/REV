@@ -117,6 +117,11 @@ inline bool read_internal_local(char *dsm_base, GlobalAddress addr,
 //
 // Returns 1 and sets `v_out` if found; 2 if not found. `found_at` (optional) gets
 // the leaf that held the key, and `turned` whether a sibling had to be followed.
+// A pushed lookup that reaches a node on another memory node (a child or right
+// sibling there, possible only with MEMORY_NODE_NUM > 1) stops with this status;
+// the compute node then finishes the lookup itself from its cache boundary.
+static constexpr int kCrossedNode = 3;
+
 inline int lookup(char *dsm_base, GlobalAddress leaf_addr, const Key &k,
                   Value &v_out, GlobalAddress *found_at = nullptr, bool *turned = nullptr) {
   static thread_local LeafScratch s;
@@ -143,6 +148,8 @@ inline int lookup(char *dsm_base, GlobalAddress leaf_addr, const Key &k,
       addr = sib;
       continue; // turn right
     }
+    if (max_key < k && sib != GlobalAddress::Null() && sib != GlobalAddress::Widest())
+      return kCrossedNode;  // the key may be in a sibling on another memory node
     return 2;
   }
   return 2;
@@ -187,11 +194,13 @@ inline int lookup_from(char *dsm_base, GlobalAddress node_addr, int level,
     const auto &fk = node->metadata.fence_keys;
     if (k >= fk.highest) {                   // key migrated right (concurrent split)
       GlobalAddress sib = node->metadata.sibling_ptr;
-      if (!sibling_on_this_node(sib, node_addr.nodeID)) return 2;
+      if (!sibling_on_this_node(sib, node_addr.nodeID))
+        return (sib != GlobalAddress::Null() && sib != GlobalAddress::Widest()) ? kCrossedNode : 2;
       node_addr = sib;
       continue;                              // re-read the sibling at the same level
     }
 
+    const uint16_t here = node_addr.nodeID;
     level = node->metadata.level;            // same update as internal_node_search
     auto &records = node->records;
 #ifdef UNORDERED_INTERNAL_NODE
@@ -220,6 +229,7 @@ inline int lookup_from(char *dsm_base, GlobalAddress node_addr, int level,
       }
       node_addr = child;
     }
+    if (node_addr.nodeID != here) return kCrossedNode;   // child on another memory node
     have_range = (level == 1);
     if (have_range) { r_lo = key2int(c_lo); r_hi = key2int(c_hi); }
   }

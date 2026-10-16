@@ -1,0 +1,118 @@
+# ===========================================================================
+# fair/multi/multi_common.sh -- shared by run_dex_multi.sh and run_chime_multi.sh:
+# several compute and memory processes on the two servers (by default 4 compute
+# processes on server 6 and 2 memory processes on server 8).
+#
+# Every cell is one run of all NCN + NMN processes. One side coordinates
+# (it restarts memcached and then writes the key "mcell" = the cell number); the
+# other side waits for that key before it starts its processes, so a slow cell
+# can never be joined by the other side's next one.
+# ===========================================================================
+set -uo pipefail
+MULTI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$MULTI_DIR/../params.sh"
+
+: "${NCN:=4}"          # compute processes (server 6)
+: "${NMN:=2}"          # memory processes (server 8)
+: "${CN_DSM_GB:=2}"    # memory pool of a compute process: it holds no tree nodes
+: "${MN_DSM_GB:=30}"   # memory pool of a memory process: half the tree each
+: "${MULTI_WAIT:=1800}"  # seconds to wait for the other side before giving up
+
+T=$((THREADS / NCN))   # client threads per compute process
+if [ $((T * NCN)) -ne "$THREADS" ] || [ "$T" -lt 1 ]; then
+  echo "THREADS=$THREADS must be a multiple of NCN=$NCN" >&2; exit 1
+fi
+NODES=$((NCN + NMN))
+NCPU=$(nproc)
+PHYS=$((NCPU / 2))     # CPU c and c+PHYS are the two hyperthreads of one core (servers 6/8)
+
+memc_set() {   # host port key value
+  { exec 3<>"/dev/tcp/$1/$2"; } 2>/dev/null || return 1
+  printf 'set %s 0 0 %d\r\n%s\r\n' "$3" "${#4}" "$4" >&3
+  IFS= read -r -t 2 _ <&3
+  exec 3>&- 3<&-
+}
+
+wait_key() {   # host port key want_value what -> wait until key == want
+  local host=$1 port=$2 key=$3 want=$4 what=$5 waited=0 v
+  while :; do
+    v="$(memc_get "$host" "$port" "$key")"
+    [ "$v" = "$want" ] && return 0
+    sleep 1; waited=$((waited + 1))
+    if [ "$waited" -ge "$MULTI_WAIT" ]; then
+      echo "gave up waiting for $what ($key='$v', want '$want') after ${waited}s" >&2; return 1
+    fi
+  done
+}
+
+# The cell key carries RUN_ID, the cell number and the coordinating script's start
+# time; the waiting side ignores the value it found when it started, so a key left
+# by an earlier, aborted run is never taken for this run's cell.
+MULTI_EPOCH=$(date +%s)
+set_cell() { memc_set "$1" "$2" mcell "${RUN_ID}:$3:${MULTI_EPOCH}"; }   # host port cell
+MULTI_STALE=""
+note_stale_cell() { MULTI_STALE="$(memc_get "$1" "$2" mcell)"; }         # host port
+wait_cell() {   # host port cell -> wait until this run's coordinator started cell
+  local host=$1 port=$2 cell=$3 waited=0 v
+  while :; do
+    v="$(memc_get "$host" "$port" mcell)"
+    if [[ "$v" == "${RUN_ID}:${cell}:"* ]] && [ "$v" != "$MULTI_STALE" ]; then return 0; fi
+    sleep 1; waited=$((waited + 1))
+    if [ "$waited" -ge "$MULTI_WAIT" ]; then
+      echo "gave up waiting for the other side to start cell $cell (mcell='$v') after ${waited}s" >&2; return 1
+    fi
+  done
+}
+
+wait_count() {   # host port key min what -> wait until key >= min (a number)
+  local host=$1 port=$2 key=$3 min=$4 what=$5 waited=0 v
+  while :; do
+    v="$(memc_get "$host" "$port" "$key")"
+    [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge "$min" ] && return 0
+    sleep 1; waited=$((waited + 1))
+    if [ "$waited" -ge "$MULTI_WAIT" ]; then
+      echo "gave up waiting for $what ($key='$v', want >= $min) after ${waited}s" >&2; return 1
+    fi
+  done
+}
+
+# CPUs, servers with PHYS physical cores (CPU c and c+PHYS share core c):
+#   compute process c: clients on CPUs c*T .. c*T+T-1 (cores 0..THREADS-1), its
+#                      idle directory threads parked on CPU NCPU-1-c
+#   memory process m:  directory threads on physical cores PHYS-1-m*K down to
+#                      PHYS-m*K-K (K = the cell's directory threads), main on core m
+cn_cpu_base() { echo $(($1 * T)); }
+cn_dir_cpus() { echo $((NCPU - 1 - $1)); }
+mn_dir_cpus() {   # m count
+  local m=$1 k=$2 start out="" c
+  start=$((PHYS - 1 - m * k))
+  for ((c = start; c > start - k; c--)); do out="$out${out:+,}$c"; done
+  echo "$out"
+}
+check_layout() {   # max directory threads per memory process
+  local k=$1
+  if [ $((NMN * k + NMN)) -gt "$PHYS" ]; then
+    echo "NMN=$NMN memory processes x $k directory threads do not fit $PHYS physical cores" >&2; return 1
+  fi
+  if [ "$THREADS" -gt $((NCPU - NCN)) ]; then
+    echo "THREADS=$THREADS clients and $NCN parked CPUs do not fit $NCPU CPUs" >&2; return 1
+  fi
+}
+
+# hugepages this side needs, in GB, printed at the start (2 MB pages: x 512)
+hugepage_note() {   # role per_process_extra_gb
+  local need
+  if [ "$1" = compute ]; then need=$((NCN * (CN_DSM_GB + $2))); else need=$((NMN * (MN_DSM_GB + $2))); fi
+  local have; have=$(awk '/HugePages_Total/{print $2}' /proc/meminfo 2>/dev/null)
+  echo "hugepages: this side needs about ${need} GB ($((need * 512)) pages of 2 MB); configured: ${have:-?} pages"
+  if [ -n "$have" ] && [ "$have" -lt $((need * 512)) ]; then
+    echo "WARNING: too few hugepages. sudo sysctl -w vm.nr_hugepages=$((need * 512 + 2048))" >&2
+  fi
+}
+
+# summed / worst / mean of a number found in several logs
+sum_over()  { awk -v p="$1" '$0 ~ p { s += $NF; n++ } END { if (n) printf "%.4f", s; else print "NA" }' "${@:2}"; }
+max_p99()   { local f m="" v; for f in "$@"; do
+                v=$(awk '/\[ALL OPS\]/{a=1; next} a && /^[[:space:]]*ALL[[:space:]]/{ if (match($0,/p99=[ ]*[0-9.]+/)) { s=substr($0,RSTART,RLENGTH); gsub(/p99=[ ]*/,"",s); print s; exit } }' "$f")
+                [ -n "$v" ] && m=$(awk -v a="${m:-0}" -v b="$v" 'BEGIN{print (b>a)?b:a}')
+              done; echo "${m:-NA}"; }
