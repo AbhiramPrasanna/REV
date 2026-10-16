@@ -64,11 +64,22 @@ wait_cell() {   # host port cell -> wait until this run's coordinator started ce
   done
 }
 
-wait_count() {   # host port key min what -> wait until key >= min (a number)
-  local host=$1 port=$2 key=$3 min=$4 what=$5 waited=0 v
+dead_pid() {   # pid -> true if that process has exited (gone or a zombie)
+  local st; st=$(ps -o stat= -p "$1" 2>/dev/null)
+  [ -z "$st" ] || [[ "$st" == Z* ]]
+}
+
+wait_count() {   # host port key min what -> wait until key >= min (a number);
+  # gives up at once if one of this side's processes (the caller's pids) has exited
+  local host=$1 port=$2 key=$3 min=$4 what=$5 waited=0 v p
   while :; do
     v="$(memc_get "$host" "$port" "$key")"
     [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge "$min" ] && return 0
+    for p in ${pids[@]+"${pids[@]}"}; do
+      if dead_pid "$p"; then
+        echo "a process of this side exited while waiting for $what: see the logs of this cell" >&2; return 1
+      fi
+    done
     sleep 1; waited=$((waited + 1))
     if [ "$waited" -ge "$MULTI_WAIT" ]; then
       echo "gave up waiting for $what ($key='$v', want >= $min) after ${waited}s" >&2; return 1

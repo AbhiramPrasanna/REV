@@ -1,6 +1,9 @@
 #include "DirectoryConnection.h"
 
 #include "Connection.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 DirectoryConnection::DirectoryConnection(uint16_t dirID, void *dsmPool,
                                          uint64_t dsmSize, uint32_t machineNR,
@@ -21,7 +24,18 @@ DirectoryConnection::DirectoryConnection(uint16_t dirID, void *dsmPool,
   this->dsmLKey = dsmMR->lkey;
 
   // on-chip lock memory
-  if (dirID == 0) {
+  // DEX_HOST_LOCKS=1 (default 0 = on-chip): this process's lock table in host
+  // memory. The NIC's on-chip memory fits only two tables, so fair/multi sets it
+  // for compute processes; with MN_ONLY placement no page (and no lock) lives there.
+  if (dirID == 0 && getenv("DEX_HOST_LOCKS") && atoi(getenv("DEX_HOST_LOCKS"))) {
+    this->lockSize = define::kLockChipMemSize;
+    this->lockPool = aligned_alloc(4096, this->lockSize);
+    memset(this->lockPool, 0, this->lockSize);
+    this->lockMR =
+        createMemoryRegion((uint64_t)this->lockPool, this->lockSize, &ctx);
+    this->lockLKey = lockMR->lkey;
+    printf("[MULTI] lock table in host memory (DEX_HOST_LOCKS=1)\n");
+  } else if (dirID == 0) {
     this->lockPool = (void *)define::kLockStartAddr;
     this->lockSize = define::kLockChipMemSize;
     this->lockMR = createMemoryRegionOnChip((uint64_t)this->lockPool,
