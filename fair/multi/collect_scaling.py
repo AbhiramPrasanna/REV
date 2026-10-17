@@ -137,10 +137,29 @@ def main():
             t = "  ".join(f"{fmt(byp[p]['tput_mops']):>6}" if p in byp else "     -" for p in pts)
             u = " ".join(fmt(byp[p]["mn_busy_pct_mean"], 0) if p in byp else "-" for p in pts)
             print(f"   {blk:8} {wl:14} {c:>4} MB  {s:16} {mt:>2} w/MN | {t} | [{u}]")
-        wrong = [r for r in rows if r["correct_pct_min"] is not None and r["correct_pct_min"] < 99.99]
+        # Read-only cells: every lookup/scan answered (>= 99.99%). Write mixes count an
+        # insert of an existing key, or a lookup of a key not inserted yet, as not found,
+        # so their share is a property of the workload: a push cell must match the
+        # pull-only cell of the same system, point, keys and cache (within 0.5 points).
+        def family(r):
+            return r["system"].split("+")[0].split(" ")[0]
+        pull = {(family(r), r["ncn"], r["nmn"], r["block"], r["workload"], r["cache_mb"]): r
+                for r in rows if r["workers_per_mn"] == 0}
+        wrong = []
+        for r in rows:
+            c = r["correct_pct_min"]
+            if c is None:
+                continue
+            if r["block"] in ("lookups", "scans"):
+                if c < 99.99:
+                    wrong.append((r, "below 99.99%"))
+            elif r["workers_per_mn"] > 0:
+                base = pull.get((family(r), r["ncn"], r["nmn"], r["block"], r["workload"], r["cache_mb"]))
+                if base and base["correct_pct_min"] is not None and abs(c - base["correct_pct_min"]) > 0.5:
+                    wrong.append((r, f"pull-only found {base['correct_pct_min']}%"))
         missing = [r for r in rows if r["correct_pct_min"] is None]
-        for r in wrong:
-            print(f"   !! answers {r['correct_pct_min']}% correct: {r['log_prefix']}")
+        for r, why in wrong:
+            print(f"   !! answers {r['correct_pct_min']}% correct ({why}): {r['log_prefix']}")
         if missing:
             print(f"   note: {len(missing)} cells printed no correctness line")
         bad |= bool(wrong)
