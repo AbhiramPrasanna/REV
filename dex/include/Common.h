@@ -34,7 +34,10 @@
 
 #define UNUSED(x) (void)(x)
 
-#define MAX_MACHINE 4
+// Compute + memory processes in one run (fair/multi: up to 4 + 4). Tree::local_locks
+// and DSM::read_batches_sync's each_rs are indexed by node id, and memory
+// processes come after the compute processes.
+#define MAX_MACHINE 8
 
 #define MEMORY_NODE_NUM 4
 

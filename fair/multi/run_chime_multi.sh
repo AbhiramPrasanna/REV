@@ -32,6 +32,11 @@
 # CHIME_PARTITION_KEYS=1: each compute process draws keys from its own range, as DEX's
 # benchmark does (default 0: all compute processes share every key, as stock CHIME).
 # CHIME_HOTSPOT defaults to 0 (off), as in every run of the paper.
+# CHIME_CACHE_LEAF=1: CHIME+Push+LeafCache (Lessons 2 and 3): CHIME_LEAF_CACHE_PCT
+# (default 50) of each compute process's cache holds hot leaves, the rest inner nodes;
+# CHIME_LEAF_BY_KEY / CHIME_LEAF_ADMIT_PUSH pass through. CHIME_LEAF_OWNER=1 (a hit
+# served with no network check) needs one compute process; with more, hits are
+# validated against the leaf's version (CHIME_LEAF_OWNER=0). Cells tagged _leaf<pct>.
 # Output: fair/results/$RUN_ID/chime_multi/ -- one log per process per cell and
 # chime_multi.csv (compute side): cluster throughput = the sum of the compute
 # processes' [RESULT] lines, p99 = the worst compute process.
@@ -66,7 +71,12 @@ hugepage_note "$role" 5
 echo "CHIME multi: $NMN memory + $NCN compute processes, $T clients each ($THREADS in all), tree $TREE_SETUP, memory pool ${MN_DSM_GB} / ${CN_DSM_GB} GB, binary $BIN"
 
 # the switches fair/run_chime.sh exports, same defaults
-export CHIME_MN_CLIENTS=0 CHIME_CACHE_LEAF=0
+export CHIME_MN_CLIENTS=0 CHIME_CACHE_LEAF="${CHIME_CACHE_LEAF:-0}"
+export CHIME_LEAF_CACHE_PCT="${CHIME_LEAF_CACHE_PCT:-50}" CHIME_LEAF_OWNER="${CHIME_LEAF_OWNER:-0}"
+export CHIME_LEAF_BY_KEY="${CHIME_LEAF_BY_KEY:-0}" CHIME_LEAF_ADMIT_PUSH="${CHIME_LEAF_ADMIT_PUSH:-0}"
+if [ "$CHIME_CACHE_LEAF" = 1 ] && [ "$CHIME_LEAF_OWNER" = 1 ] && [ "$NCN" -gt 1 ]; then
+  echo "CHIME_LEAF_OWNER=1 needs one compute process (NCN=$NCN): use CHIME_LEAF_OWNER=0" >&2; exit 1
+fi
 export CHIME_SCAN_FROM_CACHE="${CHIME_SCAN_FROM_CACHE:-1}"
 export CHIME_SCAN_OFFLOAD_ALWAYS="${CHIME_SCAN_OFFLOAD_ALWAYS:-1}"
 export CHIME_HOTSPOT="${CHIME_HOTSPOT:-0}"          # off, as in every run of the paper
@@ -77,7 +87,7 @@ export CHIME_SORTED_LOAD CHIME_BULK_BUILD CHIME_BUILD_LEAF_KEYS CHIME_BUILD_INNE
 CHIME_DIR="$REV_DIR/CHIME"
 printf '%s\n%s\n' "$MEM_IP" "$MEMC_PORT" > "$CHIME_DIR/memcached.conf"
 csv="$OUT/chime_multi.csv"
-hdr="system,workload,cache_mb,memthreads,ncn,nmn,threads,update_pct,insert_pct,scan_pct,partition_keys,push_locate,push_chain,tput_mops,p99_us,round_trips_per_op,lookups_crossed,chained_lookups,chained_walks,chained_scans,writes_located,lookup_found_pct_min,scan_rows,cn_tputs,log_prefix"
+hdr="system,workload,cache_mb,memthreads,ncn,nmn,threads,update_pct,insert_pct,scan_pct,partition_keys,push_locate,push_chain,leaf_cache,leaf_pct,leaf_owner,tput_mops,p99_us,round_trips_per_op,lookups_crossed,chained_lookups,chained_walks,chained_scans,writes_located,lookup_found_pct_min,scan_rows,cn_tputs,log_prefix"
 if [ "$role" = compute ]; then
   # a CSV written by the older script (other columns) is kept aside, not appended to
   [ -f "$csv" ] && [ "$(head -1 "$csv")" != "$hdr" ] && mv "$csv" "$csv.old-$(date +%s)"
@@ -107,6 +117,7 @@ for mt in $MEMTHREADS; do
       [ "$CHIME_PARTITION_KEYS" = 1 ] && mix="${mix}_part"
       [ "$CHIME_PUSH_LOCATE" = 1 ] && [ $((upd + ins)) -gt 0 ] && [ "$mt" -gt 0 ] && mix="${mix}_loc"
       [ "$CHIME_PUSH_CHAIN" = 0 ] && [ "$mt" -gt 0 ] && mix="${mix}_nochain"
+      [ "$CHIME_CACHE_LEAF" = 1 ] && mix="${mix}_leaf${CHIME_LEAF_CACHE_PCT}"
       tag="chimem_${wl}${mix}_mt${mt}_cache${cache}"
       echo ">>> [$(date +%H:%M:%S)] ($i/$cells) $tag  ($role)"
       #  args: nodes threads(per process) read insert update range uniform theta bulkM warmupM opM rate
@@ -154,10 +165,11 @@ for mt in $MEMTHREADS; do
                 awk 'NR==1||$1<m{m=$1} END{if (NR) print m; else print "NA"}')
         rows=$(sed -nE 's/.*\[CORRECTNESS node [0-9]+\] scan rows returned = ([0-9]+).*/\1/p' "${logs[@]}" |
                awk '{s+=$1} END{print s+0}')
-        echo "chime,$wl,$cache,$mt,$NCN,$NMN,$THREADS,$upd,$ins,$rg,$CHIME_PARTITION_KEYS,$CHIME_PUSH_LOCATE,$CHIME_PUSH_CHAIN,$tput,$p99,$rt,$crossed,$cl,$cw,$cs,$located,$found,$rows,${per% },$OUT/$tag" >> "$csv"
+        echo "chime,$wl,$cache,$mt,$NCN,$NMN,$THREADS,$upd,$ins,$rg,$CHIME_PARTITION_KEYS,$CHIME_PUSH_LOCATE,$CHIME_PUSH_CHAIN,$CHIME_CACHE_LEAF,$([ "$CHIME_CACHE_LEAF" = 1 ] && echo "$CHIME_LEAF_CACHE_PCT" || echo 0),$CHIME_LEAF_OWNER,$tput,$p99,$rt,$crossed,$cl,$cw,$cs,$located,$found,$rows,${per% },$OUT/$tag" >> "$csv"
         echo "    -> cluster $tput Mops (compute processes: ${per% })  p99 $p99 us  round trips/op $rt  lookups finished here $crossed  carried on: lookups $cl walks $cw scans $cs  write walks pushed $located  lookups found (worst) $found%  scan rows $rows"
       else
-        echo "    -> memory processes done"
+        mlogs=(); for ((m = 0; m < NMN; m++)); do mlogs+=("$OUT/${tag}.mn$m.log"); done
+        mn_load_row "$OUT/chime_multi_mnload.csv" chime "$OUT/$tag" "$mt" "${mlogs[@]}"
       fi
       sleep 3
     done

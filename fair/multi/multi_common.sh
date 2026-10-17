@@ -127,6 +127,46 @@ hugepage_note() {   # role per_process_extra_gb
   fi
 }
 
+# Memory-side CPU use of one cell, from the memory processes' periodic
+# "AGGREGATE active = A% (of N dir-threads; P% per-thread avg)  msgs=M" lines
+# (remote_load.h; time spent serving pushed requests, not spinning on the CQ).
+# Only windows that served requests count, and the median of them is taken, so
+# the load and ramp windows at either end do not pull it down. One row per cell:
+#   mn_load_row csv system tag memthreads log...
+# columns: per-thread busy % (mean of the memory processes, then the busiest one),
+# the memory processes' medians, and requests served per second (all of them).
+MNLOAD_HDR="system,ncn,nmn,memthreads,util_pct_mean,util_pct_max,util_pct_per_mn,msgs_per_s,log_prefix"
+mn_load_row() {
+  local csv=$1 sys=$2 tag=$3 mt=$4; shift 4
+  local f per="" rates="" v
+  for f in "$@"; do
+    v=$(awk '
+      /REMOTE CPU LOAD/ { if (match($0, /[0-9]+s window/)) win = substr($0, RSTART, RLENGTH) + 0 }
+      /AGGREGATE active =/ {
+        m = $0; sub(/.*msgs=/, "", m); m += 0
+        if (m == 0) next
+        p = $0; sub(/.*; /, "", p); sub(/%.*/, "", p)
+        n++; u[n] = p + 0; r[n] = (win > 0 ? m / win : 0)
+      }
+      END {
+        if (!n) { print "NA NA"; exit }
+        for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) {
+          if (u[j] < u[i]) { t = u[i]; u[i] = u[j]; u[j] = t }
+          if (r[j] < r[i]) { t = r[i]; r[i] = r[j]; r[j] = t } }
+        k = int((n + 1) / 2); printf "%.2f %.0f\n", u[k], r[k] }' "$f")
+    per="$per ${v% *}"; rates="$rates ${v#* }"
+  done
+  local mean max tot
+  mean=$(echo "$per" | awk '{for (i = 1; i <= NF; i++) if ($i != "NA") { s += $i; n++ } } END {if (n) printf "%.2f", s / n; else print "NA"}')
+  max=$(echo "$per" | awk '{for (i = 1; i <= NF; i++) if ($i != "NA" && ($i > m || m == "")) m = $i} END {print (m == "" ? "NA" : m)}')
+  tot=$(echo "$rates" | awk '{for (i = 1; i <= NF; i++) if ($i != "NA") { s += $i; n++ } } END {if (n) printf "%.0f", s; else print "NA"}')
+  [ -f "$csv" ] && [ "$(head -1 "$csv")" != "$MNLOAD_HDR" ] && mv "$csv" "$csv.old-$(date +%s)"
+  [ -f "$csv" ] || echo "$MNLOAD_HDR" > "$csv"
+  per="${per# }"
+  echo "$sys,$NCN,$NMN,$mt,$mean,$max,${per// /;},$tot,$tag" >> "$csv"
+  echo "    -> memory CPU: per-thread busy ${mean}% (busiest memory process ${max}%), ${tot} requests/s"
+}
+
 # summed / worst / mean of a number found in several logs
 sum_over()  { awk -v p="$1" '$0 ~ p { s += $NF; n++ } END { if (n) printf "%.4f", s; else print "NA" }' "${@:2}"; }
 max_p99()   { local f m="" v; for f in "$@"; do

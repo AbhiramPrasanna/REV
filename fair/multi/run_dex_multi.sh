@@ -32,6 +32,9 @@
 # VALUE_B TREE_SETUP DEX_INNER_PAGE DEX_SAFE_PT DEX_PUSH_READS_DEEPEST DEX_PUSH_WRITES_LOCATE
 # DEX_PUSH_CHAIN; CN_DSM_GB / MN_DSM_GB (memory pool
 # per compute / memory process, default 2 / 30 GB).
+# DEX_MN_HOST_LOCKS=1: the memory processes keep their lock table in host memory
+# too. The NIC's on-chip memory fits only two tables, so it defaults to 1 when
+# NMN > 2 (else 0, on-chip as in every single-node run).
 # SCAN_PCT: share of 100-key scans in point-* workloads (default 0); range-* = scans only.
 # DEX's benchmark gives each compute process its own key range (newbench sharding).
 # Needs the DEX build with REV_CPU_BASE / DEX_DSM_GB (newbench.cpp) on both servers:
@@ -44,6 +47,10 @@ role="${1:?usage: run_dex_multi.sh <compute|memory>}"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/multi_common.sh"
 
 DEXR="${DEX_PUSH_READS_DEEPEST:-0}" DEXC="${DEX_PUSH_WRITES_LOCATE:-0}" CHAIN="${DEX_PUSH_CHAIN:-1}"
+MN_HOST_LOCKS="${DEX_MN_HOST_LOCKS:-$([ "$NMN" -gt 2 ] && echo 1 || echo 0)}"
+if [ "$NMN" -gt 2 ] && [ "$MN_HOST_LOCKS" != 1 ]; then
+  echo "NMN=$NMN memory processes need DEX_MN_HOST_LOCKS=1 (the NIC's on-chip memory fits two lock tables)" >&2; exit 1
+fi
 if [ "$DEXC" = 1 ]; then sysname=dex-c; dtag=_dexc
 elif [ "$DEXR" = 1 ]; then sysname=dex-r; dtag=_dexr
 else sysname=dex; dtag=""; fi
@@ -55,7 +62,7 @@ grep -q "DEX_DSM_GB" "$REV_DIR/dex/test/newbench.cpp" || { echo "this checkout's
 max_mt=1; for m in $MEMTHREADS; do [ "$m" -gt "$max_mt" ] && max_mt=$m; done
 check_layout "$max_mt" || exit 1
 hugepage_note "$role" 3
-echo "DEX multi ($sysname, DEX_PUSH_READS_DEEPEST=$DEXR DEX_PUSH_WRITES_LOCATE=$DEXC DEX_PUSH_CHAIN=$CHAIN): $NCN compute + $NMN memory processes, $T clients each ($THREADS in all), tree $TREE_SETUP (inner page $DEX_INNER_PAGE B), memory pool ${CN_DSM_GB} / ${MN_DSM_GB} GB"
+echo "DEX multi ($sysname, DEX_PUSH_READS_DEEPEST=$DEXR DEX_PUSH_WRITES_LOCATE=$DEXC DEX_PUSH_CHAIN=$CHAIN): $NCN compute + $NMN memory processes, $T clients each ($THREADS in all), tree $TREE_SETUP (inner page $DEX_INNER_PAGE B), memory pool ${CN_DSM_GB} / ${MN_DSM_GB} GB, memory-process locks $([ "$MN_HOST_LOCKS" = 1 ] && echo "in host memory" || echo on-chip)"
 
 cd "$DEX_BUILD"
 printf '%s\n%s\n' "$CMP_IP" "$MEMC_PORT" > ../memcached.conf
@@ -116,7 +123,7 @@ for mt in $MEMTHREADS; do
         wait_cell "$CMP_IP" "$MEMC_PORT" "$i" || exit 1
         wait_count "$CMP_IP" "$MEMC_PORT" serverNum "$NCN" "the $NCN compute processes" || exit 1
         for ((m = 0; m < NMN; m++)); do
-          sudo env "${envs[@]}" REV_CPU_BASE="$m" REV_DIR_CPUS="$(mn_dir_cpus $m "$dir")" \
+          sudo env "${envs[@]}" DEX_HOST_LOCKS="$MN_HOST_LOCKS" REV_CPU_BASE="$m" REV_DIR_CPUS="$(mn_dir_cpus $m "$dir")" \
             DEX_DSM_GB="$MN_DSM_GB" stdbuf -oL "$BIN" "${args[@]}" > "$OUT/${tag}.mn$m.log" 2>&1 &
           pids+=($!)
           wait_count "$CMP_IP" "$MEMC_PORT" serverNum $((NCN + m + 1)) "memory process $m to register" || exit 1
@@ -148,7 +155,8 @@ for mt in $MEMTHREADS; do
         echo "$sysname,$wl,$cache,$mt,$NCN,$NMN,$THREADS,$upd,$ins,$rg,$DEXR,$DEXC,$CHAIN,$tput,$fin,$p99,$rr,$rp,$crossed,$cl,$cs,$cw,$located,$h,$ok,$rows,${per% },$OUT/$tag" >> "$csv"
         echo "    -> $sysname cluster $tput Mops (compute processes: ${per% })  p99 $p99 us  reads/op $rr  rpc/op $rp  not carried on $crossed  carried on: lookups $cl scans $cs walks $cw  walks pushed $located  height $h  ops ok (worst) $ok%  rows/scan $rows"
       else
-        echo "    -> memory processes done"
+        mlogs=(); for ((m = 0; m < NMN; m++)); do mlogs+=("$OUT/${tag}.mn$m.log"); done
+        mn_load_row "$OUT/dex_multi_mnload.csv" "$sysname" "$OUT/$tag" "$mt" "${mlogs[@]}"
       fi
       sleep 3
     done
