@@ -35,10 +35,19 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 T=stress
 COMMON=("THREADS=36" "OPS_M=${OPS_M:-30}" "WARMUP_M=10" "DEX_SAFE_PT=1" "DEX_LEVEL_STATS=1"
         "REV_PARK_CMP_DIRS=1" "MEMTHREADS=16")
-add_block plvl_point_uniform     dexr $T 5 "CACHES=8 32 128 512 1024" "WORKLOADS=point-uniform" "${COMMON[@]}" "@min=2.4"
-add_block plvl_point_uniform_fit dex  $T 1 "CACHES=2600"              "WORKLOADS=point-uniform" "${COMMON[@]}" "@min=2.4"
-add_block plvl_range_uniform     dexr $T 3 "CACHES=8 128 1024"        "WORKLOADS=range-uniform" "${COMMON[@]}" "@min=3"
-add_block plvl_range_uniform_fit dex  $T 1 "CACHES=2600"              "WORKLOADS=range-uniform" "${COMMON[@]}" "@min=3"
+# Rerun only some cells: PL_TAG names the result folders (default plvl; use a new tag,
+# e.g. plvl2, so finished cells are never touched), PL_POINT / PL_RANGE the DEX-R cache
+# sizes, PL_FIT=0 drops the 2600 MB cells (both servers need the same values), e.g.
+#   PL_TAG=plvl2 PL_POINT="32" PL_RANGE="128 1024" ONLY_BLOCKS="plvl2_point_uniform plvl2_range_uniform plvl2_range_uniform_fit"
+: "${PL_TAG:=plvl}"
+: "${PL_POINT:=8 32 128 512 1024}"
+: "${PL_RANGE:=8 128 1024}"
+: "${PL_FIT:=1}"
+nc() { set -- $1; echo $#; }
+[ -n "$PL_POINT" ] && add_block "${PL_TAG}_point_uniform" dexr $T "$(nc "$PL_POINT")" "CACHES=$PL_POINT" "WORKLOADS=point-uniform" "${COMMON[@]}" "@min=2.4"
+[ "$PL_FIT" = 1 ]  && add_block "${PL_TAG}_point_uniform_fit" dex $T 1 "CACHES=2600" "WORKLOADS=point-uniform" "${COMMON[@]}" "@min=2.4"
+[ -n "$PL_RANGE" ] && add_block "${PL_TAG}_range_uniform" dexr $T "$(nc "$PL_RANGE")" "CACHES=$PL_RANGE" "WORKLOADS=range-uniform" "${COMMON[@]}" "@min=3"
+[ "$PL_FIT" = 1 ]  && add_block "${PL_TAG}_range_uniform_fit" dex $T 1 "CACHES=2600" "WORKLOADS=range-uniform" "${COMMON[@]}" "@min=3"
 
 apply_skip; show_plan
 [ "${DRY_RUN:-0}" = 1 ] && { run_plan; exit 0; }
@@ -50,5 +59,5 @@ sudo -v || { echo "sudo -v failed; the DEX cells need sudo" >&2; exit 1; }
 run_plan
 if [ "$ROLE" = compute ]; then
   echo "== where pushes entered (misses per level), first cell:"
-  grep -h "^\[LEVEL\]" "$FAIR"/results/plvl_point_uniform/dex/*cache8.compute.log | head -12
+  grep -h "^\[LEVEL\]" "$FAIR"/results/${PL_TAG}_*/dex/*.compute.log | head -12
 fi
