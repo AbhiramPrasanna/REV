@@ -1,0 +1,49 @@
+1792116740.643 
+1792116740.644 ######## 2026-10-15 19:12:20  block l2m_d_pull  (chime, tree=deep, 8 cells)  DEX_PUSH_READS_DEEPEST=0;CHIME_LEAF_SET=0;CHIME_SCAN_OFFLOAD_ALWAYS=0;CACHES=32 128 256 512;MEMTHREADS=0;WORKLOADS=mixed-uniform mixed-zipf;THREADS=36;OPS_M=30;WARMUP_M=10;REV_PARK_CMP_DIRS=1;CHIME_HOTSPOT=0;CHIME_PUSH_OPS=both;LEAF_CACHE_MB=;LEAF_ADMIT_SCAN=1.0;CHIME_LEAF_BY_KEY=0;CHIME_LEAF_OWNER=0;CHIME_LEAF_ADMIT_PUSH=0;CHIME_LEVEL_STATS=1;CHIME_RDMA_STATS=1;CHIME_LEAF_SET=0;CHIME_PUSH_OPS=both;CHIME_SCAN_OFFLOAD_ALWAYS=0;ZIPF_THETA=0.99;MIX_SCAN_PCT=50;@min=3.5
+1792116740.671 == fair run: RUN_ID=l2m_d_pull role=compute systems=[chime] profile=full
+1792116740.671    memory threads=[0] caches=[32 128 256 512] workloads=[mixed-uniform mixed-zipf]
+1792116740.673 >> [cs-dis-srv06s] cleanup: stopping leftover newbench / micro_test / DART processes and memcached
+1792116743.924 
+1792116743.924 ######################## chime (compute) ########################
+1792116743.935 CHIME setup (deep): 16/16-entry inner/leaf nodes, tree bulk-built with 8 keys per leaf and 6 children per inner node
+1792116743.936   hotspot buffer + speculative read: off (CHIME_HOTSPOT=0)
+1792116743.936   push ops: both (CHIME_PUSH_OPS) | scans pushed: on a cache miss | leaf cache arms: 0, leaf share 50% (scan admit 1.0)
+1792116743.936   each cell prints '>> tree:' (levels, inner and leaf nodes and MB) and '>> result:'
+1792116743.965 pinning (cs-dis-srv06s): clients -> CPUs 0..35; directory threads -> 79
+1792116743.965 ==================================================================
+1792116743.965 >>> CHIME fair: memory threads 0 (offload off, dir threads 1), compute
+1792116743.965 ==================================================================
+1792116743.976 >> SWEEP: workloads=[mixed-uniform mixed-zipf]  offload=[off]  role=compute
+1792116743.976 >>        point op=30M  range op=30M scan_range=100  zipf theta=0.99
+1792116743.976 >>        LEAF CACHE axis CACHE_LEAF=[0], leaf share=50% of the TOTAL cache (inner+leaf = the sweep point)
+1792116743.976 >>        results -> /home/apa222/REV/fair/results/l2m_d_pull/chime/sweep_mt0
+1792116743.976 >>        CACHE SWEEP CHIME_CACHE_MB=[32 128 256 512] (runtime, no rebuild)
+1792116744.014 >> [compute] waiting for the memory node to register (serverNum -> 1)
+1792116744.016 >> [compute]   serverNum='0' ...
+1792116747.024 >> [compute] memory node is up (serverNum=1)
+1792116748.028 
+1792116748.028 ############################################################
+1792116748.028 ## OFFLOAD=off (rate=0)  role=compute  WORKLOAD=mixed-uniform
+1792116748.028 ## TOTAL cache=32MB  CACHE_LEAF=0  leaf share=50%
+1792116748.028 ## /home/apa222/REV/CHIME/build_fair_v64/micro_test 2 36 50 0 0 50 1 0 60 10 30 0 100
+1792116748.028 ## log: /home/apa222/REV/fair/results/l2m_d_pull/chime/sweep_mt0/cache_32MB/leaf_0/mixed-uniform/off/compute.log
+1792116748.028 ############################################################
+1792116748.028 
+1792116748.033 nodes 2, threads 36, mix R/I/U/S=50/0/0/50, uniform, bulk 60M warmup 10M op 30M, offload 0%, scan_range 100
+1792116748.033 [0;31m10.30.1.6 mmap failed!
+1792116748.033 [0m
+1792116748.033 [4mshared memory size: 64GB, 0xffffffffffffffff[0m
+1792116748.033 [4mrdma cache size: 4GB[0m
+1792116749.147 /home/apa222/REV/CHIME/run/bench_common.sh: line 305: 912070 Segmentation fault      (core dumped) ( cd "$BUILD_DIR" && env "${envs[@]}" stdbuf -oL -eL "${cmd[@]}" ) 2>&1
+1792116749.147      912071 Done                    | tee "$log"
+1792116749.147      912072 Done                    | if [[ "${SHOW_LOAD:-0}" == 1 ]]; then
+1792116749.147     cat;
+1792116749.147 else
+1792116749.147     { grep --line-buffered -vE '^[[:space:]]*$|REMOTE CPU LOAD|^[[:space:]]*dir [0-9]+: active|AGGREGATE active|^\[CPU (compute|memory) *\]' || true; };
+1792116749.147 fi
+1792116749.148 CHIME fair: memory-threads=0 failed on compute; see /home/apa222/REV/fair/results/l2m_d_pull/chime/sweep_mt0/
+1792116749.148 !! chime failed on compute -- stopping. Stop the other server too (Ctrl-C),
+1792116749.148 !! then rerun both with a new RUN_ID, or SYSTEMS=<remaining systems>.
+1792116749.150 >> [cs-dis-srv06s] cleanup: stopping leftover newbench / micro_test / DART processes and memcached
+1792116752.415 !! block l2m_d_pull failed on compute. Fix it, then rerun this script with
+1792116752.415 !! SKIP_TO=l2m_d_pull to resume from this block (on both servers).
