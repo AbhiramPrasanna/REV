@@ -78,6 +78,14 @@ role="${2:?usage: run_scaling.sh <cn|mn> <memory|compute>}"
 case "$axis" in cn|mn) ;; *) echo "axis must be cn, mn or build" >&2; exit 1 ;; esac
 case "$role" in memory|compute) ;; *) echo "role must be memory or compute" >&2; exit 1 ;; esac
 
+# the compute side runs on server 6 (it starts DEX's memcached on CMP_IP), the memory
+# side on server 8 (CHIME's on MEM_IP): stop at once on the wrong server
+want_ip="${CMP_IP:-10.30.1.6}"; [ "$role" = memory ] && want_ip="${MEM_IP:-10.30.1.8}"
+if [ "${DRY_RUN:-0}" != 1 ] && command -v ip > /dev/null && ! ip -o -4 addr show | grep -qw "$want_ip"; then
+  echo "the $role side runs on the server with $want_ip (memory: server 8, compute: server 6); this one has: $(ip -o -4 addr show | awk '{print $4}' | tr '
+' ' ')" >&2
+  exit 1
+fi
 SCALE_ID="${SCALE_ID:-sc_$axis}"
 SYSTEMS="${SYSTEMS:-dex dexpush chime chimepush chimeleaf}"
 ONLY="${ONLY:-lookups scans writes}"
@@ -103,7 +111,8 @@ blocks_for() {   # system
   local pt="point-uniform point-zipf" rg="range-uniform" lk="point-uniform"
   [ "${SMOKE:-0}" = 1 ] && pt="point-uniform"
   local all=("lookups|0|0|0|$pt" "scans|0|0|0|$rg" "writes|25|25|0|$pt" "lkscan|0|0|50|$lk")
-  [ "$1" = chimeleaf ] && all=("lookups|0|0|0|$pt")
+  # hot leaves pay only under skew (Sec. 7.2, Fig. 14): a short run checks it on Zipf
+  [ "$1" = chimeleaf ] && all=("lookups|0|0|0|$([ "${SMOKE:-0}" = 1 ] && echo point-zipf || echo "$pt")")
   local b; for b in "${all[@]}"; do [[ " $ONLY " == *" ${b%%|*} "* ]] && echo "$b"; done
 }
 
@@ -122,6 +131,7 @@ point_layout() {   # n -> sets NCN NMN THREADS MN_DSM_GB and the workers per mem
   else PT_MT="$PUSH_MT"; fi
 }
 
+cell_min() { case "$1" in dex*) echo 3 ;; *) echo 6 ;; esac; }   # minutes a cell, Lesson 3's runs (loading 60M keys dominates)
 count_cells() {   # system mts -> cells of one point
   local n=0 b wl c m
   while IFS= read -r b; do
@@ -132,17 +142,17 @@ count_cells() {   # system mts -> cells of one point
 }
 
 log=~/"${SCALE_ID}_${role}.out"
-total=0
+total=0; mins=0
 for p in $POINTS; do
   point_layout "$p" || exit 1
   for s in $SYSTEMS; do
     case "$s" in dex|chime) m=0 ;; *) m="$PT_MT" ;; esac
-    total=$((total + $(count_cells "$s" "$m")))
+    n=$(count_cells "$s" "$m"); total=$((total + n)); mins=$((mins + n * $(cell_min "$s")))
   done
 done
 {
 echo "== scaling '$axis' ($role) SCALE_ID=$SCALE_ID: points [$POINTS], systems [$SYSTEMS], blocks [$ONLY], caches [$CACHES] MB, ${OPS_M}M ops after ${WARMUP_M}M warmup"
-echo "   $total cells in all (about $((total * 4 / 60)) h $((total * 4 % 60)) min at ~4 min a cell) -> fair/results/${SCALE_ID}_c*m*/  log $log"
+echo "   $total cells in all, about $((mins / 60)) h $((mins % 60)) min (DEX ~3, CHIME ~6 min a cell) -> fair/results/${SCALE_ID}_c*m*/  log $log"
 } | tee -a "$log"
 
 for p in $POINTS; do
