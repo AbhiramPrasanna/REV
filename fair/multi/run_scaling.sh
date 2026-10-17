@@ -40,8 +40,8 @@
 #   server 6:  bash fair/multi/run_scaling.sh cn compute
 #   then the same with mn. DRY_RUN=1 prints the plan and runs nothing.
 #   SMOKE=1: the largest point (4 + 1 or 2 + 4; SMOKE_POINTS to change), every
-#   system and block, one short uniform cell each (27 MB, 4 workers, 2M warmup +
-#   3M ops) -- a check that each configuration starts, runs and answers correctly
+#   system and block, short cells (27 MB, 4 workers, 2M warmup + 3M ops; lookups
+#   uniform and Zipfian, the rest uniform, the leaf cache Zipfian) -- a check that each configuration starts, runs and answers correctly
 #   before the long run. Results under <SCALE_ID>_smoke_c*m*.
 #
 # Variables: SCALE_ID (default sc_cn / sc_mn) CN_POINTS ("1 2 4") MN_POINTS ("1 2 4")
@@ -108,9 +108,11 @@ export OPS_M WARMUP_M
 
 # block | UPDATE_PCT | INSERT_PCT | SCAN_PCT | workloads
 blocks_for() {   # system
-  local pt="point-uniform point-zipf" rg="range-uniform" lk="point-uniform"
-  [ "${SMOKE:-0}" = 1 ] && pt="point-uniform"
-  local all=("lookups|0|0|0|$pt" "scans|0|0|0|$rg" "writes|25|25|0|$pt" "lkscan|0|0|50|$lk")
+  # SMOKE keeps both key distributions for lookups (each system against the others on
+  # Zipf too, which the leaf cache needs) and runs writes on uniform keys only
+  local pt="point-uniform point-zipf" wr="point-uniform point-zipf" rg="range-uniform" lk="point-uniform"
+  [ "${SMOKE:-0}" = 1 ] && wr="point-uniform"
+  local all=("lookups|0|0|0|$pt" "scans|0|0|0|$rg" "writes|25|25|0|$wr" "lkscan|0|0|50|$lk")
   # hot leaves pay only under skew (Sec. 7.2, Fig. 14): a short run checks it on Zipf
   [ "$1" = chimeleaf ] && all=("lookups|0|0|0|$([ "${SMOKE:-0}" = 1 ] && echo point-zipf || echo "$pt")")
   local b; for b in "${all[@]}"; do [[ " $ONLY " == *" ${b%%|*} "* ]] && echo "$b"; done
